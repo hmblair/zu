@@ -1,0 +1,121 @@
+#!/bin/zsh
+
+PATHDIR=~/.paths
+mkdir -p "$PATHDIR"
+
+PARENT=${0:A:h}
+source $PARENT/common
+
+# Managed paths
+
+paths() {
+  cat $PATHDIR/*
+}
+
+# System paths
+
+sys-path() {
+  cat /etc/paths /etc/paths.d/*
+}
+
+contains() {
+  echo "$1" | grep -Fxq "$2"
+}
+
+path-to-file() {
+  echo $PATH | tr ':' '\n' | grep -v '^$'
+}
+
+file-to-path() {
+  _PATHS=()
+  while read -r line; do
+    _PATHS+=("${line/#\~/$HOME}")
+  done < <(cat $@)
+  echo $(IFS=':'; echo "${_PATHS[*]}")
+}
+
+remove-dups() {
+  STR=$(path-to-file $1)
+  STR=$(echo "$STR" | awk '!seen[$0]++')
+  echo $(echo $STR | file-to-path)
+}
+
+path-read() {
+  export PATH=$PATH:$(file-to-path $@)
+}
+
+_append() {
+  if grep -Fxq "$1" "$2" 2>/dev/null; then
+    echo "Warning: $1 is already in $2"
+  else
+    echo "$1" >> "$2"
+  fi
+}
+
+path-add() {
+  if [[ $# -eq 0 ]]; then
+    echo "Error: no path to add."
+    return
+  fi
+  for p in "$@"; do
+    VAR=${p:A}
+    if [ -z "$VAR" ]; then
+      echo "Error: '$p' does not exist or is invalid"
+      continue
+    fi
+
+    echo "Select a group for '$VAR':"
+    groups=($PATHDIR/*)
+    menu ${groups[@]:t}
+    group=${groups[$(($? + 1))]}
+    echo
+
+    _append $VAR $group
+  done
+}
+
+path-list() {
+  PTH="$(paths)"
+  SYS="$(sys-path)"
+  path-to-file | while read -r VAR; do
+    FULL=${VAR:A}
+    if [ -d "$FULL" ]; then
+      PR="$FULL"
+    else
+      PR="${ST}$VAR${NST}"
+    fi
+
+    if contains "$PTH" "$VAR"; then
+      ICON="${GREEN}󱋻${NC}"
+    elif contains "$SYS" "$VAR"; then
+      ICON="${YELLOW}󰼆${NC}"
+    else
+      ICON="${RED}󰼈${NC}"
+    fi
+
+    echo -e "${ICON} ${PR}"
+  done
+}
+
+path-dir() {
+  echo $PATHDIR
+}
+
+case "$1" in
+  "read")
+    path-read "$PATHDIR"/*
+    ;;
+  "add")
+    shift
+    path-add "$@"
+    ;;
+  "list")
+    path-list
+    ;;
+  "dir")
+    path-dir
+    ;;
+  *)
+    echo "Usage: $(basename $0) {read|add|list|dir}"
+    ;;
+esac

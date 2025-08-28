@@ -1,0 +1,6 @@
+#!/bin/zsh
+
+PARENT=${0:A:h}
+source $PARENT/common
+
+df -H / | awk -v red="$RED" -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'

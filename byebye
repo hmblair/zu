@@ -1,0 +1,23 @@
+#!/bin/zsh
+
+PARENT=${0:A:h}
+source $PARENT/common
+
+total-size() {
+  du -hscL $@ | tail -n1 | awk '{print $1}'
+}
+
+size=$(total-size $SCDIR $DLDIR $HOME/.trash)
+echo "The following ($size) will be removed:"
+l "$SCDIR"
+l "$DLDIR"
+l "$HOME/.trash"
+echo -n "Are you sure? (y/n): "
+read choice
+case "$choice" in
+    y|Y|yes|YES ) ;;
+    * ) echo "Aborting."; return 1;;
+esac
+rm -rf "$SCDIR"/*
+rm -rf "$DLDIR"/*
+rm -rf "$HOME/.trash"/*

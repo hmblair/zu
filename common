@@ -1,0 +1,82 @@
+#!/bin/zsh
+
+# ANSI colour tokens
+
+BLACK='\033[0;30m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+GREY='\033[90m'
+
+YELLOW_B='\033[1;33m'
+BLUE_B='\033[1;34m'
+
+BOLD='\033[1;37m'
+NC='\033[0m'
+
+# Strikethrough tokens
+
+ST='\e[9m'
+NST='\e[0m'
+
+# Menu selector function
+
+function menu {
+
+  _blink_on()     { echo -ne "\033[?25h"; }
+  _blink_off()    { echo -ne "\033[?25l"; }
+  _move_up()      { echo -ne "\033[${1:-1}A"; }
+  _other_opt()    { echo -ne "   $1 "; }
+  _selected_opt() { echo -ne " ${BOLD}→ $1${NC} "; }
+  _input() {
+    read -s -k1 key
+    case $key in
+      $'\e')
+        read -s -k2 key
+        case $key in
+          '[A') echo up;;
+          '[B') echo down;;
+        esac
+        ;;
+      $'\n'|$'\r') echo enter;;
+    esac
+  }
+
+  for opt in "$@"; do printf "\n"; done
+
+  trap "_blink_on; stty echo; printf '\n'; exit" 2
+  _blink_off
+
+  local curr=0
+  while true; do
+
+    _move_up $#
+    local idx=0
+    for opt; do
+      echo
+      if [ $idx -eq $curr ]; then
+        _selected_opt "$opt"
+      else
+        _other_opt "$opt"
+      fi
+      ((idx++))
+    done
+
+    case `_input` in
+      enter) break;;
+      up)    ((curr--));
+             if [ $curr -lt 0 ]; then curr=$(($# - 1)); fi;;
+      down)  ((curr++));
+             if [ $curr -ge $# ]; then curr=0; fi;;
+    esac
+
+  done
+
+  echo
+  _blink_on
+
+  return $curr
+
+}
