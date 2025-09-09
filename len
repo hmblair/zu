@@ -1,5 +1,11 @@
 #!/bin/zsh
 
-for var in "$@"; do
-  echo ${#var}
-done
+if [ $# -eq 0 ]; then
+  while IFS= read -r line; do
+    echo ${#line}
+  done
+else
+  for var in "$@"; do
+    echo ${#var}
+  done
+fi
