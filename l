@@ -22,6 +22,10 @@ while [[ $# -gt 0 ]]; do
       DEPTH="$2"
       shift 2
       ;;
+    --tree)
+      DEPTH=$(getconf PATH_MAX /)
+      shift
+      ;;
     -a)
       HIDDEN=1
       shift
