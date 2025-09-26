@@ -9,7 +9,7 @@ HIDDEN=0
 DIRECTORIES=()
 
 print-usage() {
-  echo "Usage: ${SCRIPT} [-ah] [--depth INT] [FILE ...]"
+  echo "Usage: ${SCRIPT} [-ah] [--depth INT | --tree] [FILE ...]"
 }
 
 while [[ $# -gt 0 ]]; do
