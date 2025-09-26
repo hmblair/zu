@@ -9,9 +9,9 @@ total-size() {
 
 size=$(total-size $SCDIR $DLDIR $HOME/.trash)
 echo "The following ($size) will be removed:"
-l "$SCDIR"
-l "$DLDIR"
-l "$HOME/.trash"
+l --tree "$SCDIR"
+l --tree "$DLDIR"
+l --tree "$HOME/.trash"
 echo -n "Are you sure? (y/n): "
 read choice
 case "$choice" in
