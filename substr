@@ -9,7 +9,17 @@ string="$1"
 start="$2"
 end="$3"
 
-if [ "$start" -lt 0 ] || [ "$end" -lt 0 ] || [ "$start" -gt "$end" ]; then
+str_len=${#string}
+
+if [ "$start" -lt 0 ]; then
+  start=$((str_len + start))
+fi
+
+if [ "$end" -lt 0 ]; then
+  end=$((str_len + end))
+fi
+
+if [ "$start" -lt 0 ] || [ "$end" -lt 0 ] || [ "$start" -gt "$end" ] || [ "$start" -ge "$str_len" ]; then
   echo "Error: Invalid position values"
   exit 1
 fi
