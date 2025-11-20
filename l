@@ -6,10 +6,11 @@ source $PARENT/common
 
 DEPTH=1
 HIDDEN=0
+SIZES=0
 DIRECTORIES=()
 
 print-usage() {
-  echo "Usage: ${SCRIPT} [-ah] [--depth INT | --tree] [FILE ...]"
+  echo "Usage: ${SCRIPT} [-ahs] [--depth INT | --tree] [FILE ...]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -24,6 +25,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tree)
       DEPTH=$(getconf PATH_MAX /)
+      shift
+      ;;
+    -s)
+      SIZES=1
       shift
       ;;
     -a)
@@ -107,10 +112,16 @@ print-line() {
   fi
   char+="${NC}"
 
+  OUT="${char}${COLOUR}${ICON} ${line:t}${NC}"
+  if [[ $SIZES -gt 0 ]]; then
+    size=$(du -hs ${line} | awk '{print $1}')
+    OUT+=" (${size})"
+  fi
+
   if [[ -z $TARGET ]]; then
-    echo "${char}${COLOUR}${ICON} ${line:t}${NC}"
+    echo "${OUT}"
   else
-    echo "${char}${COLOUR}${ICON} ${line:t} ${NC}${COLOUR} ${TARGET/#$HOME/~}${NC}"
+    echo "${OUT}${COLOUR} ${TARGET/#$HOME/~}${NC}"
   fi
 
 }
