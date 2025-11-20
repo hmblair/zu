@@ -1,0 +1,5 @@
+#!/bin/zsh
+
+IP=$(echo $SSH_CONNECTION | awk '{print $3}')
+[[ -n "$IP" ]] || { echo "Error: No SSH connection" >&2; exit 1; }
+echo $(whoami)@${IP}:$(pwd)
