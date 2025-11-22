@@ -1,0 +1,19 @@
+#!/bin/zsh
+
+cmd=""
+if command -v pbcopy >/dev/null 2>&1; then
+    cmd="pbcopy"
+elif command -v xclip >/dev/null 2>&1; then
+    cmd="xclip -selection clipboard"
+elif command -v wl-copy >/dev/null 2>&1; then
+    cmd="wl-copy"
+else
+    echo "No clipboard utility found" >&2
+    exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+    eval ${cmd}
+else
+    cat "$@" | eval ${cmd}
+fi
