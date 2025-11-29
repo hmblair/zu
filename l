@@ -15,6 +15,14 @@ print-usage() {
 }
 
 while [[ $# -gt 0 ]]; do
+  # Expand combined short flags (e.g., -as -> -a -s)
+  if [[ $1 =~ ^-[a-zA-Z]{2,}$ ]]; then
+    flags="${1#-}"
+    shift
+    for ((i=${#flags}; i>0; i--)); do
+      set -- "-${flags:$((i-1)):1}" "$@"
+    done
+  fi
   case $1 in
     -h|--help)
       print-usage
@@ -41,7 +49,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -*)
-      echo "Unknown option: $1"
+      echo "${RED}Unknown option:${NC} $1"
       print-usage
       exit 1
       ;;
@@ -49,7 +57,7 @@ while [[ $# -gt 0 ]]; do
       if [[ -e $1 ]]; then
         DIRECTORIES+=("$1")
       else
-        echo "Error: '$1' does not exist"
+        echo "${RED}Error:${NC} '$1' does not exist"
         exit 1
       fi
       shift
