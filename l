@@ -7,10 +7,11 @@ source $PARENT/common
 DEPTH=1
 HIDDEN=0
 SIZES=0
+COUNT_LINES=0
 DIRECTORIES=()
 
 print-usage() {
-  echo "Usage: ${SCRIPT} [-ahs] [--depth INT | --tree] [FILE ...]"
+  echo "Usage: ${SCRIPT} [-ahls] [--depth INT | --tree] [FILE ...]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -s)
       SIZES=1
+      shift
+      ;;
+    -l)
+      COUNT_LINES=1
       shift
       ;;
     -a)
@@ -116,6 +121,9 @@ print-line() {
   if [[ $SIZES -gt 0 ]]; then
     size=$(du -hs ${line} | awk '{print $1}')
     OUT+=" (${size})"
+  elif [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
+    linecount=$(wc -l < ${line} 2>/dev/null | tr -d ' ' || echo "0")
+    OUT+=" (${linecount} lines)"
   fi
 
   if [[ -z $TARGET ]]; then
