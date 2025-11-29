@@ -1,0 +1,428 @@
+#!/bin/zsh
+
+# blkd - Website Blocker Daemon
+# Runs as root via launchd, manages pf firewall rules
+# Periodically verifies rules are in place and removes expired blocks
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+BLOCK_DIR="$HOME/.blk"
+DATA_FILE="$BLOCK_DIR/data.enc"
+SALT_FILE="$BLOCK_DIR/salt"
+TRIGGER_FILE="$BLOCK_DIR/trigger"
+ANCHOR_NAME="com.zu.blk"
+ANCHOR_FILE="/etc/pf.anchors/$ANCHOR_NAME"
+DAEMON_PASS_FILE="/var/root/.blk_pass"
+
+CHECK_INTERVAL=5  # seconds between rule verification
+LOG_PREFIX="[blkd]"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+log() {
+    echo "$LOG_PREFIX $(date '+%Y-%m-%d %H:%M:%S') $1"
+}
+
+log_error() {
+    echo "$LOG_PREFIX $(date '+%Y-%m-%d %H:%M:%S') ERROR: $1" >&2
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Password and Decryption
+# ─────────────────────────────────────────────────────────────────────────────
+
+get_password() {
+    # Retrieve password from root-only file (handle with or without trailing newline)
+    tr -d '\n' < "$DAEMON_PASS_FILE" 2>/dev/null
+}
+
+decrypt_data() {
+    local password="$1"
+    if [[ ! -f "$DATA_FILE" ]]; then
+        echo "{}"
+        return 0
+    fi
+    cat "$DATA_FILE" | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A 2>/dev/null
+}
+
+encrypt_data() {
+    local data="$1"
+    local password="$2"
+    printf '%s' "$data" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schedule Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Parse time string (HH:MM) to minutes since midnight
+parse_time() {
+    local time="$1"
+    local hours="${time%%:*}"
+    local mins="${time##*:}"
+    # Remove leading zeros to avoid octal interpretation
+    hours=$((10#$hours))
+    mins=$((10#$mins))
+    echo $((hours * 60 + mins))
+}
+
+# Check if current time is within a schedule
+is_schedule_active() {
+    local schedule="$1"
+    local start="${schedule%%-*}"
+    local end="${schedule##*-}"
+
+    local start_mins=$(parse_time "$start")
+    local end_mins=$(parse_time "$end")
+    local now_mins=$(( $(date +%H) * 60 + $(date +%M) ))
+    # Remove leading zeros
+    now_mins=$((10#$now_mins))
+
+    if [[ $start_mins -le $end_mins ]]; then
+        # Normal range (e.g., 09:00-17:00)
+        [[ $now_mins -ge $start_mins && $now_mins -lt $end_mins ]]
+    else
+        # Crosses midnight (e.g., 22:00-06:00)
+        [[ $now_mins -ge $start_mins || $now_mins -lt $end_mins ]]
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain Resolution
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Check if a pattern matches a domain
+pattern_matches() {
+    local pattern="$1"
+    local domain="$2"
+    # Convert wildcard pattern to regex: * becomes .*
+    local regex="^${pattern//\*/.*}$"
+    [[ "$domain" =~ $regex ]]
+}
+
+# Check if entry is a wildcard pattern
+is_wildcard() {
+    [[ "$1" == *"*"* ]]
+}
+
+# Expand wildcard pattern to concrete domains
+expand_wildcard() {
+    local pattern="$1"
+    local domains=""
+
+    # Extract the core part (remove wildcards)
+    local core="${pattern//\*/}"
+    core="${core#.}"  # Remove leading dot
+    core="${core%.}"  # Remove trailing dot
+
+    # Common TLDs to try
+    local tlds=("com" "net" "org" "io" "co")
+
+    # Common subdomains to try
+    local subdomains=("" "www" "old" "new" "m" "mobile" "api" "cdn" "static" "assets" "i" "v" "app")
+
+    # If pattern is like *reddit*, try reddit with various TLDs
+    if [[ "$pattern" == \** ]] && [[ "$pattern" == *\* ]]; then
+        # Pattern like *reddit* - try as base domain with TLDs
+        for tld in "${tlds[@]}"; do
+            for sub in "${subdomains[@]}"; do
+                if [[ -n "$sub" ]]; then
+                    domains+="${sub}.${core}.${tld}"$'\n'
+                else
+                    domains+="${core}.${tld}"$'\n'
+                fi
+            done
+        done
+    elif [[ "$pattern" == \** ]]; then
+        # Pattern like *reddit.com - try various subdomains
+        local base="${pattern#\*}"
+        base="${base#.}"
+        for sub in "${subdomains[@]}"; do
+            if [[ -n "$sub" ]]; then
+                domains+="${sub}.${base}"$'\n'
+            else
+                domains+="${base}"$'\n'
+            fi
+        done
+    elif [[ "$pattern" == *\* ]]; then
+        # Pattern like reddit.* - try various TLDs
+        local base="${pattern%\*}"
+        base="${base%.}"
+        for tld in "${tlds[@]}"; do
+            for sub in "${subdomains[@]}"; do
+                if [[ -n "$sub" ]]; then
+                    domains+="${sub}.${base}.${tld}"$'\n'
+                else
+                    domains+="${base}.${tld}"$'\n'
+                fi
+            done
+        done
+    fi
+
+    echo "$domains" | grep -v '^$' | sort -u
+}
+
+resolve_domain() {
+    local domain="$1"
+    # Get both A and AAAA records
+    local ips=""
+
+    # IPv4
+    local ipv4=$(dig +short A "$domain" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [[ -n "$ipv4" ]] && ips="$ipv4"
+
+    # Also resolve www subdomain if not already www
+    if [[ ! "$domain" =~ ^www\. ]]; then
+        local www_ipv4=$(dig +short A "www.$domain" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+        [[ -n "$www_ipv4" ]] && ips="$ips"$'\n'"$www_ipv4"
+    fi
+
+    # Return unique IPs
+    echo "$ips" | sort -u | grep -v '^$'
+}
+
+# Resolve a domain or wildcard pattern to IPs
+resolve_entry() {
+    local entry="$1"
+
+    if is_wildcard "$entry"; then
+        # Expand wildcard and resolve each resulting domain
+        local expanded=$(expand_wildcard "$entry")
+        local all_ips=""
+        while IFS= read -r domain; do
+            [[ -z "$domain" ]] && continue
+            local ips=$(resolve_domain "$domain")
+            [[ -n "$ips" ]] && all_ips+="$ips"$'\n'
+        done <<< "$expanded"
+        echo "$all_ips" | sort -u | grep -v '^$'
+    else
+        resolve_domain "$entry"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PF Firewall Management
+# ─────────────────────────────────────────────────────────────────────────────
+
+ensure_anchor_in_pf_conf() {
+    # Check if our anchor is in pf.conf
+    if ! grep -q "anchor \"$ANCHOR_NAME\"" /etc/pf.conf 2>/dev/null; then
+        log "Adding anchor to /etc/pf.conf"
+        # Add anchor after the last anchor line, or at the end
+        if grep -q "^anchor" /etc/pf.conf; then
+            # Insert after last anchor line
+            local last_anchor_line=$(grep -n "^anchor" /etc/pf.conf | tail -1 | cut -d: -f1)
+            sed -i '' "${last_anchor_line}a\\
+anchor \"$ANCHOR_NAME\"
+" /etc/pf.conf
+        else
+            # Append to end
+            echo "anchor \"$ANCHOR_NAME\"" >> /etc/pf.conf
+        fi
+        # Reload pf.conf
+        pfctl -f /etc/pf.conf 2>/dev/null
+    fi
+}
+
+generate_pf_rules() {
+    local data="$1"
+    local now=$(date +%s)
+    local rules=""
+
+    # Parse JSON and get entries that should be active now
+    # Handles both timed blocks (expiry timestamp) and daily schedules
+    local entries=$(echo "$data" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+now = $now
+for entry, val in data.items():
+    if isinstance(val, (int, float)):
+        # Timed block (simple format) - check if not expired
+        if val > now:
+            print(entry)
+    elif isinstance(val, dict) and 'expiry' in val:
+        # Timed block (hidden format) - check if not expired
+        if val['expiry'] > now:
+            print(entry)
+    elif isinstance(val, dict) and 'schedule' in val:
+        # Daily schedule - print entry|schedule for shell to check
+        print(f'{entry}|{val[\"schedule\"]}')
+" 2>/dev/null)
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        local entry
+        local schedule=""
+
+        if [[ "$line" == *"|"* ]]; then
+            # Daily schedule entry
+            entry="${line%%|*}"
+            schedule="${line#*|}"
+            # Check if schedule is currently active
+            if ! is_schedule_active "$schedule"; then
+                continue
+            fi
+        else
+            # Timed block entry
+            entry="$line"
+        fi
+
+        local ips=$(resolve_entry "$entry")
+        while IFS= read -r ip; do
+            [[ -z "$ip" ]] && continue
+            rules+="block return out quick on en0 to $ip"$'\n'
+            rules+="block return out quick on en1 to $ip"$'\n'
+            # Also block on other common interfaces
+            rules+="block return out quick on utun0 to $ip"$'\n'
+            rules+="block return out quick on utun1 to $ip"$'\n'
+        done <<< "$ips"
+    done <<< "$entries"
+
+    echo "$rules"
+}
+
+apply_pf_rules() {
+    local rules="$1"
+
+    # Write rules to anchor file
+    echo "$rules" > "$ANCHOR_FILE"
+    chmod 644 "$ANCHOR_FILE"
+
+    # Load the anchor
+    if [[ -n "$rules" ]]; then
+        pfctl -a "$ANCHOR_NAME" -f "$ANCHOR_FILE" 2>/dev/null
+        # Ensure pf is enabled
+        pfctl -e 2>/dev/null
+    else
+        # No rules, flush the anchor
+        pfctl -a "$ANCHOR_NAME" -F all 2>/dev/null
+    fi
+}
+
+get_current_rules() {
+    pfctl -a "$ANCHOR_NAME" -s rules 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Block Management
+# ─────────────────────────────────────────────────────────────────────────────
+
+remove_expired_blocks() {
+    local password="$1"
+    local data="$2"
+    local now=$(date +%s)
+
+    # Remove expired entries
+    local new_data=$(echo "$data" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+now = $now
+active = {}
+for k, v in data.items():
+    if isinstance(v, (int, float)):
+        # Simple timed block
+        if v > now:
+            active[k] = v
+    elif isinstance(v, dict) and 'expiry' in v:
+        # Hidden timed block
+        if v['expiry'] > now:
+            active[k] = v
+    elif isinstance(v, dict) and 'schedule' in v:
+        # Daily schedule - always keep
+        active[k] = v
+print(json.dumps(active))
+" 2>/dev/null)
+
+    if [[ "$new_data" != "$data" ]]; then
+        log "Removing expired blocks"
+        encrypt_data "$new_data" "$password" > "$DATA_FILE"
+        echo "$new_data"
+    else
+        echo "$data"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main Loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    log "Starting blkd daemon"
+
+    # Ensure anchor is in pf.conf
+    ensure_anchor_in_pf_conf
+
+    # Get password from file
+    local password=$(get_password)
+    if [[ -z "$password" ]]; then
+        log_error "Cannot retrieve password from $DAEMON_PASS_FILE. Exiting."
+        exit 1
+    fi
+    log "Password retrieved successfully (length: ${#password})"
+
+    local last_trigger_mtime=""
+    local expected_rules=""
+
+    while true; do
+        # Check if trigger file was modified (new block added)
+        local current_trigger_mtime=""
+        if [[ -f "$TRIGGER_FILE" ]]; then
+            current_trigger_mtime=$(stat -f %m "$TRIGGER_FILE" 2>/dev/null)
+        fi
+
+        local reload_needed=false
+
+        if [[ "$current_trigger_mtime" != "$last_trigger_mtime" ]]; then
+            log "Trigger file changed, reloading blocks"
+            reload_needed=true
+            last_trigger_mtime="$current_trigger_mtime"
+        fi
+
+        # Decrypt and process blocks
+        local data=$(decrypt_data "$password")
+        if [[ -z "$data" ]] || [[ "$data" == "{}" ]]; then
+            # No blocks, ensure rules are cleared
+            if [[ -n "$expected_rules" ]]; then
+                log "No active blocks, clearing rules"
+                apply_pf_rules ""
+                expected_rules=""
+            fi
+        else
+            # Remove expired blocks
+            data=$(remove_expired_blocks "$password" "$data")
+
+            # Generate expected rules
+            local new_rules=$(generate_pf_rules "$data")
+
+            # Check if rules need updating
+            if [[ "$reload_needed" == "true" ]] || [[ "$new_rules" != "$expected_rules" ]]; then
+                log "Updating pf rules"
+                apply_pf_rules "$new_rules"
+                expected_rules="$new_rules"
+            fi
+
+            # Verify rules are still in place (tamper detection)
+            local current_rules=$(get_current_rules)
+            if [[ -n "$expected_rules" ]] && [[ "$current_rules" != *"block return"* ]]; then
+                log "Rules were cleared externally, re-applying"
+                apply_pf_rules "$expected_rules"
+            fi
+        fi
+
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Wait a moment for system to stabilize after boot
+sleep 2
+
+main
