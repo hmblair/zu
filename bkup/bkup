@@ -1,0 +1,341 @@
+#!/bin/zsh
+
+# bkup - Borg backup CLI wrapper
+# Creates borg backups to a remote repository over SSH
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# Configuration
+CONFIG_DIR="$HOME/.config/bkup"
+PASS_FILE="$CONFIG_DIR/passphrase"
+PLIST_NAME="com.zu.bkup"
+PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo "Usage: bkup <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  run [options] <dirs...>   Run a backup"
+    echo "  setup <script>            Install launchd job for a backup script"
+    echo "  uninstall                 Remove launchd job and passphrase"
+    echo ""
+    echo "Run options:"
+    echo "  -u, --user <user>         SSH user for remote host"
+    echo "  -H, --host <host>         SSH hostname"
+    echo "  -d, --dest <dir>          Remote backup directory"
+    echo "  -l, --log-dir <dir>       Local log directory"
+    echo "  -e, --exclude <path>      Exclude path (can be repeated)"
+    echo ""
+    echo "Setup options:"
+    echo "  --hour <0-23>             Hour to run backup (default: 2)"
+    echo "  --minute <0-59>           Minute to run backup (default: 0)"
+    echo ""
+    echo "Examples:"
+    echo "  bkup run -u john -H backup.example.com -d /backups \\"
+    echo "    -l ~/logs -e ~/data ~/documents ~/projects"
+    echo ""
+    echo "  bkup setup ./backup --hour 3 --minute 30"
+}
+
+error() {
+    echo "${RED}Error:${NC} $1" >&2
+    exit 1
+}
+
+success() {
+    echo "${GREEN}$1${NC}"
+}
+
+info() {
+    echo "${CYAN}$1${NC}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_run() {
+    # Parse arguments
+    local REMOTE_USER=""
+    local HOST=""
+    local HOST_DIR=""
+    local LOG_DIR=""
+    local EXCLUDES=()
+    local DIRS=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -u|--user)
+                REMOTE_USER="$2"
+                shift 2
+                ;;
+            -H|--host)
+                HOST="$2"
+                shift 2
+                ;;
+            -d|--dest)
+                HOST_DIR="$2"
+                shift 2
+                ;;
+            -l|--log-dir)
+                LOG_DIR="$2"
+                shift 2
+                ;;
+            -e|--exclude)
+                EXCLUDES+=("$2")
+                shift 2
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                DIRS+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    [[ -z "$REMOTE_USER" ]] && error "Missing required option: --user"
+    [[ -z "$HOST" ]] && error "Missing required option: --host"
+    [[ -z "$HOST_DIR" ]] && error "Missing required option: --dest"
+    [[ -z "$LOG_DIR" ]] && error "Missing required option: --log-dir"
+    [[ ${#DIRS[@]} -eq 0 ]] && error "No directories to backup specified"
+
+    # Source passphrase if available
+    if [[ -f "$PASS_FILE" ]]; then
+        export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+    elif [[ -z "$BORG_PASSPHRASE" ]]; then
+        error "No passphrase found. Run 'bkup setup' or set BORG_PASSPHRASE."
+    fi
+
+    # Set up date variables
+    local MONTH=$(date +%Y-%m)
+    local DAY=$(date +%d)
+
+    # Create log directory
+    local LOG_PATH="$LOG_DIR/$MONTH"
+    mkdir -p "$LOG_PATH"
+
+    # Build backup destination
+    local BACKUP_DEST="$REMOTE_USER@$HOST:$HOST_DIR::{now:%Y-%m-%d}"
+
+    # Build exclude arguments
+    local EXCLUDE_ARGS=()
+    for exclude in "${EXCLUDES[@]}"; do
+        EXCLUDE_ARGS+=(--exclude "$exclude")
+    done
+
+    # Run backup
+    info "Starting backup to $REMOTE_USER@$HOST:$HOST_DIR"
+
+    /opt/homebrew/bin/borg create --stats --progress \
+        "$BACKUP_DEST" \
+        "${EXCLUDE_ARGS[@]}" \
+        "${DIRS[@]}" \
+        >"$LOG_PATH/borg-$DAY.log" \
+        2>&1
+
+    local RESULT=$?
+
+    if [[ $RESULT -eq 0 ]]; then
+        success "Backup completed successfully"
+    else
+        echo "${RED}Backup failed with exit code $RESULT${NC}" >&2
+    fi
+
+    # Delete logs older than one year
+    local CUTOFF=$(date -v -1y +%Y-%m)
+    for dir in "$LOG_DIR"/*; do
+        if [[ -d "$dir" && "$(basename "$dir")" < "$CUTOFF" ]]; then
+            rm -rf "$dir"
+        fi
+    done
+
+    return $RESULT
+}
+
+cmd_setup() {
+    local SCRIPT=""
+    local HOUR=2
+    local MINUTE=0
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --hour)
+                HOUR="$2"
+                shift 2
+                ;;
+            --minute)
+                MINUTE="$2"
+                shift 2
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                if [[ -z "$SCRIPT" ]]; then
+                    SCRIPT="$1"
+                else
+                    error "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -z "$SCRIPT" ]] && error "Usage: bkup setup <script> [--hour H] [--minute M]"
+
+    # Resolve script to absolute path
+    SCRIPT="${SCRIPT:A}"
+    [[ ! -f "$SCRIPT" ]] && error "Script not found: $SCRIPT"
+    [[ ! -x "$SCRIPT" ]] && error "Script not executable: $SCRIPT"
+
+    # Validate hour/minute
+    [[ ! "$HOUR" =~ ^[0-9]+$ ]] || [[ $HOUR -lt 0 ]] || [[ $HOUR -gt 23 ]] && \
+        error "Hour must be 0-23"
+    [[ ! "$MINUTE" =~ ^[0-9]+$ ]] || [[ $MINUTE -lt 0 ]] || [[ $MINUTE -gt 59 ]] && \
+        error "Minute must be 0-59"
+
+    info "Setting up bkup..."
+
+    # Check if already set up
+    if [[ -f "$PLIST_PATH" ]]; then
+        echo ""
+        read -q "confirm?Existing installation found. Overwrite? [y/N] "
+        echo ""
+        [[ "$confirm" != "y" ]] && exit 0
+        launchctl unload "$PLIST_PATH" 2>/dev/null
+    fi
+
+    # Prompt for passphrase
+    echo ""
+    echo "Enter your Borg repository passphrase."
+    echo "This will be stored in $PASS_FILE"
+    echo ""
+
+    local passphrase
+    local confirm_pass
+    read -s "passphrase?Passphrase: "
+    echo ""
+    read -s "confirm_pass?Confirm passphrase: "
+    echo ""
+
+    if [[ "$passphrase" != "$confirm_pass" ]]; then
+        error "Passphrases do not match."
+    fi
+
+    if [[ -z "$passphrase" ]]; then
+        error "Passphrase cannot be empty."
+    fi
+
+    # Create config directory and store passphrase
+    mkdir -p "$CONFIG_DIR"
+    chmod 700 "$CONFIG_DIR"
+    echo -n "$passphrase" > "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
+
+    # Create LaunchAgents directory if needed
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    # Generate plist
+    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>$PLIST_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>$SCRIPT</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$HOUR</integer>
+        <key>Minute</key>
+        <integer>$MINUTE</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/bkup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/bkup.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>$HOME</string>
+        <key>USER</key>
+        <string>$USER</string>
+    </dict>
+</dict>
+</plist>"
+
+    echo "$plist_content" > "$PLIST_PATH"
+    chmod 644 "$PLIST_PATH"
+
+    # Load the job
+    launchctl load "$PLIST_PATH"
+
+    echo ""
+    success "Setup complete!"
+    echo "Backup scheduled for $(printf '%02d:%02d' $HOUR $MINUTE) daily."
+    echo "Script: $SCRIPT"
+}
+
+cmd_uninstall() {
+    info "Uninstalling bkup..."
+
+    # Unload launchd job
+    if [[ -f "$PLIST_PATH" ]]; then
+        launchctl unload "$PLIST_PATH" 2>/dev/null
+        rm -f "$PLIST_PATH"
+        success "Removed launchd job"
+    else
+        echo "No launchd job found"
+    fi
+
+    # Remove config directory (contains passphrase)
+    if [[ -d "$CONFIG_DIR" ]]; then
+        rm -rf "$CONFIG_DIR"
+        success "Removed config directory"
+    else
+        echo "No config directory found"
+    fi
+
+    echo ""
+    success "Uninstall complete."
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    run)
+        shift
+        cmd_run "$@"
+        ;;
+    setup)
+        shift
+        cmd_setup "$@"
+        ;;
+    uninstall)
+        cmd_uninstall
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    "")
+        usage
+        ;;
+    *)
+        error "Unknown command: $1. Run 'bkup help' for usage."
+        ;;
+esac
