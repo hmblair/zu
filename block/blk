@@ -15,6 +15,7 @@ TRIGGER_FILE="$BLOCK_DIR/trigger"
 PLIST_NAME="com.zu.blkd"
 PLIST_PATH="/Library/LaunchDaemons/$PLIST_NAME.plist"
 DAEMON_PASS_FILE="/var/root/.blk_pass"
+OP_ITEM_NAME="blk"  # 1Password item name for storing password
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -73,6 +74,51 @@ warn() {
     echo "${YELLOW}$1${NC}"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 1Password integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Check if 1Password CLI is available
+op_available() {
+    command -v op &>/dev/null
+}
+
+# Get password from 1Password (returns empty string on failure)
+op_get_password() {
+    if ! op_available; then
+        return 1
+    fi
+    # Sign out first to force fresh Touch ID prompt every time
+    op signout --all 2>/dev/null
+    # Try to read password field from the item (triggers Touch ID)
+    local password
+    password=$(op item get "$OP_ITEM_NAME" --fields password --reveal 2>/dev/null)
+    if [[ $? -eq 0 ]] && [[ -n "$password" ]]; then
+        echo -n "$password"
+        return 0
+    fi
+    return 1
+}
+
+# Store password in 1Password
+op_store_password() {
+    local password="$1"
+    if ! op_available; then
+        return 1
+    fi
+    # Check if item already exists
+    if op item get "$OP_ITEM_NAME" &>/dev/null; then
+        # Update existing item
+        op item edit "$OP_ITEM_NAME" "password=$password" &>/dev/null
+    else
+        # Create new item
+        op item create --category=password --title="$OP_ITEM_NAME" "password=$password" &>/dev/null
+    fi
+    return $?
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Check if setup has been completed
 check_setup() {
     if [[ ! -f "$SALT_FILE" ]] || [[ ! -f "$DATA_FILE" ]]; then
@@ -80,13 +126,25 @@ check_setup() {
     fi
 }
 
-# Prompt for password (hidden input)
+# Get password - tries 1Password first, falls back to manual prompt
 prompt_password() {
     local prompt="${1:-Password: }"
     local password
+
+    # Try 1Password first (will trigger Touch ID if available)
+    if op_available; then
+        password=$(op_get_password)
+        if [[ $? -eq 0 ]] && [[ -n "$password" ]]; then
+            echo -n "$password"
+            return 0
+        fi
+        # 1Password failed (user cancelled, item not found, etc.) - fall through to manual
+    fi
+
+    # Manual password entry
     read -s "password?$prompt"
     echo "" >&2  # newline to stderr for terminal formatting
-    echo -n "$password"  # no trailing newline
+    echo -n "$password"
 }
 
 # Validate domain or pattern format
@@ -243,13 +301,17 @@ cmd_setup() {
     mkdir -p "$BLOCK_DIR"
     chmod 700 "$BLOCK_DIR"
 
-    # Prompt for password
+    # Prompt for password (direct prompt, not via prompt_password which tries 1Password)
     echo "Choose a password for encrypting your block list."
     echo "You will need this password to add blocks or view the list."
     echo ""
 
-    local password=$(prompt_password "Password: ")
-    local confirm=$(prompt_password "Confirm password: ")
+    local password
+    local confirm
+    read -s "password?Password: "
+    echo ""
+    read -s "confirm?Confirm password: "
+    echo ""
 
     if [[ "$password" != "$confirm" ]]; then
         rm -rf "$BLOCK_DIR"
@@ -259,6 +321,20 @@ cmd_setup() {
     if [[ -z "$password" ]]; then
         rm -rf "$BLOCK_DIR"
         error "Password cannot be empty."
+    fi
+
+    # Offer to store in 1Password if available
+    if op_available; then
+        echo ""
+        read -q "use_op?Store password in 1Password for Touch ID unlock? [y/N] "
+        echo ""
+        if [[ "$use_op" == "y" ]]; then
+            if op_store_password "$password"; then
+                success "Password stored in 1Password as '$OP_ITEM_NAME'"
+            else
+                warn "Failed to store in 1Password. You can add it manually later."
+            fi
+        fi
     fi
 
     # Generate salt

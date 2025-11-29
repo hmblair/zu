@@ -8,6 +8,7 @@ A command-line utility that blocks websites for a fixed period of time. Once blo
 - **No shortening**: Existing blocks cannot be overwritten with shorter durations
 - **Daily schedules**: Set recurring blocks (e.g., block social media during work hours)
 - **Hidden blocks**: Blocks can be hidden from the default list view
+- **1Password integration**: Unlock with Touch ID via 1Password CLI (optional)
 - **Private**: Block list is AES-256 encrypted, not stored in /etc/hosts or other visible locations
 - **Persistent**: Blocks survive reboots, process kills, and system restarts
 - **Tamper-resistant**: Daemon re-applies rules every 5 seconds if they're cleared
@@ -18,6 +19,7 @@ A command-line utility that blocks websites for a fixed period of time. Once blo
 - zsh
 - python3 (for JSON handling)
 - openssl (for encryption)
+- 1Password CLI (`op`) - optional, for Touch ID unlock
 
 ## Installation
 
@@ -39,6 +41,29 @@ This will:
 # Add to ~/.zshrc
 export PATH="$PATH:/path/to/blk"
 ```
+
+## 1Password Integration (Optional)
+
+If you have the [1Password CLI](https://developer.1password.com/docs/cli/) installed, you can unlock blk with Touch ID instead of typing your password.
+
+### During setup
+
+If `op` is detected during `blk setup`, you'll be asked if you want to store your password in 1Password. If you say yes, a new item named "blk" will be created with your password.
+
+### After setup
+
+If you didn't enable 1Password during setup, you can manually add your password:
+
+```bash
+op item create --category=password --title="blk" "password=YOUR_PASSWORD"
+```
+
+### How it works
+
+When you run any blk command that needs your password:
+1. blk checks if a "blk" item exists in 1Password
+2. If found, it retrieves the password (triggering Touch ID)
+3. If 1Password fails (not signed in, Touch ID cancelled, etc.), it falls back to manual password entry
 
 ## Usage
 
