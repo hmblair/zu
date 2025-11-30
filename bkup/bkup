@@ -4,6 +4,7 @@
 # Creates borg backups to a remote repository over SSH
 
 SCRIPT_DIR="${0:A:h}"
+SCRIPT_PATH="${0:A}"
 source "$SCRIPT_DIR/../common"
 
 # Configuration
@@ -420,7 +421,7 @@ with open('$config_file', 'w') as f:
 
     # Create launchd plist
     mkdir -p "$LAUNCH_AGENTS_DIR"
-    local BKUP_PATH="${0:A}"
+    local BKUP_PATH="$SCRIPT_PATH"
     local plist_file="$(plist_path "$NAME")"
 
     local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -797,7 +798,7 @@ with open('$config_file', 'w') as f:
     chmod 600 "$config_file"
 
     # Update plist
-    local BKUP_PATH="${0:A}"
+    local BKUP_PATH="$SCRIPT_PATH"
     local plist_file="$(plist_path "$NAME")"
 
     local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -1054,7 +1055,7 @@ with open('$new_config_file', 'w') as f:
 
     # Create plist
     mkdir -p "$LAUNCH_AGENTS_DIR"
-    local BKUP_PATH="${0:A}"
+    local BKUP_PATH="$SCRIPT_PATH"
     local plist_file="$(plist_path "$NAME")"
 
     local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -1171,6 +1172,35 @@ cmd_test() {
                 ok=false
             fi
         done
+
+        # Test schedule plist
+        local plist_file="$(plist_path "$name")"
+        local bkup_path="$SCRIPT_PATH"
+        printf "  Schedule plist... "
+        if [[ ! -f "$plist_file" ]]; then
+            echo "${RED}NOT FOUND${NC}"
+            ok=false
+        elif ! grep -q "<string>$bkup_path</string>" "$plist_file"; then
+            echo "${RED}WRONG PATH${NC} (run 'bkup edit $name' to fix)"
+            ok=false
+        else
+            echo "${GREEN}OK${NC}"
+        fi
+
+        # Test launchd status
+        printf "  Launchd job... "
+        local launchd_status=$(launchctl list "$PLIST_PREFIX.$name" 2>&1)
+        if [[ $? -ne 0 ]]; then
+            echo "${RED}NOT LOADED${NC} (run: launchctl load \"$plist_file\")"
+            ok=false
+        elif echo "$launchd_status" | grep -q '"LastExitStatus" = 127'; then
+            echo "${RED}LAST RUN FAILED${NC} (command not found)"
+            ok=false
+        elif echo "$launchd_status" | grep -q '"LastExitStatus" = [^0]'; then
+            echo "${YELLOW}LAST RUN HAD ERRORS${NC}"
+        else
+            echo "${GREEN}OK${NC}"
+        fi
 
         # Dry run
         if $ok; then
