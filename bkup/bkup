@@ -28,6 +28,7 @@ usage() {
     echo "  copy <source>                    Copy a backup as a new one"
     echo "  run <name>                       Run a backup manually"
     echo "  test [name]                      Test backup connectivity and paths"
+    echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
     echo "  remove <name>                    Remove a backup and its schedule"
     echo "  uninstall                        Remove passphrase and all backups"
@@ -519,6 +520,26 @@ cmd_run() {
         2>&1
 
     local RESULT=$?
+    local STATUS_DIR="$CONFIG_DIR/status"
+    mkdir -p "$STATUS_DIR"
+
+    # Record status
+    local status_file="$STATUS_DIR/$NAME.json"
+    local now=$(date +%s)
+    local status_text="success"
+    [[ $RESULT -ne 0 ]] && status_text="failed"
+
+    python3 -c "
+import json
+status = {
+    'timestamp': $now,
+    'status': '$status_text',
+    'exit_code': $RESULT,
+    'log': '$LOG_PATH/borg-$DAY.log'
+}
+with open('$status_file', 'w') as f:
+    json.dump(status, f)
+"
 
     if [[ $RESULT -eq 0 ]]; then
         success "Backup completed successfully"
@@ -535,6 +556,62 @@ cmd_run() {
     done
 
     return $RESULT
+}
+
+cmd_status() {
+    if [[ ! -d "$BACKUPS_DIR" ]] || [[ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]]; then
+        echo "No backup configurations found."
+        return
+    fi
+
+    local STATUS_DIR="$CONFIG_DIR/status"
+    local now=$(date +%s)
+    local has_failures=false
+
+    echo ""
+    printf "  ${BOLD}%-15s %-12s %s${NC}\n" "BACKUP" "STATUS" "LAST RUN"
+    echo "  ─────────────────────────────────────────────────"
+
+    for config_file in "$BACKUPS_DIR"/*.json; do
+        [[ ! -f "$config_file" ]] && continue
+        local name=$(basename "$config_file" .json)
+        local status_file="$STATUS_DIR/$name.json"
+
+        if [[ -f "$status_file" ]]; then
+            local status=$(python3 -c "import json; print(json.load(open('$status_file'))['status'])")
+            local timestamp=$(python3 -c "import json; print(json.load(open('$status_file'))['timestamp'])")
+            local log=$(python3 -c "import json; print(json.load(open('$status_file'))['log'])")
+
+            # Calculate relative time
+            local diff=$((now - timestamp))
+            local time_ago=""
+            if [[ $diff -lt 60 ]]; then
+                time_ago="just now"
+            elif [[ $diff -lt 3600 ]]; then
+                time_ago="$((diff / 60)) minutes ago"
+            elif [[ $diff -lt 86400 ]]; then
+                time_ago="$((diff / 3600)) hours ago"
+            else
+                time_ago="$((diff / 86400)) days ago"
+            fi
+
+            if [[ "$status" == "success" ]]; then
+                printf "  %-15s ${GREEN}%-12s${NC} %s\n" "$name" "✓ success" "$time_ago"
+            else
+                printf "  %-15s ${RED}%-12s${NC} %s\n" "$name" "✗ failed" "$time_ago"
+                printf "  ${GREY}%-15s log: %s${NC}\n" "" "$log"
+                has_failures=true
+            fi
+        else
+            printf "  %-15s ${YELLOW}%-12s${NC} %s\n" "$name" "? unknown" "never run"
+        fi
+    done
+    echo ""
+
+    if $has_failures; then
+        return 1
+    fi
+    return 0
 }
 
 cmd_list() {
@@ -1211,6 +1288,9 @@ case "${1:-}" in
         ;;
     test)
         cmd_test "$2"
+        ;;
+    status)
+        cmd_status
         ;;
     list)
         cmd_list
