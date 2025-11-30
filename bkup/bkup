@@ -8,9 +8,11 @@ source "$SCRIPT_DIR/../common"
 
 # Configuration
 CONFIG_DIR="$HOME/.config/bkup"
+BACKUPS_DIR="$CONFIG_DIR/backups"
 PASS_FILE="$CONFIG_DIR/passphrase"
-PLIST_NAME="com.zu.bkup"
-PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+DEFAULT_LOG_DIR="$CONFIG_DIR/logs"
+PLIST_PREFIX="com.zu.bkup"
+LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -20,26 +22,31 @@ usage() {
     echo "Usage: bkup <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  run [options] <dirs...>   Run a backup"
-    echo "  setup <script>            Install launchd job for a backup script"
-    echo "  uninstall                 Remove launchd job and passphrase"
+    echo "  setup                            One-time passphrase setup"
+    echo "  add <name> [options] <dirs...>   Create and schedule a backup"
+    echo "  edit <name>                      Edit an existing backup"
+    echo "  copy <source>                    Copy a backup as a new one"
+    echo "  run <name>                       Run a backup manually"
+    echo "  test [name]                      Test backup connectivity and paths"
+    echo "  list                             List all backup configurations"
+    echo "  remove <name>                    Remove a backup and its schedule"
+    echo "  uninstall                        Remove passphrase and all backups"
     echo ""
-    echo "Run options:"
+    echo "Add options:"
     echo "  -u, --user <user>         SSH user for remote host"
     echo "  -H, --host <host>         SSH hostname"
     echo "  -d, --dest <dir>          Remote backup directory"
     echo "  -l, --log-dir <dir>       Local log directory"
     echo "  -e, --exclude <path>      Exclude path (can be repeated)"
-    echo ""
-    echo "Setup options:"
     echo "  --hour <0-23>             Hour to run backup (default: 2)"
     echo "  --minute <0-59>           Minute to run backup (default: 0)"
     echo ""
     echo "Examples:"
-    echo "  bkup run -u john -H backup.example.com -d /backups \\"
-    echo "    -l ~/logs -e ~/data ~/documents ~/projects"
-    echo ""
-    echo "  bkup setup ./backup --hour 3 --minute 30"
+    echo "  bkup setup"
+    echo "  bkup add personal -u john -H backup.example.com -d /backups \\"
+    echo "    -l ~/logs --hour 3 ~/documents ~/projects"
+    echo "  bkup run personal"
+    echo "  bkup list"
 }
 
 error() {
@@ -55,19 +62,102 @@ info() {
     echo "${CYAN}$1${NC}"
 }
 
+# Get path to a backup config file
+config_path() {
+    echo "$BACKUPS_DIR/$1.json"
+}
+
+# Get plist path for a backup
+plist_path() {
+    echo "$LAUNCH_AGENTS_DIR/$PLIST_PREFIX.$1.plist"
+}
+
+# Check if a backup config exists
+config_exists() {
+    [[ -f "$(config_path "$1")" ]]
+}
+
+# Check if setup has been run
+check_setup() {
+    if [[ ! -f "$PASS_FILE" ]]; then
+        error "Passphrase not configured. Run 'bkup setup' first."
+    fi
+}
+
+# Load a backup config (sets variables: REMOTE_USER, HOST, HOST_DIR, LOG_DIR, EXCLUDES, DIRS)
+load_config() {
+    local name="$1"
+    local config_file="$(config_path "$name")"
+
+    if [[ ! -f "$config_file" ]]; then
+        error "Backup '$name' not found. Run 'bkup list' to see available backups."
+    fi
+
+    REMOTE_USER=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
+    HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
+    HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
+    LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
+    EXCLUDES=($(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))"))
+    DIRS=($(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))"))
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
 
-cmd_run() {
-    # Parse arguments
+cmd_setup() {
+    if [[ -f "$PASS_FILE" ]]; then
+        echo "Passphrase already configured."
+        read -q "confirm?Overwrite existing passphrase? [y/N] "
+        echo ""
+        [[ "$confirm" != "y" ]] && exit 0
+    fi
+
+    echo ""
+    echo "Enter your Borg repository passphrase."
+    echo ""
+
+    local passphrase
+    local confirm_pass
+    read -s "passphrase?Passphrase: "
+    echo ""
+    read -s "confirm_pass?Confirm passphrase: "
+    echo ""
+
+    if [[ "$passphrase" != "$confirm_pass" ]]; then
+        error "Passphrases do not match."
+    fi
+
+    if [[ -z "$passphrase" ]]; then
+        error "Passphrase cannot be empty."
+    fi
+
+    # Create config directory and store passphrase
+    mkdir -p "$CONFIG_DIR"
+    chmod 700 "$CONFIG_DIR"
+    echo -n "$passphrase" > "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
+
+    echo ""
+    success "Passphrase saved."
+    echo "You can now add backups with 'bkup add <name> ...'."
+}
+
+cmd_add() {
+    check_setup
+
+    local NAME=""
     local REMOTE_USER=""
     local HOST=""
     local HOST_DIR=""
     local LOG_DIR=""
     local EXCLUDES=()
     local DIRS=()
+    local HOUR=""
+    local MINUTE=""
+    local TIME=""
 
+    # Parse any provided arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -u|--user)
@@ -90,29 +180,316 @@ cmd_run() {
                 EXCLUDES+=("$2")
                 shift 2
                 ;;
+            --hour)
+                HOUR="$2"
+                shift 2
+                ;;
+            --minute)
+                MINUTE="$2"
+                shift 2
+                ;;
             -*)
                 error "Unknown option: $1"
                 ;;
             *)
-                DIRS+=("$1")
+                # First positional arg is name, rest are dirs
+                if [[ -z "$NAME" ]]; then
+                    NAME="$1"
+                else
+                    DIRS+=("$1")
+                fi
                 shift
                 ;;
         esac
     done
 
-    # Validate required arguments
-    [[ -z "$REMOTE_USER" ]] && error "Missing required option: --user"
-    [[ -z "$HOST" ]] && error "Missing required option: --host"
-    [[ -z "$HOST_DIR" ]] && error "Missing required option: --dest"
-    [[ -z "$LOG_DIR" ]] && error "Missing required option: --log-dir"
-    [[ ${#DIRS[@]} -eq 0 ]] && error "No directories to backup specified"
+    echo ""
+    info "Add new backup"
+    echo "─────────────────────────────────────────"
 
-    # Source passphrase if available
-    if [[ -f "$PASS_FILE" ]]; then
-        export BORG_PASSPHRASE=$(cat "$PASS_FILE")
-    elif [[ -z "$BORG_PASSPHRASE" ]]; then
-        error "No passphrase found. Run 'bkup setup' or set BORG_PASSPHRASE."
+    # Prompt for missing values (vared enables arrow keys/line editing)
+    if [[ -z "$NAME" ]]; then
+        vared -p "Name: " NAME
+        [[ -z "$NAME" ]] && error "Name is required"
+    else
+        echo "Name: $NAME"
     fi
+
+    # Check if already exists
+    if config_exists "$NAME"; then
+        read -q "confirm?Backup '$NAME' already exists. Overwrite? [y/N] "
+        echo ""
+        [[ "$confirm" != "y" ]] && exit 0
+        local existing_plist="$(plist_path "$NAME")"
+        [[ -f "$existing_plist" ]] && launchctl unload "$existing_plist" 2>/dev/null
+    fi
+
+    if [[ -z "$REMOTE_USER" ]]; then
+        vared -p "SSH user: " REMOTE_USER
+        [[ -z "$REMOTE_USER" ]] && error "SSH user is required"
+    fi
+
+    if [[ -z "$HOST" ]]; then
+        vared -p "SSH host: " HOST
+        [[ -z "$HOST" ]] && error "SSH host is required"
+    fi
+
+    if [[ -z "$HOST_DIR" ]]; then
+        vared -p "Remote directory: " HOST_DIR
+        [[ -z "$HOST_DIR" ]] && error "Remote directory is required"
+    fi
+
+    if [[ -z "$LOG_DIR" ]]; then
+        LOG_DIR="$DEFAULT_LOG_DIR"
+        vared -p "Log directory: " LOG_DIR
+    fi
+
+    if [[ ${#DIRS[@]} -eq 0 ]]; then
+        echo ""
+        echo "Directories to backup:"
+        while true; do
+            local menu_opts=()
+            for d in "${DIRS[@]}"; do
+                menu_opts+=("${RED}✕${NC} $d")
+            done
+            menu_opts+=("${GREEN}+${NC} Add directory")
+            menu_opts+=("${CYAN}✓${NC} Done")
+
+            menu "${menu_opts[@]}"
+            local choice=$?
+
+            if [[ $choice -lt ${#DIRS[@]} ]]; then
+                # Remove selected directory
+                DIRS=("${DIRS[@]:0:$choice}" "${DIRS[@]:$((choice+1))}")
+            elif [[ $choice -eq ${#DIRS[@]} ]]; then
+                # Add new directory
+                local new_dir=""
+                vared -p "  New directory: " new_dir
+                [[ -n "$new_dir" ]] && DIRS+=("$new_dir")
+            else
+                # Done
+                break
+            fi
+        done
+        [[ ${#DIRS[@]} -eq 0 ]] && error "At least one directory is required"
+    fi
+
+    echo ""
+    echo "Excludes (optional):"
+    while true; do
+        local menu_opts=()
+        for e in "${EXCLUDES[@]}"; do
+            menu_opts+=("${RED}✕${NC} $e")
+        done
+        menu_opts+=("${GREEN}+${NC} Add exclude")
+        menu_opts+=("${CYAN}✓${NC} Done")
+
+        menu "${menu_opts[@]}"
+        local choice=$?
+
+        if [[ $choice -lt ${#EXCLUDES[@]} ]]; then
+            # Remove selected exclude
+            EXCLUDES=("${EXCLUDES[@]:0:$choice}" "${EXCLUDES[@]:$((choice+1))}")
+        elif [[ $choice -eq ${#EXCLUDES[@]} ]]; then
+            # Add new exclude
+            local new_exc=""
+            vared -p "  New exclude: " new_exc
+            [[ -n "$new_exc" ]] && EXCLUDES+=("$new_exc")
+        else
+            # Done
+            break
+        fi
+    done
+
+    # Time prompt - accept HH:MM format
+    if [[ -z "$HOUR" ]] && [[ -z "$MINUTE" ]]; then
+        TIME="02:00"
+        vared -p "Schedule time (HH:MM): " TIME
+        if [[ -z "$TIME" ]]; then
+            HOUR=2
+            MINUTE=0
+        elif [[ "$TIME" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+            HOUR="${match[1]}"
+            MINUTE="${match[2]}"
+        else
+            error "Invalid time format. Use HH:MM"
+        fi
+    fi
+
+    # Default hour/minute if only one provided
+    [[ -z "$HOUR" ]] && HOUR=2
+    [[ -z "$MINUTE" ]] && MINUTE=0
+
+    # Convert to integers (removes leading zeros)
+    HOUR=$((10#$HOUR))
+    MINUTE=$((10#$MINUTE))
+
+    # Validate hour/minute
+    [[ $HOUR -lt 0 ]] || [[ $HOUR -gt 23 ]] && error "Hour must be 0-23"
+    [[ $MINUTE -lt 0 ]] || [[ $MINUTE -gt 59 ]] && error "Minute must be 0-59"
+
+    # Expand paths to absolute
+    LOG_DIR="${LOG_DIR:A}"
+    local expanded_dirs=()
+    for dir in "${DIRS[@]}"; do
+        expanded_dirs+=("${dir:A}")
+    done
+    DIRS=("${expanded_dirs[@]}")
+
+    local expanded_excludes=()
+    for exc in "${EXCLUDES[@]}"; do
+        expanded_excludes+=("${exc:A}")
+    done
+    EXCLUDES=("${expanded_excludes[@]}")
+
+    # Check if borg repository exists, offer to create if not
+    local REPO="$REMOTE_USER@$HOST:$HOST_DIR"
+    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+
+    echo ""
+    info "Checking repository..."
+
+    local borg_info_output
+    if borg_info_output=$(/opt/homebrew/bin/borg info "$REPO" 2>&1); then
+        success "Repository exists and passphrase is correct"
+    else
+        # Try to initialize - this will tell us if the repo exists or not
+        local borg_init_output
+        borg_init_output=$(/opt/homebrew/bin/borg init --encryption=repokey-blake2 "$REPO" 2>&1)
+        local init_status=$?
+
+        if [[ $init_status -eq 0 ]]; then
+            success "Repository created"
+        elif echo "$borg_init_output" | grep -q "already exists"; then
+            # Repo exists but borg info failed - wrong passphrase
+            error "Repository exists but passphrase is incorrect. Run 'bkup setup' to update passphrase."
+        elif echo "$borg_init_output" | grep -qi "does not exist\|no such file\|not found"; then
+            # Parent directory doesn't exist
+            echo "Remote directory does not exist: $HOST_DIR"
+            read -q "create_dir?Create it? [y/N] "
+            echo ""
+            if [[ "$create_dir" == "y" ]]; then
+                info "Creating remote directory..."
+                if ! ssh "$REMOTE_USER@$HOST" "mkdir -p '$HOST_DIR'"; then
+                    error "Failed to create remote directory"
+                fi
+                # Retry init
+                info "Initializing repository..."
+                if ! /opt/homebrew/bin/borg init --encryption=repokey-blake2 "$REPO" 2>&1; then
+                    error "Failed to initialize repository"
+                fi
+                success "Repository created"
+            else
+                error "Remote directory must exist"
+            fi
+        else
+            # Some other error
+            echo "$borg_init_output"
+            error "Failed to access or create repository"
+        fi
+    fi
+
+    # Create config directory
+    mkdir -p "$BACKUPS_DIR"
+
+    # Build JSON
+    local excludes_json="[]"
+    if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+        excludes_json=$(printf '%s\n' "${EXCLUDES[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+    fi
+    local dirs_json=$(printf '%s\n' "${DIRS[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+
+    local config_file="$(config_path "$NAME")"
+    python3 -c "
+import json
+config = {
+    'user': '$REMOTE_USER',
+    'host': '$HOST',
+    'dest': '$HOST_DIR',
+    'log_dir': '$LOG_DIR',
+    'excludes': $excludes_json,
+    'dirs': $dirs_json,
+    'hour': $HOUR,
+    'minute': $MINUTE
+}
+with open('$config_file', 'w') as f:
+    json.dump(config, f, indent=2)
+"
+    chmod 600 "$config_file"
+
+    # Create launchd plist
+    mkdir -p "$LAUNCH_AGENTS_DIR"
+    local BKUP_PATH="${0:A}"
+    local plist_file="$(plist_path "$NAME")"
+
+    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>$PLIST_PREFIX.$NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>$BKUP_PATH</string>
+        <string>run</string>
+        <string>$NAME</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$HOUR</integer>
+        <key>Minute</key>
+        <integer>$MINUTE</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/bkup-$NAME.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/bkup-$NAME.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>$HOME</string>
+        <key>USER</key>
+        <string>$USER</string>
+    </dict>
+</dict>
+</plist>"
+
+    # Check for existing plist
+    if [[ -f "$plist_file" ]]; then
+        echo ""
+        echo "Existing schedule found for '$NAME'"
+        read -q "replace_schedule?Replace it? [y/N] "
+        echo ""
+        [[ "$replace_schedule" != "y" ]] && exit 0
+        launchctl unload "$plist_file" 2>/dev/null
+    fi
+
+    echo "$plist_content" > "$plist_file"
+    chmod 644 "$plist_file"
+    launchctl load "$plist_file" 2>/dev/null
+
+    echo ""
+    success "Added backup '$NAME'"
+    echo "  Host: $REMOTE_USER@$HOST:$HOST_DIR"
+    echo "  Dirs: ${DIRS[*]}"
+    echo "  Schedule: $(printf '%02d:%02d' $HOUR $MINUTE) daily"
+}
+
+cmd_run() {
+    check_setup
+
+    local NAME="$1"
+
+    if [[ -z "$NAME" ]]; then
+        error "Usage: bkup run <name>"
+    fi
+
+    load_config "$NAME"
+
+    # Load passphrase
+    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
 
     # Set up date variables
     local MONTH=$(date +%Y-%m)
@@ -132,7 +509,7 @@ cmd_run() {
     done
 
     # Run backup
-    info "Starting backup to $REMOTE_USER@$HOST:$HOST_DIR"
+    info "Running backup '$NAME' to $REMOTE_USER@$HOST:$HOST_DIR"
 
     /opt/homebrew/bin/borg create --stats --progress \
         "$BACKUP_DEST" \
@@ -160,101 +537,204 @@ cmd_run() {
     return $RESULT
 }
 
-cmd_setup() {
-    local SCRIPT=""
-    local HOUR=2
-    local MINUTE=0
+cmd_list() {
+    if [[ ! -d "$BACKUPS_DIR" ]] || [[ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]]; then
+        echo "No backup configurations found."
+        echo "Use 'bkup add <name> ...' to create one."
+        return
+    fi
 
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --hour)
-                HOUR="$2"
-                shift 2
-                ;;
-            --minute)
-                MINUTE="$2"
-                shift 2
-                ;;
-            -*)
-                error "Unknown option: $1"
-                ;;
-            *)
-                if [[ -z "$SCRIPT" ]]; then
-                    SCRIPT="$1"
-                else
-                    error "Unexpected argument: $1"
-                fi
-                shift
-                ;;
-        esac
+    echo ""
+    echo "${BOLD}Backup Configurations${NC}"
+    echo "─────────────────────────────────────────"
+
+    for config_file in "$BACKUPS_DIR"/*.json; do
+        [[ ! -f "$config_file" ]] && continue
+        local name=$(basename "$config_file" .json)
+        local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
+        local dest=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
+        local hour=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
+        local minute=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
+        local dirs=$(python3 -c "import json; print(', '.join(json.load(open('$config_file'))['dirs']))")
+        local excludes=$(python3 -c "import json; print(', '.join(json.load(open('$config_file')).get('excludes', [])))")
+
+        printf "  ${CYAN}%-15s${NC} %s:%s  ${YELLOW}@%02d:%02d${NC}\n" "$name" "$host" "$dest" "$hour" "$minute"
+        printf "                  ${GREY}%s${NC}\n" "$dirs"
+        [[ -n "$excludes" ]] && printf "                  ${RED}excludes: %s${NC}\n" "$excludes"
+    done
+    echo ""
+}
+
+cmd_edit() {
+    check_setup
+
+    local NAME="$1"
+
+    if [[ -z "$NAME" ]]; then
+        error "Usage: bkup edit <name>"
+    fi
+
+    if ! config_exists "$NAME"; then
+        error "Backup '$NAME' not found."
+    fi
+
+    local config_file="$(config_path "$NAME")"
+
+    # Load current values
+    local REMOTE_USER=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
+    local HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
+    local HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
+    local LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
+    local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
+    local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
+    local DIRS=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
+    local EXCLUDES=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
+
+    echo ""
+    info "Edit backup '$NAME'"
+    echo "─────────────────────────────────────────"
+    echo "${GREY}(Press Enter to keep current value)${NC}"
+    echo ""
+
+    # Reset terminal settings and keybindings for vared
+    stty sane 2>/dev/null
+    bindkey '^?' backward-delete-char 2>/dev/null
+    bindkey '^H' backward-delete-char 2>/dev/null
+
+    # Edit each field with current value pre-filled
+    vared -p "SSH user: " REMOTE_USER
+    vared -p "SSH host: " HOST
+    vared -p "Remote directory: " HOST_DIR
+    vared -p "Log directory: " LOG_DIR
+
+    # Format time for editing
+    local TIME=$(printf "%02d:%02d" $HOUR $MINUTE)
+    vared -p "Schedule time (HH:MM): " TIME
+    if [[ "$TIME" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+        HOUR=$((10#${match[1]}))
+        MINUTE=$((10#${match[2]}))
+    else
+        error "Invalid time format. Use HH:MM"
+    fi
+
+    # Edit directories with menu
+    echo ""
+    echo "Directories:"
+    while true; do
+        local menu_opts=()
+        for d in "${DIRS[@]}"; do
+            menu_opts+=("${RED}✕${NC} $d")
+        done
+        menu_opts+=("${GREEN}+${NC} Add directory")
+        menu_opts+=("${CYAN}✓${NC} Done")
+
+        menu "${menu_opts[@]}"
+        local choice=$?
+
+        if [[ $choice -lt ${#DIRS[@]} ]]; then
+            # Remove selected directory
+            DIRS=("${DIRS[@]:0:$choice}" "${DIRS[@]:$((choice+1))}")
+        elif [[ $choice -eq ${#DIRS[@]} ]]; then
+            # Add new directory
+            local new_dir=""
+            vared -p "  New directory: " new_dir
+            [[ -n "$new_dir" ]] && DIRS+=("$new_dir")
+        else
+            # Done
+            break
+        fi
+    done
+    [[ ${#DIRS[@]} -eq 0 ]] && error "At least one directory is required"
+
+    # Edit excludes with menu
+    echo ""
+    echo "Excludes:"
+    # Filter out empty excludes
+    local filtered_excludes=()
+    for e in "${EXCLUDES[@]}"; do
+        [[ -n "$e" ]] && filtered_excludes+=("$e")
+    done
+    EXCLUDES=("${filtered_excludes[@]}")
+
+    while true; do
+        local menu_opts=()
+        for e in "${EXCLUDES[@]}"; do
+            menu_opts+=("${RED}✕${NC} $e")
+        done
+        menu_opts+=("${GREEN}+${NC} Add exclude")
+        menu_opts+=("${CYAN}✓${NC} Done")
+
+        menu "${menu_opts[@]}"
+        local choice=$?
+
+        if [[ $choice -lt ${#EXCLUDES[@]} ]]; then
+            # Remove selected exclude
+            EXCLUDES=("${EXCLUDES[@]:0:$choice}" "${EXCLUDES[@]:$((choice+1))}")
+        elif [[ $choice -eq ${#EXCLUDES[@]} ]]; then
+            # Add new exclude
+            local new_exc=""
+            vared -p "  New exclude: " new_exc
+            [[ -n "$new_exc" ]] && EXCLUDES+=("$new_exc")
+        else
+            # Done
+            break
+        fi
     done
 
-    [[ -z "$SCRIPT" ]] && error "Usage: bkup setup <script> [--hour H] [--minute M]"
+    # Expand paths to absolute
+    LOG_DIR="${LOG_DIR:A}"
+    local expanded_dirs=()
+    for dir in "${DIRS[@]}"; do
+        expanded_dirs+=("${dir:A}")
+    done
+    DIRS=("${expanded_dirs[@]}")
 
-    # Resolve script to absolute path
-    SCRIPT="${SCRIPT:A}"
-    [[ ! -f "$SCRIPT" ]] && error "Script not found: $SCRIPT"
-    [[ ! -x "$SCRIPT" ]] && error "Script not executable: $SCRIPT"
+    local expanded_excludes=()
+    for exc in "${EXCLUDES[@]}"; do
+        [[ -n "$exc" ]] && expanded_excludes+=("${exc:A}")
+    done
+    EXCLUDES=("${expanded_excludes[@]}")
 
-    # Validate hour/minute
-    [[ ! "$HOUR" =~ ^[0-9]+$ ]] || [[ $HOUR -lt 0 ]] || [[ $HOUR -gt 23 ]] && \
-        error "Hour must be 0-23"
-    [[ ! "$MINUTE" =~ ^[0-9]+$ ]] || [[ $MINUTE -lt 0 ]] || [[ $MINUTE -gt 59 ]] && \
-        error "Minute must be 0-59"
-
-    info "Setting up bkup..."
-
-    # Check if already set up
-    if [[ -f "$PLIST_PATH" ]]; then
-        echo ""
-        read -q "confirm?Existing installation found. Overwrite? [y/N] "
-        echo ""
-        [[ "$confirm" != "y" ]] && exit 0
-        launchctl unload "$PLIST_PATH" 2>/dev/null
+    # Build JSON
+    local excludes_json="[]"
+    if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+        excludes_json=$(printf '%s\n' "${EXCLUDES[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")
     fi
+    local dirs_json=$(printf '%s\n' "${DIRS[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 
-    # Prompt for passphrase
-    echo ""
-    echo "Enter your Borg repository passphrase."
-    echo "This will be stored in $PASS_FILE"
-    echo ""
+    python3 -c "
+import json
+config = {
+    'user': '$REMOTE_USER',
+    'host': '$HOST',
+    'dest': '$HOST_DIR',
+    'log_dir': '$LOG_DIR',
+    'excludes': $excludes_json,
+    'dirs': $dirs_json,
+    'hour': $HOUR,
+    'minute': $MINUTE
+}
+with open('$config_file', 'w') as f:
+    json.dump(config, f, indent=2)
+"
+    chmod 600 "$config_file"
 
-    local passphrase
-    local confirm_pass
-    read -s "passphrase?Passphrase: "
-    echo ""
-    read -s "confirm_pass?Confirm passphrase: "
-    echo ""
+    # Update plist
+    local BKUP_PATH="${0:A}"
+    local plist_file="$(plist_path "$NAME")"
 
-    if [[ "$passphrase" != "$confirm_pass" ]]; then
-        error "Passphrases do not match."
-    fi
-
-    if [[ -z "$passphrase" ]]; then
-        error "Passphrase cannot be empty."
-    fi
-
-    # Create config directory and store passphrase
-    mkdir -p "$CONFIG_DIR"
-    chmod 700 "$CONFIG_DIR"
-    echo -n "$passphrase" > "$PASS_FILE"
-    chmod 600 "$PASS_FILE"
-
-    # Create LaunchAgents directory if needed
-    mkdir -p "$HOME/Library/LaunchAgents"
-
-    # Generate plist
     local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
     <key>Label</key>
-    <string>$PLIST_NAME</string>
+    <string>$PLIST_PREFIX.$NAME</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
-        <string>$SCRIPT</string>
+        <string>$BKUP_PATH</string>
+        <string>run</string>
+        <string>$NAME</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -264,9 +744,9 @@ cmd_setup() {
         <integer>$MINUTE</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/tmp/bkup.log</string>
+    <string>/tmp/bkup-$NAME.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/bkup.log</string>
+    <string>/tmp/bkup-$NAME.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -277,36 +757,430 @@ cmd_setup() {
 </dict>
 </plist>"
 
-    echo "$plist_content" > "$PLIST_PATH"
-    chmod 644 "$PLIST_PATH"
-
-    # Load the job
-    launchctl load "$PLIST_PATH"
+    launchctl unload "$plist_file" 2>/dev/null
+    echo "$plist_content" > "$plist_file"
+    chmod 644 "$plist_file"
+    launchctl load "$plist_file" 2>/dev/null
 
     echo ""
-    success "Setup complete!"
-    echo "Backup scheduled for $(printf '%02d:%02d' $HOUR $MINUTE) daily."
-    echo "Script: $SCRIPT"
+    success "Updated backup '$NAME'"
+    echo "  Host: $REMOTE_USER@$HOST:$HOST_DIR"
+    echo "  Dirs: ${DIRS[*]}"
+    echo "  Schedule: $(printf '%02d:%02d' $HOUR $MINUTE) daily"
+}
+
+cmd_copy() {
+    check_setup
+
+    local SOURCE="$1"
+
+    if [[ -z "$SOURCE" ]]; then
+        error "Usage: bkup copy <source>"
+    fi
+
+    if ! config_exists "$SOURCE"; then
+        error "Backup '$SOURCE' not found."
+    fi
+
+    local config_file="$(config_path "$SOURCE")"
+
+    # Load current values
+    local REMOTE_USER=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
+    local HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
+    local HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
+    local LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
+    local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
+    local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
+    local DIRS=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
+    local EXCLUDES=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
+
+    echo ""
+    info "Copy backup '$SOURCE'"
+    echo "─────────────────────────────────────────"
+    echo "${GREY}(Press Enter to keep current value)${NC}"
+    echo ""
+
+    # Reset terminal settings and keybindings for vared
+    stty sane 2>/dev/null
+    bindkey '^?' backward-delete-char 2>/dev/null
+    bindkey '^H' backward-delete-char 2>/dev/null
+
+    # Prompt for new name
+    local NAME=""
+    vared -p "New name: " NAME
+    [[ -z "$NAME" ]] && error "Name is required"
+
+    if config_exists "$NAME"; then
+        read -q "confirm?Backup '$NAME' already exists. Overwrite? [y/N] "
+        echo ""
+        [[ "$confirm" != "y" ]] && exit 0
+        local existing_plist="$(plist_path "$NAME")"
+        [[ -f "$existing_plist" ]] && launchctl unload "$existing_plist" 2>/dev/null
+    fi
+
+    # Edit each field with current value pre-filled
+    vared -p "SSH user: " REMOTE_USER
+    vared -p "SSH host: " HOST
+    vared -p "Remote directory: " HOST_DIR
+    vared -p "Log directory: " LOG_DIR
+
+    # Format time for editing
+    local TIME=$(printf "%02d:%02d" $HOUR $MINUTE)
+    vared -p "Schedule time (HH:MM): " TIME
+    if [[ "$TIME" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+        HOUR=$((10#${match[1]}))
+        MINUTE=$((10#${match[2]}))
+    else
+        error "Invalid time format. Use HH:MM"
+    fi
+
+    # Edit directories with menu
+    echo ""
+    echo "Directories:"
+    while true; do
+        local menu_opts=()
+        for d in "${DIRS[@]}"; do
+            menu_opts+=("${RED}✕${NC} $d")
+        done
+        menu_opts+=("${GREEN}+${NC} Add directory")
+        menu_opts+=("${CYAN}✓${NC} Done")
+
+        menu "${menu_opts[@]}"
+        local choice=$?
+
+        if [[ $choice -lt ${#DIRS[@]} ]]; then
+            DIRS=("${DIRS[@]:0:$choice}" "${DIRS[@]:$((choice+1))}")
+        elif [[ $choice -eq ${#DIRS[@]} ]]; then
+            local new_dir=""
+            vared -p "  New directory: " new_dir
+            [[ -n "$new_dir" ]] && DIRS+=("$new_dir")
+        else
+            break
+        fi
+    done
+    [[ ${#DIRS[@]} -eq 0 ]] && error "At least one directory is required"
+
+    # Edit excludes with menu
+    echo ""
+    echo "Excludes:"
+    local filtered_excludes=()
+    for e in "${EXCLUDES[@]}"; do
+        [[ -n "$e" ]] && filtered_excludes+=("$e")
+    done
+    EXCLUDES=("${filtered_excludes[@]}")
+
+    while true; do
+        local menu_opts=()
+        for e in "${EXCLUDES[@]}"; do
+            menu_opts+=("${RED}✕${NC} $e")
+        done
+        menu_opts+=("${GREEN}+${NC} Add exclude")
+        menu_opts+=("${CYAN}✓${NC} Done")
+
+        menu "${menu_opts[@]}"
+        local choice=$?
+
+        if [[ $choice -lt ${#EXCLUDES[@]} ]]; then
+            EXCLUDES=("${EXCLUDES[@]:0:$choice}" "${EXCLUDES[@]:$((choice+1))}")
+        elif [[ $choice -eq ${#EXCLUDES[@]} ]]; then
+            local new_exc=""
+            vared -p "  New exclude: " new_exc
+            [[ -n "$new_exc" ]] && EXCLUDES+=("$new_exc")
+        else
+            break
+        fi
+    done
+
+    # Expand paths to absolute
+    LOG_DIR="${LOG_DIR:A}"
+    local expanded_dirs=()
+    for dir in "${DIRS[@]}"; do
+        expanded_dirs+=("${dir:A}")
+    done
+    DIRS=("${expanded_dirs[@]}")
+
+    local expanded_excludes=()
+    for exc in "${EXCLUDES[@]}"; do
+        [[ -n "$exc" ]] && expanded_excludes+=("${exc:A}")
+    done
+    EXCLUDES=("${expanded_excludes[@]}")
+
+    # Check/create repository
+    local REPO="$REMOTE_USER@$HOST:$HOST_DIR"
+    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+
+    echo ""
+    info "Checking repository..."
+
+    local borg_info_output
+    if borg_info_output=$(/opt/homebrew/bin/borg info "$REPO" 2>&1); then
+        success "Repository exists and passphrase is correct"
+    else
+        local borg_init_output
+        borg_init_output=$(/opt/homebrew/bin/borg init --encryption=repokey-blake2 "$REPO" 2>&1)
+        local init_status=$?
+
+        if [[ $init_status -eq 0 ]]; then
+            success "Repository created"
+        elif echo "$borg_init_output" | grep -q "already exists"; then
+            error "Repository exists but passphrase is incorrect. Run 'bkup setup' to update passphrase."
+        elif echo "$borg_init_output" | grep -qi "does not exist\|no such file\|not found"; then
+            echo "Remote directory does not exist: $HOST_DIR"
+            read -q "create_dir?Create it? [y/N] "
+            echo ""
+            if [[ "$create_dir" == "y" ]]; then
+                info "Creating remote directory..."
+                if ! ssh "$REMOTE_USER@$HOST" "mkdir -p '$HOST_DIR'"; then
+                    error "Failed to create remote directory"
+                fi
+                info "Initializing repository..."
+                if ! /opt/homebrew/bin/borg init --encryption=repokey-blake2 "$REPO" 2>&1; then
+                    error "Failed to initialize repository"
+                fi
+                success "Repository created"
+            else
+                error "Remote directory must exist"
+            fi
+        else
+            echo "$borg_init_output"
+            error "Failed to access or create repository"
+        fi
+    fi
+
+    # Create config directory
+    mkdir -p "$BACKUPS_DIR"
+
+    # Build JSON
+    local excludes_json="[]"
+    if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+        excludes_json=$(printf '%s\n' "${EXCLUDES[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")
+    fi
+    local dirs_json=$(printf '%s\n' "${DIRS[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+
+    local new_config_file="$(config_path "$NAME")"
+    python3 -c "
+import json
+config = {
+    'user': '$REMOTE_USER',
+    'host': '$HOST',
+    'dest': '$HOST_DIR',
+    'log_dir': '$LOG_DIR',
+    'excludes': $excludes_json,
+    'dirs': $dirs_json,
+    'hour': $HOUR,
+    'minute': $MINUTE
+}
+with open('$new_config_file', 'w') as f:
+    json.dump(config, f, indent=2)
+"
+    chmod 600 "$new_config_file"
+
+    # Create plist
+    mkdir -p "$LAUNCH_AGENTS_DIR"
+    local BKUP_PATH="${0:A}"
+    local plist_file="$(plist_path "$NAME")"
+
+    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>$PLIST_PREFIX.$NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>$BKUP_PATH</string>
+        <string>run</string>
+        <string>$NAME</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$HOUR</integer>
+        <key>Minute</key>
+        <integer>$MINUTE</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/bkup-$NAME.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/bkup-$NAME.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>$HOME</string>
+        <key>USER</key>
+        <string>$USER</string>
+    </dict>
+</dict>
+</plist>"
+
+    launchctl unload "$plist_file" 2>/dev/null
+    echo "$plist_content" > "$plist_file"
+    chmod 644 "$plist_file"
+    launchctl load "$plist_file" 2>/dev/null
+
+    echo ""
+    success "Created backup '$NAME' (copied from '$SOURCE')"
+    echo "  Host: $REMOTE_USER@$HOST:$HOST_DIR"
+    echo "  Dirs: ${DIRS[*]}"
+    echo "  Schedule: $(printf '%02d:%02d' $HOUR $MINUTE) daily"
+}
+
+cmd_test() {
+    check_setup
+
+    local NAME="$1"
+    local configs=()
+
+    if [[ -n "$NAME" ]]; then
+        if ! config_exists "$NAME"; then
+            error "Backup '$NAME' not found."
+        fi
+        configs=("$(config_path "$NAME")")
+    else
+        # Test all backups
+        if [[ ! -d "$BACKUPS_DIR" ]] || [[ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]]; then
+            echo "No backup configurations found."
+            return
+        fi
+        configs=("$BACKUPS_DIR"/*.json)
+    fi
+
+    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+    local all_ok=true
+
+    echo ""
+    for config_file in "${configs[@]}"; do
+        [[ ! -f "$config_file" ]] && continue
+        local name=$(basename "$config_file" .json)
+        local user=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
+        local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
+        local dest=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
+        local dirs=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
+
+        echo "${BOLD}Testing '$name'${NC}"
+        echo "─────────────────────────────────────────"
+
+        local ok=true
+
+        # Test SSH connection
+        printf "  SSH connection to %s@%s... " "$user" "$host"
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 "$user@$host" "true" 2>/dev/null; then
+            echo "${GREEN}OK${NC}"
+        else
+            echo "${RED}FAILED${NC}"
+            ok=false
+        fi
+
+        # Test repository access
+        printf "  Repository %s... " "$dest"
+        local repo="$user@$host:$dest"
+        if /opt/homebrew/bin/borg info "$repo" >/dev/null 2>&1; then
+            echo "${GREEN}OK${NC}"
+        else
+            echo "${RED}FAILED${NC} (check passphrase or repo path)"
+            ok=false
+        fi
+
+        # Test source directories
+        for dir in "${dirs[@]}"; do
+            printf "  Source %s... " "$dir"
+            if [[ -d "$dir" ]]; then
+                echo "${GREEN}OK${NC}"
+            elif [[ -e "$dir" ]]; then
+                echo "${YELLOW}exists (not a directory)${NC}"
+            else
+                echo "${RED}NOT FOUND${NC}"
+                ok=false
+            fi
+        done
+
+        # Dry run
+        if $ok; then
+            printf "  Dry run... "
+            local excludes=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
+            local exclude_args=()
+            for exc in "${excludes[@]}"; do
+                [[ -n "$exc" ]] && exclude_args+=(--exclude "$exc")
+            done
+
+            if /opt/homebrew/bin/borg create --dry-run "$repo::{now:%Y-%m-%d}" "${exclude_args[@]}" "${dirs[@]}" 2>/dev/null; then
+                echo "${GREEN}OK${NC}"
+            else
+                echo "${RED}FAILED${NC}"
+                ok=false
+            fi
+        fi
+
+        if $ok; then
+            echo "  ${GREEN}✓ All checks passed${NC}"
+        else
+            echo "  ${RED}✗ Some checks failed${NC}"
+            all_ok=false
+        fi
+        echo ""
+    done
+
+    if $all_ok; then
+        success "All backups OK"
+        return 0
+    else
+        echo "${RED}Some backups have issues${NC}"
+        return 1
+    fi
+}
+
+cmd_remove() {
+    local NAME="$1"
+
+    if [[ -z "$NAME" ]]; then
+        error "Usage: bkup remove <name>"
+    fi
+
+    if ! config_exists "$NAME"; then
+        error "Backup '$NAME' not found."
+    fi
+
+    # Unload and remove plist
+    local plist_file="$(plist_path "$NAME")"
+    if [[ -f "$plist_file" ]]; then
+        launchctl unload "$plist_file" 2>/dev/null
+        rm -f "$plist_file"
+    fi
+
+    # Remove config
+    rm -f "$(config_path "$NAME")"
+
+    success "Removed backup '$NAME'"
 }
 
 cmd_uninstall() {
+    echo ""
+    echo "${YELLOW}This will remove:${NC}"
+    echo "  - All backup configurations"
+    echo "  - All scheduled backup jobs"
+    echo "  - Stored passphrase"
+    echo ""
+    echo "${GREY}(Remote repositories will not be affected)${NC}"
+    echo ""
+    read -q "confirm?Are you sure? [y/N] "
+    echo ""
+    [[ "$confirm" != "y" ]] && exit 0
+
     info "Uninstalling bkup..."
 
-    # Unload launchd job
-    if [[ -f "$PLIST_PATH" ]]; then
-        launchctl unload "$PLIST_PATH" 2>/dev/null
-        rm -f "$PLIST_PATH"
-        success "Removed launchd job"
-    else
-        echo "No launchd job found"
-    fi
+    # Remove all backup schedules
+    setopt local_options null_glob
+    for plist_file in "$LAUNCH_AGENTS_DIR"/$PLIST_PREFIX.*.plist; do
+        launchctl unload "$plist_file" 2>/dev/null
+        rm -f "$plist_file"
+    done
+    success "Removed scheduled jobs"
 
-    # Remove config directory (contains passphrase)
+    # Remove config directory (configs + passphrase)
     if [[ -d "$CONFIG_DIR" ]]; then
         rm -rf "$CONFIG_DIR"
-        success "Removed config directory"
-    else
-        echo "No config directory found"
+        success "Removed configurations and passphrase"
     fi
 
     echo ""
@@ -318,13 +1192,31 @@ cmd_uninstall() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
+    setup)
+        cmd_setup
+        ;;
+    add)
+        shift
+        cmd_add "$@"
+        ;;
+    edit)
+        cmd_edit "$2"
+        ;;
+    copy)
+        cmd_copy "$2"
+        ;;
     run)
         shift
         cmd_run "$@"
         ;;
-    setup)
-        shift
-        cmd_setup "$@"
+    test)
+        cmd_test "$2"
+        ;;
+    list)
+        cmd_list
+        ;;
+    remove)
+        cmd_remove "$2"
         ;;
     uninstall)
         cmd_uninstall
