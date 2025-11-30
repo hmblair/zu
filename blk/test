@@ -112,6 +112,62 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Integration test: Block and verify
+# ─────────────────────────────────────────────────────────────────────────────
+
+info "Testing blocking functionality..."
+
+# Only run if setup exists
+if [[ -f "$HOME/.blk/salt" ]]; then
+    # Use a reliable test domain - httpbin.org is designed for testing
+    TEST_DOMAIN="httpbin.org"
+    BLOCK_DURATION="15s"
+
+    # First verify we can reach the domain (not already blocked)
+    info "Checking $TEST_DOMAIN is reachable..."
+    if curl -s --connect-timeout 5 "https://$TEST_DOMAIN/get" >/dev/null 2>&1; then
+        pass "$TEST_DOMAIN is reachable"
+
+        # Block the domain for 30 seconds
+        info "Blocking $TEST_DOMAIN for $BLOCK_DURATION..."
+        output=$("$BLK" add "$TEST_DOMAIN" "$BLOCK_DURATION" 2>&1)
+        if [[ "$output" == *"Blocked"* ]]; then
+            pass "blk add command succeeded"
+
+            # Wait for daemon to process and apply pf rules
+            info "Waiting for daemon to apply firewall rules..."
+            sleep 8
+
+            # Verify the domain is now blocked (curl should fail)
+            info "Verifying $TEST_DOMAIN is blocked..."
+            if curl -s --connect-timeout 5 "https://$TEST_DOMAIN/get" >/dev/null 2>&1; then
+                fail "$TEST_DOMAIN should be blocked but is still reachable"
+            else
+                pass "$TEST_DOMAIN is blocked"
+            fi
+
+            # Wait for the block to expire (15s total - 8s already elapsed + daemon check interval buffer)
+            info "Waiting 15 seconds for block to expire..."
+            sleep 15
+
+            # Verify the domain is unblocked
+            info "Verifying $TEST_DOMAIN is unblocked..."
+            if curl -s --connect-timeout 5 "https://$TEST_DOMAIN/get" >/dev/null 2>&1; then
+                pass "$TEST_DOMAIN is unblocked after expiry"
+            else
+                fail "$TEST_DOMAIN should be unblocked but is still blocked"
+            fi
+        else
+            fail "blk add command failed: $output"
+        fi
+    else
+        warn "Cannot reach $TEST_DOMAIN - skipping integration test (may already be blocked or network issue)"
+    fi
+else
+    info "Setup not complete - skipping integration test"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
