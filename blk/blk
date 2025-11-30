@@ -12,6 +12,8 @@ BLOCK_DIR="$HOME/.blk"
 DATA_FILE="$BLOCK_DIR/data.enc"
 SALT_FILE="$BLOCK_DIR/salt"
 TRIGGER_FILE="$BLOCK_DIR/trigger"
+ADD_REQUEST_FILE="$BLOCK_DIR/add_request"
+SUMMARY_FILE="$BLOCK_DIR/summary"
 PLIST_NAME="com.zu.blkd"
 PLIST_PATH="/Library/LaunchDaemons/$PLIST_NAME.plist"
 DAEMON_PASS_FILE="/var/root/.blk_pass"
@@ -31,6 +33,7 @@ usage() {
     echo "  list [--show-hidden]        Show all active blocks with time remaining"
     echo "  status <domain>             Check if a domain is blocked"
     echo "  setup                       One-time setup (installs daemon)"
+    echo "  reload                      Restart the daemon"
     echo "  uninstall                   Remove daemon and config (only if no active blocks)"
     echo ""
     echo "Duration format:"
@@ -349,6 +352,10 @@ cmd_setup() {
     touch "$TRIGGER_FILE"
     chmod 644 "$TRIGGER_FILE"
 
+    # Create empty summary file (for password-free list command)
+    echo "{}" > "$SUMMARY_FILE"
+    chmod 644 "$SUMMARY_FILE"
+
     # Store password in root-only file for daemon access (no trailing newline)
     echo ""
     info "Storing daemon password (requires sudo)..."
@@ -417,6 +424,58 @@ cmd_setup() {
     echo ""
     success "Setup complete!"
     echo "Use 'blk add <domain> <duration>' to block websites."
+}
+
+cmd_reload() {
+    check_setup
+
+    local daemon_script="$SCRIPT_DIR/blkd"
+    if [[ ! -f "$daemon_script" ]]; then
+        error "Daemon script not found at $daemon_script"
+    fi
+
+    # Regenerate plist with current path
+    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>$PLIST_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>$daemon_script</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/blkd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/blkd.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>$HOME</string>
+        <key>USER</key>
+        <string>$USER</string>
+    </dict>
+</dict>
+</plist>"
+
+    info "Reloading daemon..."
+    sudo launchctl unload "$PLIST_PATH" 2>/dev/null
+    echo "$plist_content" | sudo tee "$PLIST_PATH" > /dev/null
+    sudo chmod 644 "$PLIST_PATH"
+    sudo chown root:wheel "$PLIST_PATH"
+    sudo launchctl load "$PLIST_PATH" 2>/dev/null
+
+    if [[ $? -eq 0 ]]; then
+        success "Daemon reloaded."
+    else
+        error "Failed to reload daemon."
+    fi
 }
 
 cmd_uninstall() {
@@ -525,30 +584,21 @@ cmd_add() {
         fi
     fi
 
-    # Get password and decrypt
-    local password=$(prompt_password)
-    local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
-
-    # Check if domain already has an active block with a later expiry
-    local now=$(date +%s)
-    local existing_check=$(echo "$data" | python3 -c "
+    # Check existing blocks from summary file (doesn't require password)
+    if [[ -f "$SUMMARY_FILE" ]]; then
+        local existing_check=$(python3 -c "
 import sys, json
-data = json.load(sys.stdin)
+try:
+    with open('$SUMMARY_FILE') as f:
+        data = json.load(f)
+except:
+    sys.exit(0)
 domain = '$domain'
-now = $now
+now = $(date +%s)
 new_expiry = $expiry
 if domain in data:
     val = data[domain]
-    if isinstance(val, (int, float)):
-        if val > now and val > new_expiry:
-            print(f'blocked|{int(val)}')
-        else:
-            print('ok')
-    elif isinstance(val, dict) and 'expiry' in val:
+    if isinstance(val, dict) and 'expiry' in val:
         if val['expiry'] > now and val['expiry'] > new_expiry:
             print(f'blocked|{int(val[\"expiry\"])}')
         else:
@@ -561,48 +611,44 @@ else:
     print('ok')
 " 2>/dev/null)
 
-    local check_type="${existing_check%%|*}"
-    if [[ "$check_type" == "blocked" ]]; then
-        local existing_expiry="${existing_check#*|}"
-        local existing_date=$(date -r "$existing_expiry" '+%Y-%m-%d %H:%M:%S')
-        error "$domain is already blocked until $existing_date. Cannot shorten an existing block."
-    elif [[ "$check_type" == "daily" ]]; then
-        local existing_schedule="${existing_check#*|}"
-        error "$domain has a daily schedule ($existing_schedule). Remove it first before adding a timed block."
+        local check_type="${existing_check%%|*}"
+        if [[ "$check_type" == "blocked" ]]; then
+            local existing_expiry="${existing_check#*|}"
+            local existing_date=$(date -r "$existing_expiry" '+%Y-%m-%d %H:%M:%S')
+            error "$domain is already blocked until $existing_date. Cannot shorten an existing block."
+        elif [[ "$check_type" == "daily" ]]; then
+            local existing_schedule="${existing_check#*|}"
+            error "$domain has a daily schedule ($existing_schedule). Remove it first before adding a timed block."
+        fi
     fi
 
-    # Add/update the block using python3 for JSON handling
-    local hidden_flag="$hidden"
-    local new_data
-    new_data=$(echo "$data" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-hidden = '$hidden_flag' == 'true'
-if hidden:
-    data['$domain'] = {'expiry': $expiry, 'hidden': True}
-else:
-    data['$domain'] = $expiry
-print(json.dumps(data))
-" 2>&1)
-
-    if [[ $? -ne 0 ]] || [[ -z "$new_data" ]]; then
-        error "Failed to create block data: $new_data"
+    # Write add request for daemon to process (no password needed)
+    local request_data
+    if [[ "$hidden" == "true" ]]; then
+        request_data="{\"domain\": \"$domain\", \"expiry\": $expiry, \"hidden\": true}"
+    else
+        request_data="{\"domain\": \"$domain\", \"expiry\": $expiry}"
     fi
+    echo "$request_data" > "$ADD_REQUEST_FILE"
 
-    # Validate it's valid JSON before saving
-    if ! echo "$new_data" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-        error "Failed to create valid JSON data."
-    fi
-
-    # Re-encrypt and save
-    local encrypted=$(encrypt_data "$new_data" "$password")
-    if [[ -z "$encrypted" ]]; then
-        error "Failed to encrypt data."
-    fi
-    printf '%s\n' "$encrypted" > "$DATA_FILE"
-
-    # Signal daemon
+    # Signal daemon to process the request
     signal_daemon
+
+    # Wait briefly for daemon to process (check summary file update)
+    local max_wait=10
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        sleep 0.5
+        waited=$((waited + 1))
+        # Check if request file was cleared (daemon processed it)
+        if [[ ! -f "$ADD_REQUEST_FILE" ]]; then
+            break
+        fi
+    done
+
+    if [[ -f "$ADD_REQUEST_FILE" ]]; then
+        warn "Request submitted. Daemon will process it shortly."
+    fi
 
     success "Blocked $domain for $duration (until $(date -r $expiry '+%Y-%m-%d %H:%M:%S'))"
 }
@@ -652,25 +698,25 @@ cmd_daily() {
 
     schedule=$(parse_schedule "$schedule")
 
-    # Get password and decrypt
-    local password=$(prompt_password)
-    local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
-
-    # Check if domain already has a timed block
-    local existing=$(echo "$data" | python3 -c "
+    # Check if domain already has a timed block from summary file (no password needed)
+    if [[ -f "$SUMMARY_FILE" ]]; then
+        local existing=$(python3 -c "
 import sys, json
-data = json.load(sys.stdin)
+try:
+    with open('$SUMMARY_FILE') as f:
+        data = json.load(f)
+except:
+    print('none')
+    sys.exit(0)
 domain = '$domain'
+now = $(date +%s)
 if domain in data:
     val = data[domain]
-    if isinstance(val, (int, float)):
-        print('timed')
-    elif isinstance(val, dict) and 'expiry' in val:
-        print('timed')
+    if isinstance(val, dict) and 'expiry' in val:
+        if val['expiry'] > now:
+            print('timed')
+        else:
+            print('none')
     elif isinstance(val, dict) and 'schedule' in val:
         print('daily')
     else:
@@ -679,42 +725,37 @@ else:
     print('none')
 " 2>/dev/null)
 
-    if [[ "$existing" == "timed" ]]; then
-        error "$domain already has a timed block. Wait for it to expire first."
+        if [[ "$existing" == "timed" ]]; then
+            error "$domain already has a timed block. Wait for it to expire first."
+        fi
     fi
 
-    # Add/update the daily schedule
-    local hidden_flag="$hidden"
-    local new_data
-    new_data=$(echo "$data" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-hidden = '$hidden_flag' == 'true'
-entry = {'schedule': '$schedule'}
-if hidden:
-    entry['hidden'] = True
-data['$domain'] = entry
-print(json.dumps(data))
-" 2>&1)
-
-    if [[ $? -ne 0 ]] || [[ -z "$new_data" ]]; then
-        error "Failed to create block data: $new_data"
+    # Write add request for daemon to process (no password needed)
+    local request_data
+    if [[ "$hidden" == "true" ]]; then
+        request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\", \"hidden\": true}"
+    else
+        request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\"}"
     fi
+    echo "$request_data" > "$ADD_REQUEST_FILE"
 
-    # Validate it's valid JSON before saving
-    if ! echo "$new_data" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-        error "Failed to create valid JSON data."
-    fi
-
-    # Re-encrypt and save
-    local encrypted=$(encrypt_data "$new_data" "$password")
-    if [[ -z "$encrypted" ]]; then
-        error "Failed to encrypt data."
-    fi
-    printf '%s\n' "$encrypted" > "$DATA_FILE"
-
-    # Signal daemon
+    # Signal daemon to process the request
     signal_daemon
+
+    # Wait briefly for daemon to process
+    local max_wait=10
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        sleep 0.5
+        waited=$((waited + 1))
+        if [[ ! -f "$ADD_REQUEST_FILE" ]]; then
+            break
+        fi
+    done
+
+    if [[ -f "$ADD_REQUEST_FILE" ]]; then
+        warn "Request submitted. Daemon will process it shortly."
+    fi
 
     success "Daily block set for $domain ($schedule)"
     if is_schedule_active "$schedule"; then
@@ -822,14 +863,24 @@ cmd_list() {
 
     check_setup
 
-    local password=$(prompt_password)
     local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
     local now=$(date +%s)
-    local now_mins=$(( $(date +%H) * 60 + $(date +%M) ))
+
+    if [[ "$show_hidden" == "true" ]]; then
+        # Show hidden requires password to decrypt
+        local password=$(prompt_password)
+        data=$(decrypt_data "$password")
+        if [[ $? -ne 0 ]]; then
+            error "Incorrect password or corrupted data."
+        fi
+    else
+        # Read from unencrypted summary file (no password needed)
+        if [[ ! -f "$SUMMARY_FILE" ]]; then
+            data="{}"
+        else
+            data=$(cat "$SUMMARY_FILE" 2>/dev/null || echo "{}")
+        fi
+    fi
 
     local has_timed=false
     local has_daily=false
@@ -1003,6 +1054,9 @@ case "${1:-}" in
         ;;
     setup)
         cmd_setup
+        ;;
+    reload)
+        cmd_reload
         ;;
     uninstall)
         cmd_uninstall

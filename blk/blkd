@@ -12,6 +12,8 @@ BLOCK_DIR="$HOME/.blk"
 DATA_FILE="$BLOCK_DIR/data.enc"
 SALT_FILE="$BLOCK_DIR/salt"
 TRIGGER_FILE="$BLOCK_DIR/trigger"
+ADD_REQUEST_FILE="$BLOCK_DIR/add_request"
+SUMMARY_FILE="$BLOCK_DIR/summary"
 ANCHOR_NAME="com.zu.blk"
 ANCHOR_FILE="/etc/pf.anchors/$ANCHOR_NAME"
 DAEMON_PASS_FILE="/var/root/.blk_pass"
@@ -312,6 +314,111 @@ get_current_rules() {
 # Block Management
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Process add requests from the CLI (allows adding blocks without password)
+process_add_requests() {
+    local password="$1"
+
+    if [[ ! -f "$ADD_REQUEST_FILE" ]]; then
+        return 0
+    fi
+
+    local request=$(cat "$ADD_REQUEST_FILE" 2>/dev/null)
+    if [[ -z "$request" ]]; then
+        rm -f "$ADD_REQUEST_FILE"
+        return 0
+    fi
+
+    log "Processing add request"
+
+    # Decrypt current data
+    local data=$(decrypt_data "$password")
+    if [[ -z "$data" ]]; then
+        data="{}"
+    fi
+
+    # Merge the request into data
+    local new_data=$(python3 -c "
+import sys, json
+
+# Parse current data
+try:
+    data = json.loads('''$data''')
+except:
+    data = {}
+
+# Parse request
+try:
+    request = json.loads('''$request''')
+except Exception as e:
+    print(json.dumps(data))
+    sys.exit(0)
+
+domain = request.get('domain')
+if not domain:
+    print(json.dumps(data))
+    sys.exit(0)
+
+# Build the entry
+if 'schedule' in request:
+    # Daily schedule
+    entry = {'schedule': request['schedule']}
+    if request.get('hidden'):
+        entry['hidden'] = True
+    data[domain] = entry
+elif 'expiry' in request:
+    # Timed block
+    if request.get('hidden'):
+        data[domain] = {'expiry': request['expiry'], 'hidden': True}
+    else:
+        data[domain] = {'expiry': request['expiry']}
+
+print(json.dumps(data))
+" 2>/dev/null)
+
+    if [[ -n "$new_data" ]] && [[ "$new_data" != "$data" ]]; then
+        # Re-encrypt and save
+        encrypt_data "$new_data" "$password" > "$DATA_FILE"
+        log "Added block from request"
+    fi
+
+    # Remove the request file
+    rm -f "$ADD_REQUEST_FILE"
+}
+
+# Update the summary file with non-hidden blocks
+update_summary_file() {
+    local data="$1"
+    local now=$(date +%s)
+
+    # Extract non-hidden active blocks
+    local summary=$(echo "$data" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+now = $now
+summary = {}
+for domain, val in data.items():
+    if isinstance(val, (int, float)):
+        # Simple timed block (not hidden) - convert to dict format for consistency
+        if val > now:
+            summary[domain] = {'expiry': int(val)}
+    elif isinstance(val, dict):
+        # Skip hidden entries
+        if val.get('hidden'):
+            continue
+        if 'expiry' in val:
+            if val['expiry'] > now:
+                summary[domain] = {'expiry': int(val['expiry'])}
+        elif 'schedule' in val:
+            summary[domain] = {'schedule': val['schedule']}
+print(json.dumps(summary))
+" 2>/dev/null)
+
+    if [[ -n "$summary" ]]; then
+        echo "$summary" > "$SUMMARY_FILE"
+        chmod 644 "$SUMMARY_FILE"
+    fi
+}
+
 remove_expired_blocks() {
     local password="$1"
     local data="$2"
@@ -383,6 +490,9 @@ main() {
             last_trigger_mtime="$current_trigger_mtime"
         fi
 
+        # Process any pending add requests (allows adding blocks without password)
+        process_add_requests "$password"
+
         # Decrypt and process blocks
         local data=$(decrypt_data "$password")
         if [[ -z "$data" ]] || [[ "$data" == "{}" ]]; then
@@ -392,9 +502,15 @@ main() {
                 apply_pf_rules ""
                 expected_rules=""
             fi
+            # Update summary file (empty)
+            echo "{}" > "$SUMMARY_FILE"
+            chmod 644 "$SUMMARY_FILE"
         else
             # Remove expired blocks
             data=$(remove_expired_blocks "$password" "$data")
+
+            # Update the summary file with non-hidden blocks
+            update_summary_file "$data"
 
             # Generate expected rules
             local new_rules=$(generate_pf_rules "$data")
