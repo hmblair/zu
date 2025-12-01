@@ -568,18 +568,37 @@ cmd_status() {
         return
     fi
 
+    # Load passphrase for borg info
+    if [[ -f "$PASS_FILE" ]]; then
+        export BORG_PASSPHRASE=$(<"$PASS_FILE")
+    fi
+
     local STATUS_DIR="$CONFIG_DIR/status"
     local now=$(date +%s)
     local has_failures=false
 
     echo ""
-    printf "  ${BOLD}%-15s %-12s %s${NC}\n" "BACKUP" "STATUS" "LAST RUN"
-    echo "  ─────────────────────────────────────────────────"
+    printf "  ${BOLD}%-15s %-12s %-18s %s${NC}\n" "BACKUP" "STATUS" "LAST RUN" "SIZE (DEDUP)"
+    echo "  ────────────────────────────────────────────────────────────"
 
     for config_file in "$BACKUPS_DIR"/*.json; do
         [[ ! -f "$config_file" ]] && continue
         local name=$(basename "$config_file" .json)
         local status_file="$STATUS_DIR/$name.json"
+
+        # Get repo size
+        local user=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
+        local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
+        local dest=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
+        local repo="$user@$host:$dest"
+        local repo_size="-"
+        local info_tmpfile=$(mktemp)
+        /opt/homebrew/bin/borg info "$repo" >"$info_tmpfile" 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            repo_size=$(grep "All archives:" "$info_tmpfile" | awk '{print $(NF-1), $NF}')
+            [[ -z "$repo_size" ]] && repo_size="-"
+        fi
+        rm -f "$info_tmpfile"
 
         if [[ -f "$status_file" ]]; then
             local run_status=$(python3 -c "import json; print(json.load(open('$status_file'))['status'])")
@@ -600,14 +619,14 @@ cmd_status() {
             fi
 
             if [[ "$run_status" == "success" ]]; then
-                printf "  %-15s ${GREEN}%-12s${NC} %s\n" "$name" "✓ success" "$time_ago"
+                printf "  %-15s ${GREEN}%-12s${NC} %-18s %s\n" "$name" "✓ success" "$time_ago" "$repo_size"
             else
-                printf "  %-15s ${RED}%-12s${NC} %s\n" "$name" "✗ failed" "$time_ago"
+                printf "  %-15s ${RED}%-12s${NC} %-18s %s\n" "$name" "✗ failed" "$time_ago" "$repo_size"
                 printf "  ${GREY}%-15s log: %s${NC}\n" "" "$log"
                 has_failures=true
             fi
         else
-            printf "  %-15s ${YELLOW}%-12s${NC} %s\n" "$name" "? unknown" "never run"
+            printf "  %-15s ${YELLOW}%-12s${NC} %-18s %s\n" "$name" "? unknown" "never run" "$repo_size"
         fi
     done
     echo ""
