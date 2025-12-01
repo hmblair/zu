@@ -15,6 +15,9 @@ DEFAULT_LOG_DIR="$CONFIG_DIR/logs"
 PLIST_PREFIX="com.zu.bkup"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 
+# SSH options for borg - keep connection alive during long transfers
+export BORG_RSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o TCPKeepAlive=yes"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -579,7 +582,7 @@ cmd_status() {
         local status_file="$STATUS_DIR/$name.json"
 
         if [[ -f "$status_file" ]]; then
-            local status=$(python3 -c "import json; print(json.load(open('$status_file'))['status'])")
+            local run_status=$(python3 -c "import json; print(json.load(open('$status_file'))['status'])")
             local timestamp=$(python3 -c "import json; print(json.load(open('$status_file'))['timestamp'])")
             local log=$(python3 -c "import json; print(json.load(open('$status_file'))['log'])")
 
@@ -596,7 +599,7 @@ cmd_status() {
                 time_ago="$((diff / 86400)) days ago"
             fi
 
-            if [[ "$status" == "success" ]]; then
+            if [[ "$run_status" == "success" ]]; then
                 printf "  %-15s ${GREEN}%-12s${NC} %s\n" "$name" "✓ success" "$time_ago"
             else
                 printf "  %-15s ${RED}%-12s${NC} %s\n" "$name" "✗ failed" "$time_ago"
@@ -1153,11 +1156,70 @@ cmd_test() {
         # Test repository access
         printf "  Repository %s... " "$dest"
         local repo="$user@$host:$dest"
-        if /opt/homebrew/bin/borg info "$repo" >/dev/null 2>&1; then
+        local repo_tmpfile=$(mktemp)
+        /opt/homebrew/bin/borg info "$repo" >"$repo_tmpfile" 2>&1
+        local repo_status=$?
+        local repo_output=$(<"$repo_tmpfile")
+        rm -f "$repo_tmpfile"
+        if [[ $repo_status -eq 0 ]]; then
             echo "${GREEN}OK${NC}"
         else
-            echo "${RED}FAILED${NC} (check passphrase or repo path)"
+            if echo "$repo_output" | grep -qi "passphrase\|wrong key\|decryption\|invalid key"; then
+                echo "${RED}WRONG PASSPHRASE${NC}"
+            elif echo "$repo_output" | grep -qi "does not exist\|not found\|no such file"; then
+                echo "${RED}NOT FOUND${NC} (repository doesn't exist at this path)"
+            elif echo "$repo_output" | grep -qi "not a valid repository\|invalid repository"; then
+                echo "${RED}INVALID${NC} (path exists but is not a borg repository)"
+            elif echo "$repo_output" | grep -qi "permission denied"; then
+                echo "${RED}PERMISSION DENIED${NC}"
+            elif echo "$repo_output" | grep -qi "lock"; then
+                if pgrep -f "borg.*$dest" >/dev/null 2>&1; then
+                    echo "${YELLOW}BACKUP IN PROGRESS${NC}"
+                else
+                    echo "${RED}STALE LOCK${NC} (run: borg break-lock $repo)"
+                fi
+            else
+                echo "${RED}FAILED${NC}"
+                echo "$repo_output" | head -3 | sed 's/^/    /'
+            fi
             ok=false
+        fi
+
+        # Check repository health
+        if $ok; then
+            printf "  Repository health... "
+            local check_tmpfile=$(mktemp)
+            /opt/homebrew/bin/borg check "$repo" >"$check_tmpfile" 2>&1
+            local check_status=$?
+            local check_output=$(<"$check_tmpfile")
+            rm -f "$check_tmpfile"
+            if [[ $check_status -eq 0 ]]; then
+                echo "${GREEN}OK${NC}"
+            elif [[ $check_status -eq 1 ]]; then
+                echo "${YELLOW}WARNINGS${NC}"
+                echo "$check_output" | sed 's/^/    /'
+            else
+                echo "${RED}ERRORS${NC}"
+                echo "$check_output" | sed 's/^/    /'
+                ok=false
+            fi
+        fi
+
+        # Check for repo lock (would block next backup)
+        if $ok; then
+            printf "  Repository lock... "
+            if /opt/homebrew/bin/borg info "$repo" 2>&1 | grep -q "lock"; then
+                if pgrep -f "borg.*$dest" >/dev/null 2>&1; then
+                    echo "${YELLOW}BACKUP IN PROGRESS${NC} (skipping remaining checks)"
+                    echo ""
+                    continue
+                else
+                    echo "${RED}STALE LOCK${NC} (run: borg break-lock $repo)"
+                    ok=false
+                fi
+            else
+                echo "${GREEN}OK${NC}"
+            fi
         fi
 
         # Test source directories
