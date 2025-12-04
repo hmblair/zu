@@ -1,0 +1,49 @@
+#!/bin/zsh
+
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: ${0:t} FILE..."
+  echo "Rename files to 0, 1, 2, ... with minimal leading zeros."
+  [ $# -eq 0 ] && exit 1 || exit 0
+fi
+
+# Validate all files first
+for f in "$@"; do
+  if [ ! -f "$f" ]; then
+    echo "Error: '$f' is not a file"
+    exit 1
+  fi
+done
+
+files=("$@")
+count=${#files[@]}
+
+# Calculate width needed for zero padding (max index is count-1)
+max_index=$((count - 1))
+width=${#max_index}
+
+# Store extensions and directories, rename to temp names
+typeset -a extensions
+typeset -a dirs
+i=0
+for f in "${files[@]}"; do
+  dirs+=("${f:h}")
+  base="${f:t}"
+  # Get extension (only if file has a dot that's not at the start)
+  if [[ "$base" == *.* && "$base" != .* ]]; then
+    extensions+=(".${base:e}")
+  else
+    extensions+=("")
+  fi
+  mv "$f" "${dirs[$((i + 1))]}/.tmp_renumber_$i"
+  ((i++))
+done
+
+# Second pass: rename to final numbered names
+for i in {0..$max_index}; do
+  dir="${dirs[$((i + 1))]}"
+  ext="${extensions[$((i + 1))]}"
+  newname=$(printf "%0${width}d%s" "$i" "$ext")
+  mv "$dir/.tmp_renumber_$i" "$dir/$newname"
+done
+
+echo "Renamed $count files"
