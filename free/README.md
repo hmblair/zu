@@ -8,6 +8,7 @@ A command-line utility that shows free disk space and lists the largest files in
 - **Simple output**: Shows free space and top N largest files
 - **Background daemon**: LaunchAgent updates cache automatically
 - **Manual refresh**: Update cache on-demand when needed
+- **Configurable**: Set how many files to cache during setup
 
 ## Requirements
 
@@ -24,6 +25,7 @@ A command-line utility that shows free disk space and lists the largest files in
 ```
 
 This will:
+- Prompt for cache size (how many files to track, default: 100)
 - Create a LaunchAgent that updates the cache every hour
 - The daemon runs as your user (no sudo required)
 
@@ -71,7 +73,7 @@ Top 10 largest files (cached 2h ago)
 free update
 ```
 
-Scans your home directory for the 100 largest files (>1MB) and updates the cache.
+Scans your home directory for the largest files (>1MB) and updates the cache. Uses the cache size from config (default: 100).
 
 ### Install background daemon
 
@@ -101,18 +103,28 @@ Removes the LaunchAgent. You can still use `free update` manually.
 
 1. **CLI** (`free`): User-facing script that displays disk space and reads from cache
 2. **Daemon** (`freed`): Runs hourly via launchd, scans home directory for large files
-3. **Cache**: Stores the top 100 largest files for instant retrieval
+3. **Cache**: Stores the largest files (configurable count) for instant retrieval
 
 ### Data Storage
 
 ```
 ~/.config/free/
+├── config.json   # Configuration (cache_count)
 ├── cache         # List of largest files (size + path)
 └── status.json   # Cache metadata (last update timestamp)
 
 ~/Library/LaunchAgents/com.zu.freed.plist  # Daemon config
 /tmp/freed.log                              # Daemon logs
 ```
+
+### Configuration
+
+`~/.config/free/config.json`:
+```json
+{"cache_count": 100}
+```
+
+- `cache_count`: Number of largest files to cache (default: 100)
 
 ## Troubleshooting
 

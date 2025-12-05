@@ -5,10 +5,21 @@ source $SCRIPT_DIR/../common
 
 # Configuration
 CONFIG_DIR="$HOME/.config/free"
+CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_FILE="$CONFIG_DIR/cache"
 STATUS_FILE="$CONFIG_DIR/status.json"
 PLIST_FILE="$HOME/Library/LaunchAgents/com.zu.freed.plist"
 DAEMON_PATH="$SCRIPT_DIR/freed"
+DEFAULT_CACHE_COUNT=100
+
+# Read cache_count from config, fallback to default
+get_cache_count() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        grep -o '"cache_count": [0-9]*' "$CONFIG_FILE" 2>/dev/null | grep -o '[0-9]*'
+    fi
+}
+CACHE_COUNT=$(get_cache_count)
+CACHE_COUNT=${CACHE_COUNT:-$DEFAULT_CACHE_COUNT}
 
 # Helper: format time ago
 time_ago() {
@@ -28,6 +39,17 @@ time_ago() {
 cmd_setup() {
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$(dirname "$PLIST_FILE")"
+
+    # Prompt for cache size
+    local cache_count=$DEFAULT_CACHE_COUNT
+    echo -n "Cache size [$DEFAULT_CACHE_COUNT]: "
+    read user_count
+    if [[ -n "$user_count" ]]; then
+        cache_count=$user_count
+    fi
+
+    # Write config file
+    echo "{\"cache_count\": $cache_count}" > "$CONFIG_FILE"
 
     # Generate plist
     cat > "$PLIST_FILE" <<EOF
@@ -102,6 +124,11 @@ cmd_update() {
 # Command: show largest files from cache
 cmd_show_files() {
     local count=$1
+
+    if [[ $count -gt $CACHE_COUNT ]]; then
+        echo "${RED}Error:${NC} -n cannot exceed cache size ($CACHE_COUNT)"
+        return 1
+    fi
 
     if [[ ! -f "$CACHE_FILE" ]]; then
         echo "${YELLOW}No cache found.${NC} Run ${CYAN}free setup${NC} or ${CYAN}free update${NC}"

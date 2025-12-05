@@ -4,9 +4,16 @@
 # Updates the list of largest files in the home directory
 
 CONFIG_DIR="$HOME/.config/free"
+CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_FILE="$CONFIG_DIR/cache"
 STATUS_FILE="$CONFIG_DIR/status.json"
-CACHE_COUNT=100
+DEFAULT_CACHE_COUNT=100
+
+# Read cache_count from config, fallback to default
+if [[ -f "$CONFIG_FILE" ]]; then
+    CACHE_COUNT=$(grep -o '"cache_count": [0-9]*' "$CONFIG_FILE" 2>/dev/null | grep -o '[0-9]*')
+fi
+CACHE_COUNT=${CACHE_COUNT:-$DEFAULT_CACHE_COUNT}
 
 # Ensure config directory exists
 mkdir -p "$CONFIG_DIR"
