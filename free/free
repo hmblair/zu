@@ -1,0 +1,153 @@
+#!/bin/zsh
+
+SCRIPT_DIR=${0:A:h}
+source $SCRIPT_DIR/../common
+
+# Configuration
+CONFIG_DIR="$HOME/.config/free"
+CACHE_FILE="$CONFIG_DIR/cache"
+STATUS_FILE="$CONFIG_DIR/status.json"
+PLIST_FILE="$HOME/Library/LaunchAgents/com.zu.freed.plist"
+DAEMON_PATH="$SCRIPT_DIR/freed"
+
+# Helper: format time ago
+time_ago() {
+    local seconds=$1
+    if [[ $seconds -lt 60 ]]; then
+        echo "${seconds}s ago"
+    elif [[ $seconds -lt 3600 ]]; then
+        echo "$((seconds / 60))m ago"
+    elif [[ $seconds -lt 86400 ]]; then
+        echo "$((seconds / 3600))h ago"
+    else
+        echo "$((seconds / 86400))d ago"
+    fi
+}
+
+# Command: setup
+cmd_setup() {
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$(dirname "$PLIST_FILE")"
+
+    # Generate plist
+    cat > "$PLIST_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zu.freed</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>$DAEMON_PATH</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/freed.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/freed.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>$HOME</string>
+        <key>USER</key>
+        <string>$USER</string>
+    </dict>
+</dict>
+</plist>
+EOF
+
+    chmod 644 "$PLIST_FILE"
+    launchctl load "$PLIST_FILE" 2>/dev/null
+
+    echo "${GREEN}Daemon installed${NC}"
+    echo "Cache will update every hour"
+    echo ""
+    echo "Run ${CYAN}free update${NC} to build cache now"
+}
+
+# Command: uninstall
+cmd_uninstall() {
+    if [[ -f "$PLIST_FILE" ]]; then
+        launchctl unload "$PLIST_FILE" 2>/dev/null
+        rm "$PLIST_FILE"
+        echo "${GREEN}Daemon uninstalled${NC}"
+    else
+        echo "Daemon not installed"
+    fi
+}
+
+# Command: reload
+cmd_reload() {
+    if [[ -f "$PLIST_FILE" ]]; then
+        launchctl unload "$PLIST_FILE" 2>/dev/null
+        launchctl load "$PLIST_FILE" 2>/dev/null
+        echo "${GREEN}Daemon reloaded${NC}"
+    else
+        echo "Daemon not installed. Run ${CYAN}free setup${NC} first."
+    fi
+}
+
+# Command: update
+cmd_update() {
+    echo "Updating cache..."
+    "$DAEMON_PATH"
+    echo "${GREEN}Cache updated${NC}"
+}
+
+# Command: show largest files from cache
+cmd_show_files() {
+    local count=$1
+
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        echo "${YELLOW}No cache found.${NC} Run ${CYAN}free setup${NC} or ${CYAN}free update${NC}"
+        return 1
+    fi
+
+    # Get cache age
+    local updated=$(grep -o '"updated": [0-9]*' "$STATUS_FILE" 2>/dev/null | grep -o '[0-9]*')
+    local now=$(date +%s)
+    local age=$((now - updated))
+
+    echo ""
+    echo "${BOLD}Top $count largest files${NC} ${GREY}(cached $(time_ago $age))${NC}"
+    head -n $count "$CACHE_FILE" | \
+        awk -v cyan="$CYAN" -v nc="$NC" '{size=$1; $1=""; sub(/^ /, ""); printf cyan "%-8s" nc " %s\n", size, $0}'
+}
+
+# Main
+case "$1" in
+    setup)
+        cmd_setup
+        ;;
+    uninstall)
+        cmd_uninstall
+        ;;
+    reload)
+        cmd_reload
+        ;;
+    update)
+        cmd_update
+        ;;
+    *)
+        # Parse -n flag
+        count=0
+        while getopts "n:" opt; do
+            case $opt in
+                n) count=$OPTARG ;;
+            esac
+        done
+
+        # Show free space
+        df -H / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
+
+        # Show largest files if -n was provided
+        if [[ $count -gt 0 ]]; then
+            cmd_show_files $count
+        fi
+        ;;
+esac

@@ -1,0 +1,24 @@
+#!/bin/zsh
+
+# freed - Cache daemon for free script
+# Updates the list of largest files in the home directory
+
+CONFIG_DIR="$HOME/.config/free"
+CACHE_FILE="$CONFIG_DIR/cache"
+STATUS_FILE="$CONFIG_DIR/status.json"
+CACHE_COUNT=100
+
+# Ensure config directory exists
+mkdir -p "$CONFIG_DIR"
+
+# Scan for largest files
+find ~ -type f -size +1M -print0 2>/dev/null | \
+    xargs -0 du -h 2>/dev/null | \
+    sort -hr | \
+    head -n $CACHE_COUNT > "$CACHE_FILE.tmp"
+
+# Atomically replace cache file
+mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+
+# Update status with timestamp
+echo "{\"updated\": $(date +%s)}" > "$STATUS_FILE"
