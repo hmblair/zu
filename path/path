@@ -43,11 +43,6 @@ info() {
     echo "${CYAN}$1${NC}"
 }
 
-# Get all managed paths from config files
-managed_paths() {
-    cat "$PATH_DIR"/* 2>/dev/null
-}
-
 # Get system paths
 system_paths() {
     cat /etc/paths /etc/paths.d/* 2>/dev/null
@@ -170,8 +165,16 @@ cmd_remove() {
 }
 
 cmd_list() {
-    local managed="$(managed_paths)"
     local sys="$(system_paths)"
+
+    # Build path -> group lookup
+    typeset -A groups
+    for group in "$PATH_DIR"/*; do
+        [[ ! -f "$group" ]] && continue
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && groups[$p]="${group:t}"
+        done < "$group"
+    done
 
     path_to_file | while read -r p; do
         full="${p:A}"
@@ -181,15 +184,18 @@ cmd_list() {
             display="${ST}$p${NST}"
         fi
 
-        if contains "$managed" "$p"; then
+        if [[ -n "${groups[$p]}" ]]; then
             icon="${GREEN}󱋻${NC}"
+            suffix=" ${GREY}(${groups[$p]})${NC}"
         elif contains "$sys" "$p"; then
             icon="${YELLOW}󰼆${NC}"
+            suffix=""
         else
             icon="${RED}󰼈${NC}"
+            suffix=""
         fi
 
-        echo -e "${icon} ${display}"
+        echo -e "${icon} ${display}${suffix}"
     done
 }
 
