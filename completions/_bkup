@@ -1,0 +1,43 @@
+#compdef bkup
+
+_bkup() {
+    local -a commands
+    commands=(
+        'setup:One-time passphrase setup'
+        'add:Create and schedule a backup'
+        'edit:Edit an existing backup'
+        'copy:Copy a backup as a new one'
+        'run:Run a backup manually'
+        'test:Test backup connectivity and paths'
+        'status:Show last run status of all backups'
+        'list:List all backup configurations'
+        'remove:Remove a backup and its schedule'
+        'uninstall:Remove passphrase and all backups'
+        'help:Show usage'
+    )
+
+    local -a backups
+    local backup_dir="$HOME/.config/bkup/backups"
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe -t commands 'bkup command' commands
+            ;;
+        args)
+            case $words[1] in
+                edit|copy|run|test|remove)
+                    if [[ -d "$backup_dir" ]]; then
+                        backups=(${backup_dir}/*.json(:t:r))
+                        _describe -t backups 'backup name' backups
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_bkup "$@"

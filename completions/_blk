@@ -1,0 +1,35 @@
+#compdef blk
+
+_blk() {
+    local -a commands
+    commands=(
+        'add:Block a domain for specified duration'
+        'daily:Set up a daily recurring block'
+        'remove:Remove a daily schedule'
+        'list:Show all active blocks'
+        'status:Check if a domain is blocked'
+        'setup:One-time setup'
+        'reload:Restart the daemon'
+        'uninstall:Remove daemon and config'
+        'help:Show usage'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe -t commands 'blk command' commands
+            ;;
+        args)
+            case $words[1] in
+                add|daily|status|remove)
+                    _message 'domain'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_blk "$@"

@@ -1,0 +1,23 @@
+#compdef free
+
+_free() {
+    local -a commands
+    commands=(
+        'setup:One-time setup'
+        'uninstall:Remove daemon and config'
+        'reload:Restart the daemon'
+        'update:Update the cache'
+    )
+
+    _arguments -C \
+        '-n[Show n largest files]:count' \
+        '1:command:->command'
+
+    case $state in
+        command)
+            _describe -t commands 'free command' commands
+            ;;
+    esac
+}
+
+_free "$@"

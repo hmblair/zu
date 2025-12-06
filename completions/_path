@@ -1,0 +1,36 @@
+#compdef path
+
+_path() {
+    local -a commands
+    commands=(
+        'read:Load all paths from config files into PATH'
+        'add:Add path(s) to a group'
+        'remove:Remove a path from a group'
+        'clean:Remove nonexistent paths from groups'
+        'list:Show all paths in current PATH'
+        'dir:Show path config directory'
+        'help:Show usage'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe -t commands 'path command' commands
+            ;;
+        args)
+            case $words[1] in
+                add)
+                    _files -/
+                    ;;
+                remove)
+                    _files -/
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_path "$@"
