@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 cmd=""
 if command -v pbcopy >/dev/null 2>&1; then

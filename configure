@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 # configure - Set up zu bin directory with symlinks
 # Only links main entry points: dir/dir scripts and root-level executables

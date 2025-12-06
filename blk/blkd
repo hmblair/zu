@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 # blkd - Website Blocker Daemon
 # Runs as root via launchd, manages pf firewall rules

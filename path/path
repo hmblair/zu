@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 # path - PATH Management CLI
 # Manages PATH environment variable through organized group files

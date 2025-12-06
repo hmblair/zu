@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 # bkup - Borg backup CLI wrapper
 # Creates borg backups to a remote repository over SSH

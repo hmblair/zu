@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 # monitor - Server Resource Monitor
 # Shows CPU, memory, and storage usage via SSH

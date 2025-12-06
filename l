@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 SCRIPT=${0:t}
 PARENT=${0:A:h}
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
       DEPTH="$2"
       shift 2
       ;;
-    --tree)
+    -t|--tree)
       DEPTH=$(getconf PATH_MAX /)
       shift
       ;;
@@ -108,6 +108,11 @@ print-line() {
     COLOUR=$YELLOW_B
   fi
 
+  if [[ $line =~ "/.git" ]] && [[ ! $line =~ "/.git." ]]; then
+    ICON=""
+    COLOUR=$RED
+  fi
+
   char="${GREY}"
   for ((IX=1; IX<DEPTH; IX++)); do
     if (( ARR[$IX] )); then
@@ -156,6 +161,10 @@ print-dir() {
   print-line $FILE $DEPTH $ARR
 
   if [[ ! -d $FILE ]] || [[ $DEPTH -ge $MAXDEPTH ]]; then
+    return
+  fi
+
+  if [[ $FILE =~ ".git" ]]; then
     return
   fi
 
