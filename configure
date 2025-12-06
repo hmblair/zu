@@ -1,0 +1,37 @@
+#!/bin/zsh
+
+# configure - Set up zu bin directory with symlinks
+# Only links main entry points: dir/dir scripts and root-level executables
+
+setopt nullglob
+
+SCRIPT_DIR="${0:A:h}"
+BIN_DIR="$SCRIPT_DIR/bin"
+
+mkdir -p "$BIN_DIR"
+
+# Clear existing symlinks
+rm -f "$BIN_DIR"/* 2>/dev/null
+
+# Link dir/dir pattern scripts (e.g., bkup/bkup, blk/blk)
+for script in "$SCRIPT_DIR"/*/*; do
+    [[ ! -x "$script" ]] && continue
+    dir="${script:h:t}"
+    name="${script:t}"
+    [[ "$dir" == "bin" ]] && continue
+    [[ "$dir" == "completions" ]] && continue
+    [[ "$name" != "$dir" ]] && continue
+    ln -sf "../$dir/$name" "$BIN_DIR/$name"
+done
+
+# Link root-level executables (excluding special files)
+for script in "$SCRIPT_DIR"/*; do
+    [[ -d "$script" ]] && continue
+    [[ ! -x "$script" ]] && continue
+    name="${script:t}"
+    [[ "$name" == "configure" ]] && continue
+    [[ "$name" == "common" ]] && continue
+    ln -sf "../$name" "$BIN_DIR/$name"
+done
+
+echo "Configured $(ls -1 "$BIN_DIR" | wc -l | tr -d ' ') commands in bin/"
