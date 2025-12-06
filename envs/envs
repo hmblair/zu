@@ -1,0 +1,186 @@
+#!/usr/bin/env zsh
+
+# envs - Environment Variable Manager
+# Manages persistent environment variables across shells
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# Configuration
+ENVS_FILE="$HOME/.envs"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo "Usage: envs <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  read                  Output export statements (use with eval)"
+    echo "  add <name> <value>    Add or update a variable"
+    echo "  remove <name>         Remove a variable"
+    echo "  list [--all]          Show managed variables (--all for all)"
+    echo "  dir                   Show config file path"
+    echo ""
+    echo "Add to .zshrc:"
+    echo "  eval \"\$(envs read)\""
+    echo ""
+    echo "Examples:"
+    echo "  envs add API_KEY sk-1234567890"
+    echo "  envs remove API_KEY"
+    echo "  envs list"
+}
+
+error() {
+    echo "${RED}Error:${NC} $1" >&2
+    exit 1
+}
+
+success() {
+    echo "${GREEN}$1${NC}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_read() {
+    # Output export statements to be eval'd: eval "$(envs read)"
+    [[ ! -f "$ENVS_FILE" ]] && return
+    while IFS='=' read -r name value; do
+        [[ -z "$name" || "$name" == \#* ]] && continue
+        echo "export $name='$value'"
+    done < "$ENVS_FILE"
+}
+
+cmd_add() {
+    local name="$1"
+    local value="$2"
+
+    if [[ -z "$name" || -z "$value" ]]; then
+        error "Usage: envs add <name> <value>"
+    fi
+
+    # Validate name (alphanumeric and underscore only)
+    if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        error "Invalid variable name: $name"
+    fi
+
+    touch "$ENVS_FILE"
+
+    # Remove existing entry if present
+    if grep -q "^${name}=" "$ENVS_FILE" 2>/dev/null; then
+        local temp=$(mktemp)
+        grep -v "^${name}=" "$ENVS_FILE" > "$temp"
+        mv "$temp" "$ENVS_FILE"
+    fi
+
+    # Add new entry
+    echo "${name}=${value}" >> "$ENVS_FILE"
+    success "Set $name"
+}
+
+cmd_remove() {
+    local name="$1"
+
+    if [[ -z "$name" ]]; then
+        error "Usage: envs remove <name>"
+    fi
+
+    if [[ ! -f "$ENVS_FILE" ]] || ! grep -q "^${name}=" "$ENVS_FILE" 2>/dev/null; then
+        error "Variable '$name' not found"
+    fi
+
+    local temp=$(mktemp)
+    grep -v "^${name}=" "$ENVS_FILE" > "$temp"
+    mv "$temp" "$ENVS_FILE"
+    success "Removed $name"
+}
+
+cmd_list() {
+    local show_all=false
+    [[ "$1" == "--all" ]] && show_all=true
+
+    typeset -A vars managed
+
+    # Load managed vars from file
+    if [[ -f "$ENVS_FILE" ]]; then
+        while IFS='=' read -r name value; do
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            vars[$name]="$value"
+            managed[$name]=1
+        done < "$ENVS_FILE"
+    fi
+
+    # Load env vars if --all
+    if $show_all; then
+        while IFS='=' read -r name value; do
+            [[ -z "$name" ]] && continue
+            [[ -z "${vars[$name]}" ]] && vars[$name]="$value"
+        done < <(env)
+    fi
+
+    if [[ ${#vars} -eq 0 ]]; then
+        echo "No managed variables."
+        return
+    fi
+
+    # Display sorted
+    for name in ${(ko)vars}; do
+        value="${vars[$name]}"
+
+        if [[ -n "${managed[$name]}" ]]; then
+            icon="${GREEN}󱋻${NC}"
+        else
+            icon="${GREY}󰼈${NC}"
+        fi
+
+        # Mask value if it looks sensitive
+        if [[ "$name" =~ (KEY|SECRET|TOKEN|PASS|CRED|AUTH) ]]; then
+            if [[ ${#value} -gt 8 ]]; then
+                value="${value:0:4}...${value: -4}"
+            else
+                value="****"
+            fi
+        fi
+
+        echo -e "${icon} ${CYAN}$name${NC}=$value"
+    done
+}
+
+cmd_dir() {
+    echo "$ENVS_FILE"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    read)
+        cmd_read
+        ;;
+    add)
+        shift
+        cmd_add "$@"
+        ;;
+    remove)
+        cmd_remove "$2"
+        ;;
+    list)
+        cmd_list "$2"
+        ;;
+    dir)
+        cmd_dir
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    "")
+        usage
+        ;;
+    *)
+        error "Unknown command: $1. Run 'envs help' for usage."
+        ;;
+esac
