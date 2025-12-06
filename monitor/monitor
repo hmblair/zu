@@ -61,18 +61,9 @@ cmd_monitor() {
         exit 1
     fi
 
-    # Check SSH connectivity
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "true" 2>/dev/null; then
-        error "Cannot connect to $host"
-    fi
-
-    echo ""
-    echo "${BOLD}Server: ${CYAN}$host${NC}"
-    echo "─────────────────────────────────────────"
-
     # Get all stats in a single SSH call (value|percentage format)
     local stats
-    stats=$(ssh "$host" "
+    stats=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "
         # CPU usage
         cpu=\$(top -bn1 2>/dev/null | grep 'Cpu(s)' | awk '{print \$2}')
         if [[ -z \"\$cpu\" ]]; then
@@ -102,6 +93,10 @@ cmd_monitor() {
     if [[ -z "$stats" ]]; then
         error "Failed to retrieve stats from $host"
     fi
+
+    echo ""
+    echo "${BOLD}Server: ${CYAN}$host${NC}"
+    echo "─────────────────────────────────────────"
 
     # Parse results (value|percentage)
     local cpu_val cpu_pct mem_val mem_pct storage_val storage_pct external_val external_pct
