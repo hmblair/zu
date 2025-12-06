@@ -1,0 +1,277 @@
+#!/bin/zsh
+
+# path - PATH Management CLI
+# Manages PATH environment variable through organized group files
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# Configuration
+PATH_DIR="$HOME/.paths"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo "Usage: path <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  read                  Load all paths from config files into PATH"
+    echo "  add <path>...         Add path(s) to a group"
+    echo "  remove [path]         Remove a path from a group"
+    echo "  clean                 Remove nonexistent paths from groups"
+    echo "  list                  Show all paths in current PATH"
+    echo "  dir                   Show path config directory"
+    echo ""
+    echo "Examples:"
+    echo "  path add ~/bin"
+    echo "  path remove"
+    echo "  path list"
+}
+
+error() {
+    echo "${RED}Error:${NC} $1" >&2
+    exit 1
+}
+
+success() {
+    echo "${GREEN}$1${NC}"
+}
+
+info() {
+    echo "${CYAN}$1${NC}"
+}
+
+# Get all managed paths from config files
+managed_paths() {
+    cat "$PATH_DIR"/* 2>/dev/null
+}
+
+# Get system paths
+system_paths() {
+    cat /etc/paths /etc/paths.d/* 2>/dev/null
+}
+
+# Check if string contains line
+contains() {
+    echo "$1" | grep -Fxq "$2"
+}
+
+# Convert PATH to file format (one per line)
+path_to_file() {
+    echo "$PATH" | tr ':' '\n' | grep -v '^$'
+}
+
+# Convert file format to PATH
+file_to_path() {
+    local paths=()
+    while read -r line; do
+        paths+=("${line/#\~/$HOME}")
+    done < <(cat "$@")
+    echo "$(IFS=':'; echo "${paths[*]}")"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_read() {
+    mkdir -p "$PATH_DIR"
+    export PATH="$PATH:$(file_to_path "$PATH_DIR"/*)"
+}
+
+cmd_add() {
+    if [[ $# -eq 0 ]]; then
+        error "No path to add."
+    fi
+
+    mkdir -p "$PATH_DIR"
+
+    for p in "$@"; do
+        local resolved="${p:A}"
+        if [[ -z "$resolved" ]]; then
+            echo "${RED}Error:${NC} '$p' does not exist or is invalid"
+            continue
+        fi
+
+        echo "Select a group for '$resolved':"
+        local groups=("$PATH_DIR"/*)
+        if [[ ${#groups[@]} -eq 0 ]] || [[ ! -e "${groups[1]}" ]]; then
+            error "No path groups found. Create a group file in $PATH_DIR first."
+        fi
+        menu "${groups[@]:t}"
+        local group="${groups[$(($? + 1))]}"
+        echo ""
+
+        if grep -Fxq "$resolved" "$group" 2>/dev/null; then
+            echo "${YELLOW}Warning:${NC} $resolved is already in ${group:t}"
+        else
+            echo "$resolved" >> "$group"
+            success "Added $resolved to ${group:t}"
+        fi
+    done
+}
+
+cmd_remove() {
+    mkdir -p "$PATH_DIR"
+
+    local groups=("$PATH_DIR"/*)
+    if [[ ${#groups[@]} -eq 0 ]] || [[ ! -e "${groups[1]}" ]]; then
+        error "No path groups found."
+    fi
+
+    # If a path was provided as argument, find and remove it
+    if [[ -n "$1" ]]; then
+        local target="${1:A}"
+        [[ -z "$target" ]] && target="$1"
+
+        for group in "${groups[@]}"; do
+            if grep -Fxq "$target" "$group" 2>/dev/null; then
+                local temp=$(mktemp)
+                grep -Fxv "$target" "$group" > "$temp"
+                mv "$temp" "$group"
+                success "Removed $target from ${group:t}"
+                return
+            fi
+        done
+        error "'$target' not found in any group."
+    fi
+
+    # Interactive mode: select group, then select path
+    echo "Select a group:"
+    menu "${groups[@]:t}"
+    local group="${groups[$(($? + 1))]}"
+    echo ""
+
+    if [[ ! -s "$group" ]]; then
+        error "Group '${group:t}' is empty."
+    fi
+
+    local paths=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && paths+=("$line")
+    done < "$group"
+
+    if [[ ${#paths[@]} -eq 0 ]]; then
+        error "Group '${group:t}' has no paths."
+    fi
+
+    echo "Select a path to remove from '${group:t}':"
+    menu "${paths[@]}"
+    local idx=$(($? + 1))
+    local selected="${paths[$idx]}"
+    echo ""
+
+    local temp=$(mktemp)
+    grep -Fxv "$selected" "$group" > "$temp"
+    mv "$temp" "$group"
+    success "Removed $selected from ${group:t}"
+}
+
+cmd_list() {
+    local managed="$(managed_paths)"
+    local sys="$(system_paths)"
+
+    path_to_file | while read -r p; do
+        full="${p:A}"
+        if [[ -d "$full" ]]; then
+            display="$full"
+        else
+            display="${ST}$p${NST}"
+        fi
+
+        if contains "$managed" "$p"; then
+            icon="${GREEN}󱋻${NC}"
+        elif contains "$sys" "$p"; then
+            icon="${YELLOW}󰼆${NC}"
+        else
+            icon="${RED}󰼈${NC}"
+        fi
+
+        echo -e "${icon} ${display}"
+    done
+}
+
+cmd_dir() {
+    echo "$PATH_DIR"
+}
+
+cmd_clean() {
+    mkdir -p "$PATH_DIR"
+
+    local groups=("$PATH_DIR"/*)
+    if [[ ${#groups[@]} -eq 0 ]] || [[ ! -e "${groups[1]}" ]]; then
+        echo "No path groups found."
+        return
+    fi
+
+    local removed=0
+    for group in "${groups[@]}"; do
+        [[ ! -f "$group" ]] && continue
+
+        local temp=$(mktemp)
+        local group_removed=0
+
+        while IFS= read -r p; do
+            if [[ -z "$p" ]]; then
+                continue
+            elif [[ -d "$p" ]]; then
+                echo "$p" >> "$temp"
+            else
+                echo "${RED}✕${NC} $p ${GREY}(${group:t})${NC}"
+                ((group_removed++))
+                ((removed++))
+            fi
+        done < "$group"
+
+        if [[ $group_removed -gt 0 ]]; then
+            mv "$temp" "$group"
+        else
+            rm "$temp"
+        fi
+    done
+
+    if [[ $removed -eq 0 ]]; then
+        echo "All managed paths exist."
+    else
+        echo ""
+        success "Removed $removed nonexistent path(s)."
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    read)
+        cmd_read
+        ;;
+    add)
+        shift
+        cmd_add "$@"
+        ;;
+    remove)
+        shift
+        cmd_remove "$@"
+        ;;
+    clean)
+        cmd_clean
+        ;;
+    list)
+        cmd_list
+        ;;
+    dir)
+        cmd_dir
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    "")
+        usage
+        ;;
+    *)
+        error "Unknown command: $1. Run 'path help' for usage."
+        ;;
+esac
