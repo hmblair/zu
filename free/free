@@ -86,7 +86,7 @@ EOF
     chmod 644 "$PLIST_FILE"
     launchctl load "$PLIST_FILE" 2>/dev/null
 
-    echo "${GREEN}Daemon installed${NC}"
+    success "Daemon installed"
     echo "Cache will update every hour"
     echo ""
     echo "Run ${CYAN}free update${NC} to build cache now"
@@ -97,7 +97,7 @@ cmd_uninstall() {
     if [[ -f "$PLIST_FILE" ]]; then
         launchctl unload "$PLIST_FILE" 2>/dev/null
         rm "$PLIST_FILE"
-        echo "${GREEN}Daemon uninstalled${NC}"
+        success "Daemon uninstalled"
     else
         echo "Daemon not installed"
     fi
@@ -108,7 +108,7 @@ cmd_reload() {
     if [[ -f "$PLIST_FILE" ]]; then
         launchctl unload "$PLIST_FILE" 2>/dev/null
         launchctl load "$PLIST_FILE" 2>/dev/null
-        echo "${GREEN}Daemon reloaded${NC}"
+        success "Daemon reloaded"
     else
         echo "Daemon not installed. Run ${CYAN}free setup${NC} first."
     fi
@@ -118,7 +118,7 @@ cmd_reload() {
 cmd_update() {
     echo "Updating cache..."
     "$DAEMON_PATH"
-    echo "${GREEN}Cache updated${NC}"
+    success "Cache updated"
 }
 
 # Command: show largest files from cache

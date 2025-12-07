@@ -26,11 +26,6 @@ usage() {
     echo "  monitor user@server.local"
 }
 
-error() {
-    echo "${RED}Error:${NC} $1" >&2
-    exit 1
-}
-
 # Format usage line with color based on percentage
 format_usage() {
     local label="$1"
