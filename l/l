@@ -1,0 +1,325 @@
+#!/usr/bin/env zsh
+
+# l - Enhanced directory listing with tree view
+# Displays directories in a tree format with icons and colors
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# Configuration
+DEPTH=1
+HIDDEN=0
+SIZES=0
+COUNT_LINES=0
+EXPAND_ALL=0
+DIRECTORIES=()
+NO_EXPAND=('^\.git$')
+MAX_TREE_DEPTH=50
+
+# Associative arrays
+typeset -A ICONS
+typeset -A GITIGNORE_CACHE
+
+# Disable colors if not a tty
+if [[ ! -t 1 ]]; then
+    RED="" GREEN="" YELLOW="" BLUE="" CYAN="" WHITE="" GREY="" NC=""
+    YELLOW_B="" BOLD=""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo "Usage: l [-ahls] [--depth INT | --tree | --expand-all] [FILE ...]"
+    echo ""
+    echo "Options:"
+    echo "  -a              Show hidden files"
+    echo "  -s              Show file/directory sizes"
+    echo "  -l              Show line counts for files"
+    echo "  -t, --tree      Show full tree (depth $MAX_TREE_DEPTH)"
+    echo "  --depth INT     Limit tree depth"
+    echo "  --expand-all    Expand all directories (ignore NO_EXPAND list)"
+    echo "  -h, --help      Show this help message"
+}
+
+error() {
+    echo "${RED}Error:${NC} $1" >&2
+    exit 1
+}
+
+# Load icons from TOML file
+load_icons() {
+    local toml_file="$SCRIPT_DIR/icons.toml"
+    [[ ! -f "$toml_file" ]] && return
+
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+
+        # Parse key = "value"
+        if [[ "$line" =~ ^([a-z_]+)[[:space:]]*=[[:space:]]*\"(.*)\"$ ]]; then
+            ICONS[${match[1]}]="${match[2]}"
+        fi
+    done < "$toml_file"
+}
+
+# Build gitignore cache for all directories under a path
+build_gitignore_cache() {
+    local root="$1"
+    local maxdepth="$2"
+    local include_hidden="$3"
+
+    local dirs
+    if (( include_hidden )); then
+        dirs=$(find "$root" -maxdepth "$maxdepth" -type d 2>/dev/null)
+    else
+        dirs=$(find "$root" -maxdepth "$maxdepth" -type d -not -path '*/.*' 2>/dev/null)
+    fi
+
+    if [[ -n "$dirs" ]]; then
+        local ignored
+        ignored=$(echo "$dirs" | /usr/bin/git check-ignore --stdin 2>/dev/null)
+
+        while IFS= read -r path; do
+            [[ -n "$path" ]] && GITIGNORE_CACHE[$path]=1
+        done <<< "$ignored"
+    fi
+}
+
+should_skip() {
+    local name="$1"
+    local path="$2"
+
+    for pattern in "${NO_EXPAND[@]}"; do
+        if [[ $name =~ $pattern ]]; then
+            return 0
+        fi
+    done
+
+    if (( ${+GITIGNORE_CACHE[$path]} )); then
+        return 0
+    fi
+
+    return 1
+}
+
+print_line() {
+    local line="$1"
+    local depth="$2"
+    local arr="$3"
+    local skipped="$4"
+
+    local ix
+    local target=""
+    local icon="${ICONS[default]}"
+    local colour="$WHITE"
+
+    if [[ -L $line ]]; then
+        target=${line:A}
+        if [[ ! -e $target ]]; then
+            # Broken symlink
+            icon="${ICONS[symlink_broken]:-${ICONS[file]}}"
+            colour=$RED
+        elif [[ -d $target ]]; then
+            icon="${ICONS[symlink_dir]}"
+            colour=$CYAN
+        elif [[ -x $target ]]; then
+            icon="${ICONS[symlink_exec]}"
+            colour=$GREEN
+        elif [[ -f $target ]]; then
+            icon="${ICONS[symlink_file]}"
+            colour=$WHITE
+        fi
+    elif [[ -d $line ]]; then
+        icon="${ICONS[directory]}"
+        colour=$BLUE
+    elif [[ -x $line ]]; then
+        icon="${ICONS[executable]}"
+        colour=$GREEN
+    elif [[ -f $line ]]; then
+        icon="${ICONS[file]}"
+        colour=$WHITE
+    fi
+
+    if [[ ${line:A} == ${PWD} ]]; then
+        colour=$YELLOW_B
+    fi
+
+    if (( skipped )); then
+        colour=$RED
+    fi
+
+    local char="${GREY}"
+    for ((ix=1; ix<depth; ix++)); do
+        if (( arr[$ix] )); then
+            char+="│  "
+        else
+            char+="   "
+        fi
+    done
+    if [[ $depth -gt 0 ]]; then
+        if (( $arr[$depth] )); then
+            char+="├─ "
+        else
+            char+="└─ "
+        fi
+    fi
+    char+="${NC}"
+
+    local out="${char}${colour}${icon} ${line:t}${NC}"
+    if [[ $SIZES -gt 0 ]]; then
+        local size=$(du -hs "$line" 2>/dev/null | awk '{print $1}')
+        out+=" (${size:-?})"
+    elif [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
+        local linecount=$(wc -l < "$line" 2>/dev/null | tr -d ' ' || echo "0")
+        out+=" (${linecount} lines)"
+    fi
+
+    if [[ -z $target ]]; then
+        echo "${out}"
+    else
+        echo "${out}  ${colour}${target/#$HOME/~}${NC}"
+    fi
+}
+
+print_dir() {
+    local file="$1"
+    local depth="$2"
+    local maxdepth="$3"
+    local hidden="$4"
+    local arr="$5"
+
+    local ix
+    local files
+    local skipped=0
+
+    if [[ -d $file ]] && [[ $depth -lt $maxdepth ]] && (( ! EXPAND_ALL )) && should_skip "${file:t}" "$file"; then
+        skipped=1
+    fi
+
+    print_line "$file" "$depth" "$arr" "$skipped"
+
+    if [[ ! -d $file ]] || [[ $depth -ge $maxdepth ]] || (( skipped )); then
+        return
+    fi
+
+    # Skip unreadable directories
+    if [[ ! -r $file ]]; then
+        return
+    fi
+
+    setopt local_options nullglob
+    if (( hidden )); then
+        files=("$file"/.* "$file"/*)
+        files=("${files[@]:#*/.}")
+        files=("${files[@]:#*/..}")
+    else
+        files=("$file"/*)
+    fi
+
+    for ((ix=1; ix<=${#files[@]}; ix++)); do
+        local current="${files[$ix]}"
+        if (( ix == ${#files[@]} )); then
+            arr[$((depth + 1))]=0
+        else
+            arr[$((depth + 1))]=1
+        fi
+        print_dir "$current" $((depth + 1)) "$maxdepth" "$hidden" "$arr"
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Load icons from TOML
+load_icons
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    if [[ $1 =~ ^-[a-zA-Z]{2,}$ ]]; then
+        flags="${1#-}"
+        shift
+        for ((i=${#flags}; i>0; i--)); do
+            set -- "-${flags:$((i-1)):1}" "$@"
+        done
+    fi
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --depth)
+            if [[ -z "$2" ]] || [[ "$2" =~ ^- ]]; then
+                error "--depth requires a numeric argument"
+            fi
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                error "--depth requires a numeric argument, got '$2'"
+            fi
+            DEPTH="$2"
+            shift 2
+            ;;
+        --depth=*)
+            local val="${1#--depth=}"
+            if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+                error "--depth requires a numeric argument, got '$val'"
+            fi
+            DEPTH="$val"
+            shift
+            ;;
+        -t|--tree)
+            DEPTH=$MAX_TREE_DEPTH
+            shift
+            ;;
+        -s)
+            SIZES=1
+            shift
+            ;;
+        -l)
+            COUNT_LINES=1
+            shift
+            ;;
+        -a)
+            HIDDEN=1
+            shift
+            ;;
+        --expand-all)
+            EXPAND_ALL=1
+            shift
+            ;;
+        -*)
+            error "Unknown option: $1"
+            ;;
+        *)
+            if [[ -e $1 ]]; then
+                DIRECTORIES+=("$1")
+            else
+                error "'$1' does not exist"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Default to current directory
+if [[ ${#DIRECTORIES[@]} -eq 0 ]]; then
+    DIRECTORIES=(".")
+fi
+
+# Build gitignore cache if in a git repo
+if /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null; then
+    for dir in "${DIRECTORIES[@]}"; do
+        build_gitignore_cache "${dir:A}" "$DEPTH" "$HIDDEN"
+    done
+fi
+
+# Print tree for each directory
+for dir in "${DIRECTORIES[@]}"; do
+    arr=()
+    for ((i=1; i<=DEPTH; i++)); do
+        arr+=1
+    done
+    print_dir "${dir:A}" 0 "$DEPTH" "$HIDDEN" "$arr"
+done
