@@ -1,0 +1,239 @@
+#!/usr/bin/env zsh
+
+# homeserver - Centralized Docker Compose service management
+
+setopt nullglob
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONTAINERS_DIR="$HOME/containers"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << EOF
+Usage: homeserver <command> [service]
+
+Commands:
+  down [service]     Stop services (all or specific)
+  help               Show this help message
+  logs [service]     Tail logs (all or specific, -n NUM for lines, default 100)
+  pull [service]     Pull latest images (all or specific)
+  restart [service]  Restart services (all or specific)
+  status             Show status of all containers
+  up [service]       Start services (all or specific)
+
+Examples:
+  homeserver up                # Start all services
+  homeserver restart jellyfin  # Restart only jellyfin
+  homeserver logs immich       # Tail immich logs
+  homeserver status            # Show all container status
+EOF
+}
+
+error() {
+    echo -e "${RED}error:${NC} $1" >&2
+    exit 1
+}
+
+success() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+info() {
+    echo -e "${CYAN}$1${NC}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Service discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+get_services() {
+    local services=()
+    for dir in "$CONTAINERS_DIR"/*/; do
+        if [[ -f "$dir/docker-compose.yml" ]] || [[ -f "$dir/docker-compose.yaml" ]]; then
+            services+=("${dir:t}")
+        fi
+    done
+    echo "${services[@]}"
+}
+
+validate_service() {
+    local target="$1"
+    local services=($(get_services))
+
+    for svc in "${services[@]}"; do
+        [[ "$svc" == "$target" ]] && return 0
+    done
+
+    error "Unknown service: $target. Available: ${services[*]}"
+}
+
+get_compose_file() {
+    local svc="$1"
+    local dir="$CONTAINERS_DIR/$svc"
+
+    if [[ -f "$dir/docker-compose.yml" ]]; then
+        echo "$dir/docker-compose.yml"
+    elif [[ -f "$dir/docker-compose.yaml" ]]; then
+        echo "$dir/docker-compose.yaml"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_up() {
+    local target="$1"
+    local services=($(get_services))
+
+    if [[ -n "$target" ]]; then
+        validate_service "$target"
+        services=("$target")
+    fi
+
+    for svc in "${services[@]}"; do
+        info "Starting $svc..."
+        sudo docker compose -f "$(get_compose_file "$svc")" up -d
+    done
+
+    success "Done"
+}
+
+cmd_down() {
+    local target="$1"
+    local services=($(get_services))
+
+    if [[ -n "$target" ]]; then
+        validate_service "$target"
+        services=("$target")
+    fi
+
+    for svc in "${services[@]}"; do
+        info "Stopping $svc..."
+        sudo docker compose -f "$(get_compose_file "$svc")" down
+    done
+
+    success "Done"
+}
+
+cmd_restart() {
+    local target="$1"
+    local services=($(get_services))
+
+    if [[ -n "$target" ]]; then
+        validate_service "$target"
+        services=("$target")
+    fi
+
+    for svc in "${services[@]}"; do
+        info "Restarting $svc..."
+        sudo docker compose -f "$(get_compose_file "$svc")" restart
+    done
+
+    success "Done"
+}
+
+cmd_logs() {
+    local tail=100
+    local target=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--tail)
+                tail="$2"
+                shift 2
+                ;;
+            *)
+                target="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -n "$target" ]]; then
+        validate_service "$target"
+        sudo docker compose -f "$(get_compose_file "$target")" logs -f --tail "$tail"
+    else
+        # Show logs from all services
+        local services=($(get_services))
+        local compose_args=()
+        for svc in "${services[@]}"; do
+            compose_args+=("-f" "$(get_compose_file "$svc")")
+        done
+        sudo docker compose "${compose_args[@]}" logs -f --tail "$tail"
+    fi
+}
+
+cmd_status() {
+    local services=($(get_services))
+
+    echo -e "${BOLD}Service Status${NC}"
+    echo ""
+
+    for svc in "${services[@]}"; do
+        echo -e "${CYAN}$svc${NC}"
+        sudo docker compose -f "$(get_compose_file "$svc")" ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | tail -n +2
+        echo ""
+    done
+}
+
+cmd_pull() {
+    local target="$1"
+    local services=($(get_services))
+
+    if [[ -n "$target" ]]; then
+        validate_service "$target"
+        services=("$target")
+    fi
+
+    for svc in "${services[@]}"; do
+        info "Pulling $svc..."
+        sudo docker compose -f "$(get_compose_file "$svc")" pull
+    done
+
+    success "Done"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[ ! -d "$CONTAINERS_DIR" ]] && error "Containers directory not found: $CONTAINERS_DIR"
+
+case "${1:-}" in
+    up)
+        cmd_up "$2"
+        ;;
+    down)
+        cmd_down "$2"
+        ;;
+    restart)
+        cmd_restart "$2"
+        ;;
+    logs)
+        shift
+        cmd_logs "$@"
+        ;;
+    status)
+        cmd_status
+        ;;
+    pull)
+        cmd_pull "$2"
+        ;;
+    help|--help|-h|"")
+        usage
+        ;;
+    *)
+        error "Unknown command: $1. Run 'homeserver help' for usage."
+        ;;
+esac
