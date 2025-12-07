@@ -11,11 +11,28 @@ source "$SCRIPT_DIR/../common"
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEST_DIR="/mnt/external/photography/pictures"
+CONFIG_DIR="$HOME/.config/photosort"
+CONFIG_FILE="$CONFIG_DIR/config"
 IPHONE_MOUNT="$HOME/iphone"
 PHOTO_EXTENSIONS=(jpg jpeg heic png cr2 cr3 nef arw dng raf)
 VIDEO_EXTENSIONS=(mp4 mov avi mkv)
 ALL_EXTENSIONS=($PHOTO_EXTENSIONS $VIDEO_EXTENSIONS)
+
+# Load config
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Check if setup has been run
+check_setup() {
+    if [[ ! -f "$CONFIG_FILE" ]] || [[ -z "$DEST_DIR" ]]; then
+        error "photosort not configured. Run 'photosort setup' first."
+    fi
+}
+
+load_config
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -26,21 +43,23 @@ usage() {
 Usage: photosort [options] <source>
        photosort iphone [--dry-run]
 
-Organize photos from source folder into $DEST_DIR/YYYY/MM/DD/
+Organize photos from source folder into ${DEST_DIR:-<run setup>}/YYYY/MM/DD/
 
 Commands:
+  setup        Configure photosort destination directory
   iphone       Import photos from connected iPhone (mounts automatically)
+  fix-exif     Add EXIF dates to files based on folder structure (YYYY/MM/DD)
 
 Options:
-  --dry-run    Preview changes without moving files
-  --copy       Copy instead of move
+  --dry-run    Preview changes without copying files
+  --move       Move instead of copy (destructive)
   --hash       Use MD5 hash for duplicate detection (slower but reliable)
   --help       Show this help message
 
 Examples:
-  photosort ~/DCIM                    # Move photos from DCIM
-  photosort --dry-run /mnt/sd/DCIM    # Preview without moving
-  photosort --copy ~/Downloads        # Copy instead of move
+  photosort ~/DCIM                    # Copy photos from DCIM
+  photosort --dry-run /mnt/sd/DCIM    # Preview without copying
+  photosort --move ~/Downloads        # Move instead of copy
   photosort iphone                    # Import from iPhone
   photosort iphone --dry-run          # Preview iPhone import
 EOF
@@ -99,6 +118,49 @@ files_match() {
 
     # Size matches and no hash mode = assume same
     return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Setup command
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_setup() {
+    info "photosort setup"
+    echo ""
+
+    # Get current value or default
+    local current_dest="${DEST_DIR:-/mnt/external/photography/pictures}"
+
+    # Prompt for destination directory
+    local new_dest=""
+    vared -p "Photo library directory [$current_dest]: " new_dest
+    [[ -z "$new_dest" ]] && new_dest="$current_dest"
+
+    # Expand path
+    new_dest="${new_dest:A}"
+
+    # Validate directory exists
+    if [[ ! -d "$new_dest" ]]; then
+        if read -q "?Directory doesn't exist. Create it? [y/N] "; then
+            echo ""
+            mkdir -p "$new_dest"
+            success "Created $new_dest"
+        else
+            echo ""
+            error "Directory must exist"
+        fi
+    fi
+
+    # Save config
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" << EOF
+# photosort configuration
+DEST_DIR="$new_dest"
+EOF
+
+    echo ""
+    success "Configuration saved to $CONFIG_FILE"
+    info "Photo library: $new_dest"
 }
 
 # Global size index: SIZE_INDEX[size]="file1|file2|..."
@@ -524,6 +586,65 @@ cmd_sort() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fix EXIF command
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_fix_exif() {
+    local dry_run="$1"
+
+    info "Scanning for files missing EXIF dates..."
+    echo ""
+
+    local fixed=0
+    local skipped=0
+    local total=0
+
+    # Find all files in DEST_DIR with YYYY/MM/DD structure
+    while IFS= read -r file; do
+        ((total++))
+
+        # Extract date from path: .../YYYY/MM/DD/filename
+        local dir="${file:h}"
+        local day="${dir:t}"
+        local month_dir="${dir:h}"
+        local month="${month_dir:t}"
+        local year_dir="${month_dir:h}"
+        local year="${year_dir:t}"
+
+        # Validate it looks like a date
+        if [[ ! "$year" =~ ^[0-9]{4}$ ]] || [[ ! "$month" =~ ^[0-9]{2}$ ]] || [[ ! "$day" =~ ^[0-9]{2}$ ]]; then
+            continue
+        fi
+
+        # Check if file already has EXIF date
+        local existing_date=$(exiftool -s -s -s -DateTimeOriginal "$file" 2>/dev/null)
+        if [[ -n "$existing_date" && "$existing_date" != "0000:00:00 00:00:00" ]]; then
+            ((skipped++))
+            continue
+        fi
+
+        # Build EXIF date string (use noon as default time)
+        local exif_date="$year:$month:$day 12:00:00"
+
+        if [[ "$dry_run" == "1" ]]; then
+            echo "  would fix: ${file#$DEST_DIR/} → $exif_date"
+        else
+            exiftool -overwrite_original -DateTimeOriginal="$exif_date" "$file" >/dev/null 2>&1
+            echo "  fixed: ${file#$DEST_DIR/}"
+        fi
+        ((fixed++))
+
+    done < <(find "$DEST_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) 2>/dev/null)
+
+    echo ""
+    if [[ "$dry_run" == "1" ]]; then
+        success "Found $fixed files to fix ($skipped already have EXIF dates)"
+    else
+        success "Fixed $fixed files ($skipped already had EXIF dates)"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # iPhone command
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -590,12 +711,18 @@ cmd_iphone() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 DRY_RUN=0
-COPY_MODE=0
+MOVE_MODE=0
 USE_HASH=0
 SOURCE=""
 
-# Check for iphone command first
+# Check for subcommands first
+if [[ "$1" == "setup" ]]; then
+    cmd_setup
+    exit 0
+fi
+
 if [[ "$1" == "iphone" ]]; then
+    check_setup
     shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -608,14 +735,22 @@ if [[ "$1" == "iphone" ]]; then
     exit 0
 fi
 
+if [[ "$1" == "fix-exif" ]]; then
+    check_setup
+    shift
+    [[ "$1" == "--dry-run" ]] && DRY_RUN=1
+    cmd_fix_exif "$DRY_RUN"
+    exit 0
+fi
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)
             DRY_RUN=1
             shift
             ;;
-        --copy)
-            COPY_MODE=1
+        --move)
+            MOVE_MODE=1
             shift
             ;;
         --hash)
@@ -638,4 +773,7 @@ done
 
 [[ -z "$SOURCE" ]] && usage && exit 1
 
-cmd_sort "$SOURCE" "$DRY_RUN" "$COPY_MODE" "$USE_HASH"
+check_setup
+# copy_mode is inverse of MOVE_MODE (copy by default)
+local copy_mode=$((1 - MOVE_MODE))
+cmd_sort "$SOURCE" "$DRY_RUN" "$copy_mode" "$USE_HASH"
