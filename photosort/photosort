@@ -1,0 +1,641 @@
+#!/usr/bin/env zsh
+
+# photosort - Organize photos by EXIF date into YYYY/MM/DD structure
+
+setopt nullglob
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEST_DIR="/mnt/external/photography/pictures"
+IPHONE_MOUNT="$HOME/iphone"
+PHOTO_EXTENSIONS=(jpg jpeg heic png cr2 cr3 nef arw dng raf)
+VIDEO_EXTENSIONS=(mp4 mov avi mkv)
+ALL_EXTENSIONS=($PHOTO_EXTENSIONS $VIDEO_EXTENSIONS)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << EOF
+Usage: photosort [options] <source>
+       photosort iphone [--dry-run]
+
+Organize photos from source folder into $DEST_DIR/YYYY/MM/DD/
+
+Commands:
+  iphone       Import photos from connected iPhone (mounts automatically)
+
+Options:
+  --dry-run    Preview changes without moving files
+  --copy       Copy instead of move
+  --hash       Use MD5 hash for duplicate detection (slower but reliable)
+  --help       Show this help message
+
+Examples:
+  photosort ~/DCIM                    # Move photos from DCIM
+  photosort --dry-run /mnt/sd/DCIM    # Preview without moving
+  photosort --copy ~/Downloads        # Copy instead of move
+  photosort iphone                    # Import from iPhone
+  photosort iphone --dry-run          # Preview iPhone import
+EOF
+}
+
+error() {
+    echo -e "${RED}error:${NC} $1" >&2
+    exit 1
+}
+
+success() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+info() {
+    echo -e "${CYAN}$1${NC}"
+}
+
+warn() {
+    echo -e "${YELLOW}$1${NC}"
+}
+
+progress_bar() {
+    local current="$1"
+    local total="$2"
+    local width=40
+    local pct=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+
+    printf "\r  [%s%s] %d/%d (%d%%)" \
+        "$(printf '#%.0s' $(seq 1 $filled 2>/dev/null))" \
+        "$(printf '.%.0s' $(seq 1 $empty 2>/dev/null))" \
+        "$current" "$total" "$pct"
+}
+
+file_hash() {
+    md5sum "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+files_match() {
+    local file1="$1"
+    local file2="$2"
+    local use_hash="$3"
+
+    # First check size (fast)
+    if [[ $(stat -c '%s' "$file1") -ne $(stat -c '%s' "$file2") ]]; then
+        return 1  # Different size = different file
+    fi
+
+    # If hash mode, compare hashes
+    if [[ "$use_hash" == "1" ]]; then
+        [[ "$(file_hash "$file1")" == "$(file_hash "$file2")" ]]
+        return $?
+    fi
+
+    # Size matches and no hash mode = assume same
+    return 0
+}
+
+# Global size index: SIZE_INDEX[size]="file1|file2|..."
+typeset -A SIZE_INDEX
+typeset -g SIZE_INDEX_BUILT=0
+
+build_size_index() {
+    [[ $SIZE_INDEX_BUILT -eq 1 ]] && return
+    info "Building size index of existing photos..."
+
+    local count=0
+    # Use find -printf for speed (one command vs 13000+ stat calls)
+    while IFS=: read -r size filepath; do
+        if [[ -n "${SIZE_INDEX[$size]}" ]]; then
+            SIZE_INDEX[$size]+="|$filepath"
+        else
+            SIZE_INDEX[$size]="$filepath"
+        fi
+        ((count++))
+    done < <(find "$DEST_DIR" -type f -printf '%s:%p\n' 2>/dev/null)
+
+    info "  Indexed $count files"
+    SIZE_INDEX_BUILT=1
+}
+
+check_size_duplicate() {
+    local file="$1"
+    local use_hash="$2"
+
+    local size=$(stat -c '%s' "$file" 2>/dev/null)
+    local matches="${SIZE_INDEX[$size]}"
+
+    [[ -z "$matches" ]] && return 1  # No size match
+
+    # Size match found - always verify with hash to avoid false positives
+    local source_hash=$(file_hash "$file")
+    local IFS='|'
+    for existing in ${=matches}; do
+        if [[ "$source_hash" == "$(file_hash "$existing")" ]]; then
+            echo "$existing"
+            return 0
+        fi
+    done
+    return 1  # Hash didn't match - different file with same size
+}
+
+find_duplicate_in_folder() {
+    local source_file="$1"
+    local dest_dir="$2"
+    local use_hash="$3"
+
+    [[ ! -d "$dest_dir" ]] && return 1
+
+    # Build cache for this folder if not already done
+    build_folder_cache "$dest_dir"
+
+    local source_size=$(stat -c '%s' "$source_file")
+    local source_hash=""
+    local cache="${FOLDER_CACHE[$dest_dir]}"
+
+    [[ -z "$cache" ]] && return 1
+
+    # Parse cache and find size matches
+    local IFS='|'
+    for entry in ${=cache}; do
+        local entry_size="${entry%%:*}"
+        local entry_file="${entry#*:}"
+
+        [[ "$entry_size" != "$source_size" ]] && continue
+
+        # Size matches - check hash if enabled
+        if [[ "$use_hash" == "1" ]]; then
+            [[ -z "$source_hash" ]] && source_hash=$(file_hash "$source_file")
+            if [[ "$source_hash" == "$(file_hash "$entry_file")" ]]; then
+                echo "$entry_file"
+                return 0
+            fi
+        else
+            # Size match without hash = assume duplicate
+            echo "$entry_file"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+get_date_from_exif() {
+    local file="$1"
+    local date=""
+
+    # Try DateTimeOriginal first (when photo was taken)
+    date=$(exiftool -s -s -s -DateTimeOriginal "$file" 2>/dev/null)
+
+    # Fall back to CreateDate
+    if [[ -z "$date" ]]; then
+        date=$(exiftool -s -s -s -CreateDate "$file" 2>/dev/null)
+    fi
+
+    # Fall back to MediaCreateDate (for videos)
+    if [[ -z "$date" ]]; then
+        date=$(exiftool -s -s -s -MediaCreateDate "$file" 2>/dev/null)
+    fi
+
+    # Return empty if no valid date found
+    if [[ -z "$date" ]] || [[ "$date" == "0000:00:00 00:00:00" ]]; then
+        echo ""
+        return
+    fi
+
+    echo "$date"
+}
+
+get_date_from_filename() {
+    local file="$1"
+    local basename="${file:t}"
+
+    # Try to extract date from common filename patterns
+    # Pattern: YYYYMMDD or YYYY-MM-DD or YYYY_MM_DD
+    if [[ "$basename" =~ ^([0-9]{4})[-_]?([0-9]{2})[-_]?([0-9]{2}) ]]; then
+        echo "${match[1]}:${match[2]}:${match[3]} 00:00:00"
+        return
+    fi
+
+    echo ""
+}
+
+get_date_from_mtime() {
+    local file="$1"
+    stat -c '%y' "$file" 2>/dev/null | sed 's/-/:/g; s/\.[0-9]*//'
+}
+
+format_date_path() {
+    local date="$1"
+    # Input: "2025:01:15 14:30:00"
+    # Output: "2025/01/15"
+
+    local year="${date:0:4}"
+    local month="${date:5:2}"
+    local day="${date:8:2}"
+
+    echo "$year/$month/$day"
+}
+
+format_filename() {
+    local date="$1"
+    local ext="$2"
+    # Input: "2025:01:15 14:30:00", "jpg"
+    # Output: "20250115-143000.jpg"
+
+    local formatted=$(echo "$date" | sed 's/[: ]//g; s/\(........\)\(......\).*/\1-\2/')
+    echo "${formatted}.${ext:l}"
+}
+
+# Stats for progress mode
+typeset -g STATS_COPIED=0
+typeset -g STATS_SKIPPED=0
+typeset -g STATS_NODATE=0
+
+typeset -g STATS_FAILED=0
+
+process_file_new() {
+    local file="$1"
+    local dry_run="$2"
+    local copy_mode="$3"
+
+    local ext="${file:e:l}"
+    local basename="${file:t}"
+
+    # Check source still exists (iPhone might be unplugged)
+    if [[ ! -f "$file" ]]; then
+        ((STATS_FAILED++))
+        return 1
+    fi
+
+    # Get date (try EXIF, then filename, then mtime)
+    local date=$(get_date_from_exif "$file")
+
+    if [[ -z "$date" ]]; then
+        date=$(get_date_from_filename "$file")
+    fi
+
+    if [[ -z "$date" ]]; then
+        date=$(get_date_from_mtime "$file")
+    fi
+
+    if [[ -z "$date" ]]; then
+        ((STATS_NODATE++))
+        return
+    fi
+
+    # Build destination path
+    local date_path=$(format_date_path "$date")
+    local new_name=$(format_filename "$date" "$ext")
+    local dest_dir="$DEST_DIR/$date_path"
+    local dest_file="$dest_dir/$new_name"
+
+    # Handle filename collision
+    local counter=1
+    while [[ -f "$dest_file" ]]; do
+        new_name=$(format_filename "$date" "$ext" | sed "s/\.$ext/-$counter.$ext/")
+        dest_file="$dest_dir/$new_name"
+        ((counter++))
+    done
+
+    # Perform the operation
+    if [[ "$dry_run" != "1" ]]; then
+        mkdir -p "$dest_dir"
+
+        local src_size=$(stat -c '%s' "$file" 2>/dev/null)
+        if [[ -z "$src_size" ]]; then
+            ((STATS_FAILED++))
+            return 1
+        fi
+
+        if [[ "$copy_mode" == "1" ]]; then
+            cp "$file" "$dest_file" 2>/dev/null
+        else
+            mv "$file" "$dest_file" 2>/dev/null
+        fi
+
+        # Verify copy succeeded
+        if [[ ! -f "$dest_file" ]]; then
+            ((STATS_FAILED++))
+            return 1
+        fi
+
+        local dest_size=$(stat -c '%s' "$dest_file" 2>/dev/null)
+        if [[ "$src_size" != "$dest_size" ]]; then
+            # Incomplete copy - remove corrupted file
+            rm -f "$dest_file"
+            ((STATS_FAILED++))
+            return 1
+        fi
+    fi
+    ((STATS_COPIED++))
+}
+
+process_file() {
+    local file="$1"
+    local dry_run="$2"
+    local copy_mode="$3"
+    local use_hash="$4"
+
+    local ext="${file:e:l}"
+    local basename="${file:t}"
+
+    # Check if supported extension
+    local supported=0
+    for e in $ALL_EXTENSIONS; do
+        [[ "$ext" == "$e" ]] && supported=1 && break
+    done
+    [[ $supported -eq 0 ]] && return
+
+    # Fast duplicate check by size (before reading EXIF)
+    local existing_dup=$(check_size_duplicate "$file" "$use_hash")
+    if [[ -n "$existing_dup" ]]; then
+        ((STATS_SKIPPED++))
+        return
+    fi
+
+    # Get date (try EXIF, then filename, then mtime)
+    local date=$(get_date_from_exif "$file")
+    local date_source="EXIF"
+
+    if [[ -z "$date" ]]; then
+        date=$(get_date_from_filename "$file")
+        date_source="filename"
+    fi
+
+    if [[ -z "$date" ]]; then
+        date=$(get_date_from_mtime "$file")
+        date_source="mtime"
+    fi
+
+    if [[ -z "$date" ]]; then
+        ((STATS_NODATE++))
+        return
+    fi
+
+    # Build destination path
+    local date_path=$(format_date_path "$date")
+    local new_name=$(format_filename "$date" "$ext")
+    local dest_dir="$DEST_DIR/$date_path"
+    local dest_file="$dest_dir/$new_name"
+
+    # Handle filename collision (different file, same timestamp)
+    local counter=1
+    while [[ -f "$dest_file" ]]; do
+        new_name=$(format_filename "$date" "$ext" | sed "s/\.$ext/-$counter.$ext/")
+        dest_file="$dest_dir/$new_name"
+        ((counter++))
+    done
+
+    # Perform the operation
+    if [[ "$dry_run" != "1" ]]; then
+        mkdir -p "$dest_dir"
+        if [[ "$copy_mode" == "1" ]]; then
+            cp "$file" "$dest_file"
+        else
+            mv "$file" "$dest_file"
+        fi
+    fi
+    ((STATS_COPIED++))
+}
+
+cmd_sort() {
+    local source_dir="$1"
+    local dry_run="$2"
+    local copy_mode="$3"
+    local use_hash="$4"
+
+    [[ ! -d "$source_dir" ]] && error "Source directory not found: $source_dir"
+
+    info "Source: $source_dir"
+    info "Destination: $DEST_DIR"
+    [[ "$dry_run" == "1" ]] && warn "(dry run - no files will be moved)"
+    [[ "$copy_mode" == "1" ]] && info "(copy mode - originals will be preserved)"
+    echo ""
+
+    # Build size index of existing photos (fast, local disk)
+    build_size_index
+
+    # Get source file list with sizes (one fast command)
+    info "Scanning source files..."
+    local -a new_files=()
+    local total=0
+    local skipped=0
+
+    while IFS=: read -r size filepath; do
+        ((total++))
+        # Check extension
+        local ext="${filepath:e:l}"
+        local supported=0
+        for e in $ALL_EXTENSIONS; do
+            [[ "$ext" == "$e" ]] && supported=1 && break
+        done
+        [[ $supported -eq 0 ]] && continue
+
+        # Check if size exists in index (potential duplicate)
+        if [[ -n "${SIZE_INDEX[$size]}" ]]; then
+            ((skipped++))
+            # Store for hash verification later
+            new_files+=("CHECK:$size:$filepath")
+        else
+            # Definitely new - no size match
+            new_files+=("NEW:$size:$filepath")
+        fi
+    done < <(find "$source_dir" -type f -printf '%s:%p\n' 2>/dev/null)
+
+    info "  Found $total files, ${#new_files[@]} to check"
+    echo ""
+
+    # Reset stats
+    STATS_COPIED=0
+    STATS_SKIPPED=0
+    STATS_NODATE=0
+    STATS_FAILED=0
+
+    local count=0
+    local check_count=${#new_files[@]}
+    local disconnected=0
+
+    info "Processing..."
+
+    for entry in "${new_files[@]}"; do
+        ((count++))
+        progress_bar "$count" "$check_count"
+
+        local entry_type="${entry%%:*}"
+        local rest="${entry#*:}"
+        local size="${rest%%:*}"
+        local filepath="${rest#*:}"
+
+        if [[ "$entry_type" == "CHECK" ]]; then
+            # Size match - verify with hash
+            local dup=$(check_size_duplicate "$filepath" "1")
+            if [[ -n "$dup" ]]; then
+                ((STATS_SKIPPED++))
+                continue
+            fi
+        fi
+
+        # Process as new file
+        process_file_new "$filepath" "$dry_run" "$copy_mode"
+
+        # Check if source disappeared (disconnect detection)
+        if [[ $? -eq 1 && $STATS_FAILED -ge 3 ]]; then
+            echo ""
+            warn "Source disconnected - stopping"
+            disconnected=1
+            break
+        fi
+    done
+
+    echo ""
+    echo ""
+
+    # Show summary
+    if [[ $total -eq 0 ]]; then
+        warn "No supported files found"
+    else
+        local action="copied"
+        [[ "$dry_run" == "1" ]] && action="to copy"
+        [[ "$copy_mode" != "1" && "$dry_run" != "1" ]] && action="moved"
+        [[ "$copy_mode" != "1" && "$dry_run" == "1" ]] && action="to move"
+
+        if [[ $disconnected -eq 1 ]]; then
+            warn "Interrupted!"
+        else
+            success "Done!"
+        fi
+        echo "  ${GREEN}$STATS_COPIED${NC} $action"
+        echo "  ${GREY}$STATS_SKIPPED${NC} skipped (duplicates)"
+        [[ $STATS_NODATE -gt 0 ]] && echo "  ${YELLOW}$STATS_NODATE${NC} skipped (no date)"
+        [[ $STATS_FAILED -gt 0 ]] && echo "  ${RED}$STATS_FAILED${NC} failed"
+        [[ $disconnected -eq 1 ]] && info "Run again after reconnecting to continue"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# iPhone command
+# ─────────────────────────────────────────────────────────────────────────────
+
+is_iphone_mounted() {
+    mount | grep -q "$IPHONE_MOUNT"
+}
+
+cmd_iphone() {
+    local dry_run="$1"
+    local use_hash="$2"
+
+    # Check if ifuse is available
+    if ! command -v ifuse &>/dev/null; then
+        error "ifuse not installed. Run: sudo apt install ifuse libimobiledevice6"
+    fi
+
+    # Create mount point if needed
+    mkdir -p "$IPHONE_MOUNT"
+
+    # Mount if not already mounted
+    if ! is_iphone_mounted; then
+        info "Mounting iPhone..."
+        if ! ifuse "$IPHONE_MOUNT" 2>/dev/null; then
+            error "Failed to mount iPhone. Make sure it's connected and trusted."
+        fi
+        success "iPhone mounted at $IPHONE_MOUNT"
+    else
+        info "iPhone already mounted at $IPHONE_MOUNT"
+    fi
+
+    # Check for DCIM
+    if [[ ! -d "$IPHONE_MOUNT/DCIM" ]]; then
+        error "DCIM folder not found. Is the iPhone unlocked?"
+    fi
+
+    # Count photos
+    local photo_count=$(find "$IPHONE_MOUNT/DCIM" -type f 2>/dev/null | wc -l)
+    info "Found $photo_count files in DCIM"
+    echo ""
+
+    # Run sort in copy mode (preserve originals on phone)
+    cmd_sort "$IPHONE_MOUNT/DCIM" "$dry_run" "1" "$use_hash"
+
+    echo ""
+    if [[ "$dry_run" != "1" ]]; then
+        success "Photos copied to $DEST_DIR"
+        info "Originals remain on iPhone - delete manually when ready"
+    fi
+
+    # Ask about unmounting
+    echo ""
+    if read -q "?Unmount iPhone? [y/N] "; then
+        echo ""
+        fusermount -u "$IPHONE_MOUNT"
+        success "iPhone unmounted"
+    else
+        echo ""
+        info "iPhone still mounted at $IPHONE_MOUNT"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+DRY_RUN=0
+COPY_MODE=0
+USE_HASH=0
+SOURCE=""
+
+# Check for iphone command first
+if [[ "$1" == "iphone" ]]; then
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) DRY_RUN=1; shift ;;
+            --hash) USE_HASH=1; shift ;;
+            *) shift ;;
+        esac
+    done
+    cmd_iphone "$DRY_RUN" "$USE_HASH"
+    exit 0
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --copy)
+            COPY_MODE=1
+            shift
+            ;;
+        --hash)
+            USE_HASH=1
+            shift
+            ;;
+        --help|-h|help)
+            usage
+            exit 0
+            ;;
+        -*)
+            error "Unknown option: $1"
+            ;;
+        *)
+            SOURCE="$1"
+            shift
+            ;;
+    esac
+done
+
+[[ -z "$SOURCE" ]] && usage && exit 1
+
+cmd_sort "$SOURCE" "$DRY_RUN" "$COPY_MODE" "$USE_HASH"
