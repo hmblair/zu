@@ -1,0 +1,131 @@
+#!/usr/bin/env zsh
+
+# findrm - Recursively remove directories by name
+# Finds and removes all directories matching a pattern throughout the tree
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << EOF
+Usage: findrm [options] <name>...
+
+Recursively find and remove all directories matching the given name(s).
+
+Options:
+  -n, --dry-run    Show what would be deleted without deleting
+  -f, --force      Skip confirmation prompt
+  -h, --help       Show this help message
+
+Examples:
+  findrm node_modules              # Remove all node_modules directories
+  findrm __pycache__ .pytest_cache # Remove multiple patterns
+  findrm -n build                  # Preview what would be deleted
+  findrm -f dist                   # Delete without confirmation
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    local dry_run=false
+    local force=false
+    local names=()
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--dry-run)
+                dry_run=true
+                shift
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                names+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ ${#names[@]} -eq 0 ]]; then
+        usage
+        exit 1
+    fi
+
+    # Build find command for all patterns
+    local find_args=()
+    for name in "${names[@]}"; do
+        [[ ${#find_args[@]} -gt 0 ]] && find_args+=("-o")
+        find_args+=("-type" "d" "-name" "$name")
+    done
+
+    # Find all matching directories
+    local dirs=()
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] && dirs+=("$dir")
+    done < <(find . \( "${find_args[@]}" \) 2>/dev/null | sort)
+
+    if [[ ${#dirs[@]} -eq 0 ]]; then
+        echo "No matching directories found."
+        exit 0
+    fi
+
+    # Show what will be deleted
+    local count=${#dirs[@]}
+    local plural="ies"
+    [[ $count -eq 1 ]] && plural="y"
+
+    echo ""
+    echo "${BOLD}Found $count director${plural}:${NC}"
+    for dir in "${dirs[@]}"; do
+        echo "  ${RED}${dir}${NC}"
+    done
+    echo ""
+
+    # Dry run - just show and exit
+    if $dry_run; then
+        echo "${YELLOW}Dry run - nothing deleted.${NC}"
+        exit 0
+    fi
+
+    # Confirm unless forced
+    if ! $force; then
+        echo -n "Delete all? [y/N] "
+        read -r confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 0
+        fi
+    fi
+
+    # Delete directories (deepest first to avoid issues)
+    local deleted=0
+    for dir in $(echo "${dirs[@]}" | tr ' ' '\n' | awk -F/ '{print NF, $0}' | sort -rn | cut -d' ' -f2-); do
+        if [[ -d "$dir" ]]; then
+            rm -rf "$dir"
+            ((deleted++))
+        fi
+    done
+
+    plural="ies"
+    [[ $deleted -eq 1 ]] && plural="y"
+    success "Deleted $deleted director${plural}."
+}
+
+main "$@"
