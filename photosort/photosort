@@ -47,6 +47,7 @@ Organize photos from source folder into ${DEST_DIR:-<run setup>}/YYYY/MM/DD/
 
 Commands:
   setup        Configure photosort destination directory
+  stats [year] Show photo counts by year and month
   iphone       Import photos from connected iPhone (mounts automatically)
   fix-exif     Add EXIF dates to files based on folder structure (YYYY/MM/DD)
 
@@ -628,6 +629,94 @@ cmd_fix_exif() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stats command
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_stats() {
+    local filter_year="$1"
+
+    info "Photo library: $DEST_DIR"
+    [[ -n "$filter_year" ]] && info "Filtering: $filter_year"
+    echo ""
+
+    typeset -A year_totals
+    typeset -A month_counts
+    local grand_total=0
+
+    # Build search path
+    local search_path="$DEST_DIR"
+    [[ -n "$filter_year" ]] && search_path="$DEST_DIR/$filter_year"
+
+    if [[ -n "$filter_year" && ! -d "$search_path" ]]; then
+        warn "No photos found for $filter_year"
+        return
+    fi
+
+    # Scan all files and count by year/month
+    while IFS= read -r file; do
+        # Extract date from path: .../YYYY/MM/DD/filename
+        local dir="${file:h}"
+        local day="${dir:t}"
+        local month_dir="${dir:h}"
+        local month="${month_dir:t}"
+        local year_dir="${month_dir:h}"
+        local year="${year_dir:t}"
+
+        # Validate it looks like a date
+        if [[ ! "$year" =~ ^[0-9]{4}$ ]] || [[ ! "$month" =~ ^[0-9]{2}$ ]]; then
+            continue
+        fi
+
+        # Count
+        local key="$year:$month"
+        ((month_counts[$key]++))
+        ((year_totals[$year]++))
+        ((grand_total++))
+    done < <(find "$search_path" -type f 2>/dev/null)
+
+    # Get sorted unique years
+    local -a years=()
+    for key in "${(@k)year_totals}"; do
+        years+=("$key")
+    done
+    years=(${(on)years})
+
+    # Display by year
+    for year in "${years[@]}"; do
+        local year_total="${year_totals[$year]}"
+        echo "${BOLD}$year${NC}  ($year_total photos)"
+
+        # Get months for this year
+        local -a months=()
+        for key in "${(@k)month_counts}"; do
+            if [[ "$key" == "$year:"* ]]; then
+                months+=("${key#*:}")
+            fi
+        done
+        months=(${(on)months})
+
+        for month in "${months[@]}"; do
+            local count="${month_counts[$year:$month]}"
+            local month_name=""
+            case "$month" in
+                01) month_name="Jan" ;; 02) month_name="Feb" ;;
+                03) month_name="Mar" ;; 04) month_name="Apr" ;;
+                05) month_name="May" ;; 06) month_name="Jun" ;;
+                07) month_name="Jul" ;; 08) month_name="Aug" ;;
+                09) month_name="Sep" ;; 10) month_name="Oct" ;;
+                11) month_name="Nov" ;; 12) month_name="Dec" ;;
+                *) month_name="$month" ;;
+            esac
+            printf "  %s %s  %5d\n" "$month" "$month_name" "$count"
+        done
+        echo ""
+    done
+
+    echo "─────────────────"
+    echo "${BOLD}Total: $grand_total photos${NC}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # iPhone command
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -701,6 +790,12 @@ SOURCE=""
 # Check for subcommands first
 if [[ "$1" == "setup" ]]; then
     cmd_setup
+    exit 0
+fi
+
+if [[ "$1" == "stats" ]]; then
+    check_setup
+    cmd_stats "$2"
     exit 0
 fi
 
