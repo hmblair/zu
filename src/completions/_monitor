@@ -1,4 +1,4 @@
 #compdef monitor
 
-# Completion for monitor command - uses ssh hosts
-_arguments '1:host:_ssh_hosts'
+# Completion for monitor command - uses same completion as ssh
+_alternative 'hosts:remote host name:_ssh_hosts'
