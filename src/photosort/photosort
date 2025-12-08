@@ -934,11 +934,21 @@ cmd_stats_library() {
     local lib_path="$3"
     local filter_year="$4"
 
+    # Check if path exists and set color
+    local path_exists=0
+    if [[ -n "$lib_host" ]]; then
+        /usr/bin/ssh -o ConnectTimeout=5 "$lib_host" "test -d '$lib_path'" 2>/dev/null && path_exists=1
+    else
+        [[ -d "$lib_path" ]] && path_exists=1
+    fi
+    local path_color="$RED"
+    [[ $path_exists -eq 1 ]] && path_color="$GREEN"
+
     # Header
     if [[ -n "$lib_host" ]]; then
-        echo "${BOLD}$lib_name${NC}  ($lib_host:$lib_path)"
+        echo "${BOLD}$lib_name${NC}  ($lib_host:${path_color}$lib_path${NC})"
     else
-        echo "${BOLD}$lib_name${NC}  ($lib_path)"
+        echo "${BOLD}$lib_name${NC}  (${path_color}$lib_path${NC})"
     fi
     echo "════════════════════════════════════════"
     echo ""
