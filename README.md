@@ -24,7 +24,7 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | blk | Website blocker using pf firewall |
 | buzz | Keep Mac awake using caffeinate |
 | envs | Persistent environment variable manager |
-| findrm | Recursively find and remove directories by pattern |
+| findrm | Recursively find and remove files/directories by pattern |
 | free | Disk space analyzer with caching daemon |
 | homeserver | Docker Compose service manager |
 | l | Enhanced directory listing with icons and tree view |

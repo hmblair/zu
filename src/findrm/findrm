@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 
-# findrm - Recursively remove directories by name
-# Finds and removes all directories matching a pattern throughout the tree
+# findrm - Recursively remove files and directories by name
+# Finds and removes all files/directories matching a pattern throughout the tree
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/../common"
@@ -14,9 +14,12 @@ usage() {
     cat << EOF
 Usage: findrm [options] <name>...
 
-Recursively find and remove all directories matching the given name(s).
+Recursively find and remove all files/directories matching the given name(s).
 
 Options:
+  -d, --dirs       Remove directories only (default)
+  -F, --files      Remove files only
+  -a, --all        Remove both files and directories
   -n, --dry-run    Show what would be deleted without deleting
   -f, --force      Skip confirmation prompt
   -h, --help       Show this help message
@@ -26,6 +29,8 @@ Examples:
   findrm __pycache__ .pytest_cache # Remove multiple patterns
   findrm -n build                  # Preview what would be deleted
   findrm -f dist                   # Delete without confirmation
+  findrm -F .DS_Store              # Remove all .DS_Store files
+  findrm -a "*.pyc"                # Remove all .pyc files and directories
 EOF
 }
 
@@ -36,11 +41,24 @@ EOF
 main() {
     local dry_run=false
     local force=false
+    local mode="dirs"  # dirs, files, or all
     local names=()
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -d|--dirs)
+                mode="dirs"
+                shift
+                ;;
+            -F|--files)
+                mode="files"
+                shift
+                ;;
+            -a|--all)
+                mode="all"
+                shift
+                ;;
             -n|--dry-run)
                 dry_run=true
                 shift
@@ -72,29 +90,43 @@ main() {
     local find_args=()
     for name in "${names[@]}"; do
         [[ ${#find_args[@]} -gt 0 ]] && find_args+=("-o")
-        find_args+=("-type" "d" "-name" "$name")
+        case "$mode" in
+            dirs)
+                find_args+=("-type" "d" "-name" "$name")
+                ;;
+            files)
+                find_args+=("-type" "f" "-name" "$name")
+                ;;
+            all)
+                find_args+=("-name" "$name")
+                ;;
+        esac
     done
 
-    # Find all matching directories
-    local dirs=()
-    while IFS= read -r dir; do
-        [[ -n "$dir" ]] && dirs+=("$dir")
+    # Find all matching items
+    local items=()
+    while IFS= read -r item; do
+        [[ -n "$item" ]] && items+=("$item")
     done < <(find . \( "${find_args[@]}" \) 2>/dev/null | sort)
 
-    if [[ ${#dirs[@]} -eq 0 ]]; then
-        echo "No matching directories found."
+    if [[ ${#items[@]} -eq 0 ]]; then
+        echo "No matches found."
         exit 0
     fi
 
     # Show what will be deleted
-    local count=${#dirs[@]}
-    local plural="ies"
-    [[ $count -eq 1 ]] && plural="y"
+    local count=${#items[@]}
+    local item_word="item"
+    [[ $count -ne 1 ]] && item_word="items"
 
     echo ""
-    echo "${BOLD}Found $count director${plural}:${NC}"
-    for dir in "${dirs[@]}"; do
-        echo "  ${RED}${dir}${NC}"
+    echo "${BOLD}Found $count $item_word:${NC}"
+    for item in "${items[@]}"; do
+        if [[ -d "$item" ]]; then
+            echo "  ${RED}${item}/${NC}"
+        else
+            echo "  ${RED}${item}${NC}"
+        fi
     done
     echo ""
 
@@ -114,18 +146,18 @@ main() {
         fi
     fi
 
-    # Delete directories (deepest first to avoid issues)
+    # Delete items (deepest first to avoid issues with directories)
     local deleted=0
-    for dir in $(echo "${dirs[@]}" | tr ' ' '\n' | awk -F/ '{print NF, $0}' | sort -rn | cut -d' ' -f2-); do
-        if [[ -d "$dir" ]]; then
-            rm -rf "$dir"
+    for item in $(printf '%s\n' "${items[@]}" | awk -F/ '{print NF, $0}' | sort -rn | cut -d' ' -f2-); do
+        if [[ -e "$item" ]]; then
+            rm -rf "$item"
             ((deleted++))
         fi
     done
 
-    plural="ies"
-    [[ $deleted -eq 1 ]] && plural="y"
-    success "Deleted $deleted director${plural}."
+    item_word="item"
+    [[ $deleted -ne 1 ]] && item_word="items"
+    success "Deleted $deleted $item_word."
 }
 
 main "$@"
