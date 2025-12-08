@@ -218,13 +218,13 @@ cmd_setup_add() {
     # Validate based on local or remote
     if [[ -n "$host" ]]; then
         # Remote: test SSH connection and directory
-        if ! ssh -o ConnectTimeout=5 "$host" "test -d '$path'" 2>/dev/null; then
-            if ! ssh -o ConnectTimeout=5 "$host" "exit 0" 2>/dev/null; then
+        if ! /usr/bin/ssh -o ConnectTimeout=5 "$host" "test -d '$path'" 2>/dev/null; then
+            if ! /usr/bin/ssh -o ConnectTimeout=5 "$host" "exit 0" 2>/dev/null; then
                 error "Cannot connect to $host"
             fi
             if read -q "?Directory doesn't exist on $host. Create it? [y/N] "; then
                 echo ""
-                ssh "$host" "mkdir -p '$path'"
+                /usr/bin/ssh "$host" "mkdir -p '$path'"
                 success "Created $path on $host"
             else
                 echo ""
@@ -902,9 +902,9 @@ get_dir_size() {
     local host="$1"
     local path="$2"
     if [[ -n "$host" ]]; then
-        ssh "$host" "du -sh '$path' 2>/dev/null" | cut -f1
+        /usr/bin/ssh "$host" "du -sh '$path' 2>/dev/null" | /usr/bin/cut -f1
     else
-        du -sh "$path" 2>/dev/null | cut -f1
+        du -sh "$path" 2>/dev/null | /usr/bin/cut -f1
     fi
 }
 
@@ -935,7 +935,7 @@ cmd_stats_library() {
     # Check if filtered year exists
     if [[ -n "$filter_year" ]]; then
         if [[ -n "$lib_host" ]]; then
-            if ! ssh "$lib_host" "test -d '$search_path'" 2>/dev/null; then
+            if ! /usr/bin/ssh "$lib_host" "test -d '$search_path'" 2>/dev/null; then
                 warn "No photos found for $filter_year"
                 echo ""
                 return
@@ -950,7 +950,7 @@ cmd_stats_library() {
     # Scan all files and count by year/month
     local find_output
     if [[ -n "$lib_host" ]]; then
-        find_output=$(ssh "$lib_host" "find '$search_path' -type f 2>/dev/null")
+        find_output=$(/usr/bin/ssh "$lib_host" "find '$search_path' -type f 2>/dev/null")
     else
         find_output=$(find "$search_path" -type f 2>/dev/null)
     fi
