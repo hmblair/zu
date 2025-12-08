@@ -12,4 +12,4 @@ for path in "$@"; do
     fi
 done
 
-sudo chown -R "$USER" -- "$@"
+/usr/bin/sudo /bin/chown -R "$USER" -- "$@"
