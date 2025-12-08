@@ -920,10 +920,11 @@ is_video_ext() {
 # Generate underline matching visible length of text (strips ANSI codes)
 underline() {
     local text="$1"
-    # Strip ANSI escape codes to get visible length
-    local stripped=$(echo -n "$text" | sed 's/\x1b\[[0-9;]*m//g')
+    # Strip ANSI escape codes (both literal \033 and actual ESC byte)
+    local stripped=$(printf '%s' "$text" | /usr/bin/perl -pe 's/\\033\[[0-9;]*m//g; s/\x1b\[[0-9;]*m//g')
     local len=${#stripped}
-    printf '─%.0s' $(seq 1 $len)
+    # Repeat character using zsh
+    printf '%s' "${(l:$len::─:)}"
 }
 
 # Stats for a single library
@@ -941,13 +942,6 @@ cmd_stats_library() {
     fi
     echo "════════════════════════════════════════"
     echo ""
-
-    typeset -A year_photos
-    typeset -A year_videos
-    typeset -A month_photos
-    typeset -A month_videos
-    local total_photos=0
-    local total_videos=0
 
     # Build search path
     local search_path="$lib_path"
@@ -968,59 +962,129 @@ cmd_stats_library() {
         fi
     fi
 
-    # Scan all files and count by year/month
-    local find_output
+    # Video extensions for awk matching
+    local video_pattern="mp4|mov|avi|mkv"
+
+    # Use awk to count files by year/month/type in one pass (much faster than zsh loop)
+    local awk_script='
+    {
+        # Extract year/month from path: .../YYYY/MM/DD/filename
+        n = split($0, parts, "/")
+        if (n >= 4) {
+            year = parts[n-3]
+            month = parts[n-2]
+            # Validate date format
+            if (year ~ /^[0-9]{4}$/ && month ~ /^[0-9]{2}$/) {
+                # Get extension
+                split(parts[n], fname, ".")
+                ext = tolower(fname[length(fname)])
+                key = year ":" month
+                if (ext ~ /^('"$video_pattern"')$/) {
+                    month_videos[key]++
+                    year_videos[year]++
+                    total_videos++
+                } else {
+                    month_photos[key]++
+                    year_photos[year]++
+                    total_photos++
+                }
+                years[year] = 1
+            }
+        }
+    }
+    END {
+        # Output years (unsorted - shell will sort)
+        for (y in years) {
+            print "YEAR:" y ":" year_photos[y]+0 ":" year_videos[y]+0
+        }
+        # Output month counts
+        for (key in month_photos) {
+            print "MONTH_P:" key ":" month_photos[key]
+        }
+        for (key in month_videos) {
+            print "MONTH_V:" key ":" month_videos[key]
+        }
+        print "TOTAL:" total_photos+0 ":" total_videos+0
+    }'
+
+    # Run find and awk
+    local counts
     if [[ -n "$lib_host" ]]; then
-        find_output=$(/usr/bin/ssh "$lib_host" "find '$search_path' -type f 2>/dev/null")
+        counts=$(/usr/bin/ssh "$lib_host" "find '$search_path' -type f 2>/dev/null" | /usr/bin/awk "$awk_script")
     else
-        find_output=$(find "$search_path" -type f 2>/dev/null)
+        counts=$(find "$search_path" -type f 2>/dev/null | /usr/bin/awk "$awk_script")
     fi
 
-    while IFS= read -r file; do
-        [[ -z "$file" ]] && continue
-
-        # Extract date from path: .../YYYY/MM/DD/filename
-        local dir="${file:h}"
-        local day="${dir:t}"
-        local month_dir="${dir:h}"
-        local month="${month_dir:t}"
-        local year_dir="${month_dir:h}"
-        local year="${year_dir:t}"
-
-        # Validate it looks like a date
-        if [[ ! "$year" =~ ^[0-9]{4}$ ]] || [[ ! "$month" =~ ^[0-9]{2}$ ]]; then
-            continue
-        fi
-
-        # Count by type (photo vs video)
-        local ext="${file:e}"
-        local key="$year:$month"
-        if is_video_ext "$ext"; then
-            ((month_videos[$key]++))
-            ((year_videos[$year]++))
-            ((total_videos++))
-        else
-            ((month_photos[$key]++))
-            ((year_photos[$year]++))
-            ((total_photos++))
-        fi
-    done <<< "$find_output"
-
-    # Get sorted unique years (from both photos and videos)
+    # Parse awk output into arrays
+    typeset -A year_photos year_videos month_photos month_videos
     local -a years=()
-    for key in "${(@k)year_photos}"; do
-        years+=("$key")
-    done
-    for key in "${(@k)year_videos}"; do
-        [[ ! " ${years[*]} " =~ " $key " ]] && years+=("$key")
-    done
+    local total_photos=0 total_videos=0
+
+    while IFS= read -r line; do
+        local type="${line%%:*}"
+        local rest="${line#*:}"
+        case "$type" in
+            YEAR)
+                # YEAR:2024:photos:videos
+                local y="${rest%%:*}"; rest="${rest#*:}"
+                local p="${rest%%:*}"; rest="${rest#*:}"
+                local v="$rest"
+                years+=("$y")
+                year_photos[$y]=$p
+                year_videos[$y]=$v
+                ;;
+            MONTH_P)
+                # MONTH_P:2024:01:count
+                local ym="${rest%:*}"  # year:month
+                local cnt="${rest##*:}"
+                month_photos[$ym]=$cnt
+                ;;
+            MONTH_V)
+                # MONTH_V:2024:01:count
+                local ym="${rest%:*}"
+                local cnt="${rest##*:}"
+                month_videos[$ym]=$cnt
+                ;;
+            TOTAL)
+                # TOTAL:photos:videos
+                total_photos="${rest%%:*}"
+                total_videos="${rest#*:}"
+                ;;
+        esac
+    done <<< "$counts"
+
+    # Sort years
     years=(${(on)years})
+
+    # Get all year sizes in one du command
+    typeset -A year_sizes
+    local total_size=""
+    if [[ ${#years[@]} -gt 0 ]]; then
+        local du_output
+        if [[ -n "$lib_host" ]]; then
+            # Build year paths and get sizes in one SSH call
+            local year_paths=""
+            for y in "${years[@]}"; do
+                year_paths+="'$lib_path/$y' "
+            done
+            du_output=$(/usr/bin/ssh "$lib_host" "du -sh $year_paths 2>/dev/null")
+            total_size=$(/usr/bin/ssh "$lib_host" "du -sh '$search_path' 2>/dev/null" | /usr/bin/cut -f1)
+        else
+            du_output=$(du -sh "${years[@]/#/$lib_path/}" 2>/dev/null)
+            total_size=$(du -sh "$search_path" 2>/dev/null | /usr/bin/cut -f1)
+        fi
+        # Parse du output
+        while IFS=$'\t' read -r size path; do
+            local y="${path:t}"
+            year_sizes[$y]="$size"
+        done <<< "$du_output"
+    fi
 
     # Display by year
     for year in "${years[@]}"; do
         local photos="${year_photos[$year]:-0}"
         local videos="${year_videos[$year]:-0}"
-        local year_size=$(get_dir_size "$lib_host" "$lib_path/$year")
+        local year_size="${year_sizes[$year]:-}"
 
         # Build count string (with proper pluralization)
         local count_str=""
@@ -1073,8 +1137,6 @@ cmd_stats_library() {
         done
         echo ""
     done
-
-    local total_size=$(get_dir_size "$lib_host" "$search_path")
 
     # Build total string (with proper pluralization)
     local total_str=""
