@@ -724,10 +724,22 @@ cmd_stats() {
     done
     years=(${(on)years})
 
+    # Helper to get directory size
+    get_size() {
+        local path="$1"
+        if [[ -n "$DEST_HOST" ]]; then
+            /usr/bin/ssh "$DEST_HOST" "du -sh '$path' 2>/dev/null" | /usr/bin/cut -f1
+        else
+            /usr/bin/du -sh "$path" 2>/dev/null | /usr/bin/cut -f1
+        fi
+    }
+
     # Display by year
+    local total_size=""
     for year in "${years[@]}"; do
         local year_total="${year_totals[$year]}"
-        echo "${BOLD}$year${NC}  (${CYAN}$year_total${NC} photos)"
+        local year_size=$(get_size "$DEST_DIR/$year")
+        echo "${BOLD}$year${NC}  (${CYAN}$year_total${NC} photos, ${CYAN}$year_size${NC})"
         echo "────────────────────"
 
         # Get months for this year
@@ -757,7 +769,8 @@ cmd_stats() {
     done
 
     echo "────────────────────"
-    echo "${BOLD}Total: ${CYAN}$grand_total${NC}${BOLD} photos${NC}"
+    total_size=$(get_size "$search_path")
+    echo "${BOLD}Total: ${CYAN}$grand_total${NC}${BOLD} photos, ${CYAN}$total_size${NC}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
