@@ -107,6 +107,12 @@ function menu {
 # Service management (launchd)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_zu_require_macos() {
+    if [[ "$OSTYPE" != darwin* ]]; then
+        error "Service management requires macOS."
+    fi
+}
+
 ZU_USER_AGENTS_DIR="$HOME/Library/LaunchAgents"
 ZU_SYSTEM_DAEMONS_DIR="/Library/LaunchDaemons"
 
@@ -134,6 +140,7 @@ zu_service_exists() {
 # Load a service
 # Usage: zu_service_load <label> [user|system]
 zu_service_load() {
+    _zu_require_macos
     local label="$1"
     local level="${2:-user}"
     local plist_path="$(zu_service_path "$label" "$level")"
@@ -148,6 +155,7 @@ zu_service_load() {
 # Unload a service
 # Usage: zu_service_unload <label> [user|system]
 zu_service_unload() {
+    _zu_require_macos
     local label="$1"
     local level="${2:-user}"
     local plist_path="$(zu_service_path "$label" "$level")"
@@ -162,6 +170,7 @@ zu_service_unload() {
 # Remove a service (unload + delete plist)
 # Usage: zu_service_remove <label> [user|system]
 zu_service_remove() {
+    _zu_require_macos
     local label="$1"
     local level="${2:-user}"
     local plist_path="$(zu_service_path "$label" "$level")"
@@ -178,6 +187,7 @@ zu_service_remove() {
 # Reload a service (unload + load)
 # Usage: zu_service_reload <label> [user|system]
 zu_service_reload() {
+    _zu_require_macos
     local label="$1"
     local level="${2:-user}"
 
@@ -193,6 +203,7 @@ zu_service_reload() {
 #   --log <path>           Log file path
 #   --env <KEY=val>...     Environment variables
 zu_service_create() {
+    _zu_require_macos
     local label="$1"
     local script="$2"
     shift 2
