@@ -1,0 +1,48 @@
+#compdef photosort
+
+_photosort() {
+    local -a commands
+    commands=(
+        'setup:Configure photosort destination directory'
+        'stats:Show photo counts by year and month'
+        'iphone:Import photos from connected iPhone'
+        'fix-exif:Add EXIF dates to files based on folder structure'
+        'help:Show usage'
+    )
+
+    local -a options
+    options=(
+        '--dry-run[Preview changes without copying files]'
+        '--move[Move instead of copy (destructive)]'
+        '--hash[Use MD5 hash for duplicate detection]'
+        '--help[Show help message]'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args' \
+        $options
+
+    case $state in
+        command)
+            _alternative \
+                'commands:command:_describe -t commands "photosort command" commands' \
+                'directories:source directory:_files -/'
+            ;;
+        args)
+            case $words[1] in
+                stats)
+                    _message 'year (optional)'
+                    ;;
+                iphone|fix-exif)
+                    _arguments $options
+                    ;;
+                *)
+                    _files -/
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_photosort "$@"
