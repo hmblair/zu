@@ -12,6 +12,7 @@ HIDDEN=0
 SIZES=0
 COUNT_LINES=0
 EXPAND_ALL=0
+CLEAR_SCREEN=0
 DIRECTORIES=()
 NO_EXPAND=('^\.git$')
 MAX_TREE_DEPTH=50
@@ -33,10 +34,11 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 usage() {
-    echo "Usage: l [-ahls] [--depth INT | --tree | --expand-all] [FILE ...]"
+    echo "Usage: l [-achlst] [--depth INT | --tree | --expand-all] [FILE ...]"
     echo ""
     echo "Options:"
     echo "  -a              Show hidden files"
+    echo "  -c              Clear screen before displaying"
     echo "  -s              Show file/directory sizes"
     echo "  -l              Show line counts for files"
     echo "  -t, --tree      Show full tree (depth $MAX_TREE_DEPTH)"
@@ -317,6 +319,10 @@ while [[ $# -gt 0 ]]; do
             HIDDEN=1
             shift
             ;;
+        -c)
+            CLEAR_SCREEN=1
+            shift
+            ;;
         --expand-all)
             EXPAND_ALL=1
             shift
@@ -355,6 +361,11 @@ for dir in "${DIRECTORIES[@]}"; do
         build_linecount_cache "${dir:A}" "$DEPTH" "$HIDDEN"
     fi
 done
+
+# Clear screen if requested
+if (( CLEAR_SCREEN )); then
+    /usr/bin/clear
+fi
 
 # Print tree for each directory
 for dir in "${DIRECTORIES[@]}"; do
