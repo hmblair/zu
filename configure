@@ -37,15 +37,27 @@ done
 
 echo "Configured $(ls -1 "$BIN_DIR" | wc -l | tr -d ' ') commands in bin/"
 
-# Link completions to site-functions (if writable and in fpath)
-if [[ -w "${SITE_FUNCTIONS:h}" ]] && [[ " $fpath " == *" $SITE_FUNCTIONS "* ]]; then
-    mkdir -p "$SITE_FUNCTIONS"
+# Link completions to site-functions
+# Try system location first, fall back to user-local
+USER_SITE_FUNCTIONS="$HOME/.local/share/zsh/site-functions"
+
+link_completions() {
+    local target="$1"
+    mkdir -p "$target"
     for comp in "$COMPLETIONS_DIR"/_*; do
         [[ ! -f "$comp" ]] && continue
         name="${comp:t}"
-        ln -sf "$comp" "$SITE_FUNCTIONS/$name"
+        ln -sf "$comp" "$target/$name"
     done
-    echo "Linked $(ls -1 "$COMPLETIONS_DIR"/_* 2>/dev/null | wc -l | tr -d ' ') completions to $SITE_FUNCTIONS"
+    echo "Linked $(ls -1 "$COMPLETIONS_DIR"/_* 2>/dev/null | wc -l | tr -d ' ') completions to $target"
+}
+
+if [[ -w "${SITE_FUNCTIONS:h}" ]] && [[ " $fpath " == *" $SITE_FUNCTIONS "* ]]; then
+    link_completions "$SITE_FUNCTIONS"
+elif [[ " $fpath " == *" $USER_SITE_FUNCTIONS "* ]]; then
+    link_completions "$USER_SITE_FUNCTIONS"
 else
-    echo "Note: Add $COMPLETIONS_DIR to fpath for completions"
+    # Create user dir and link there
+    link_completions "$USER_SITE_FUNCTIONS"
+    echo "Note: Add to ~/.zshrc:  fpath=($USER_SITE_FUNCTIONS \$fpath)"
 fi
