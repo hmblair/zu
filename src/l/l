@@ -229,6 +229,11 @@ print_dir() {
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Check if current directory exists
+if ! /bin/pwd &>/dev/null; then
+    error "Current directory no longer exists"
+fi
+
 # Load icons from TOML
 load_icons
 
