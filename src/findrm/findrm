@@ -103,25 +103,46 @@ main() {
     local items=()
     while IFS= read -r item; do
         [[ -n "$item" ]] && items+=("$item")
-    done < <(find . \( "${find_args[@]}" \) 2>/dev/null | sort)
+    done < <(/usr/bin/find . \( "${find_args[@]}" \) 2>/dev/null | /usr/bin/sort)
 
     if [[ ${#items[@]} -eq 0 ]]; then
         echo "No matches found."
         exit 0
     fi
 
-    # Show what will be deleted
+    # Show what will be deleted with sizes
     local count=${#items[@]}
     local item_word="item"
     [[ $count -ne 1 ]] && item_word="items"
 
-    echo ""
-    echo "${BOLD}Found $count $item_word:${NC}"
+    # Get sizes for all items
+    local -A sizes
+    local total_bytes=0
     for item in "${items[@]}"; do
+        local bytes=$(/usr/bin/du -sk "$item" 2>/dev/null | /usr/bin/cut -f1)
+        bytes=${bytes:-0}
+        sizes[$item]=$(/usr/bin/du -sh "$item" 2>/dev/null | /usr/bin/cut -f1)
+        ((total_bytes += bytes))
+    done
+
+    # Convert total KB to human readable
+    local total_human
+    if (( total_bytes >= 1048576 )); then
+        total_human="$(/usr/bin/awk "BEGIN {printf \"%.1fG\", $total_bytes / 1048576}")"
+    elif (( total_bytes >= 1024 )); then
+        total_human="$(/usr/bin/awk "BEGIN {printf \"%.1fM\", $total_bytes / 1024}")"
+    else
+        total_human="${total_bytes}K"
+    fi
+
+    echo ""
+    echo "${BOLD}Found $count $item_word ($total_human total):${NC}"
+    for item in "${items[@]}"; do
+        local size="${sizes[$item]:-?}"
         if [[ -d "$item" ]]; then
-            echo "  ${RED}${item}/${NC}"
+            printf "  ${RED}%-6s${NC} ${RED}%s/${NC}\n" "$size" "$item"
         else
-            echo "  ${RED}${item}${NC}"
+            printf "  ${RED}%-6s${NC} ${RED}%s${NC}\n" "$size" "$item"
         fi
     done
     echo ""
@@ -144,16 +165,16 @@ main() {
 
     # Delete items (deepest first to avoid issues with directories)
     local deleted=0
-    for item in $(printf '%s\n' "${items[@]}" | awk -F/ '{print NF, $0}' | sort -rn | cut -d' ' -f2-); do
+    for item in $(printf '%s\n' "${items[@]}" | /usr/bin/awk -F/ '{print NF, $0}' | /usr/bin/sort -rn | /usr/bin/cut -d' ' -f2-); do
         if [[ -e "$item" ]]; then
-            rm -rf "$item"
+            /bin/rm -rf "$item"
             ((deleted++))
         fi
     done
 
     item_word="item"
     [[ $deleted -ne 1 ]] && item_word="items"
-    success "Deleted $deleted $item_word."
+    success "Deleted $deleted $item_word ($total_human)."
 }
 
 main "$@"
