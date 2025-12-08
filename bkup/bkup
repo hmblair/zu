@@ -422,7 +422,6 @@ with open('$config_file', 'w') as f:
     <string>$PLIST_PREFIX.$NAME</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/zsh</string>
         <string>$BKUP_PATH</string>
         <string>run</string>
         <string>$NAME</string>
@@ -818,7 +817,6 @@ with open('$config_file', 'w') as f:
     <string>$PLIST_PREFIX.$NAME</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/zsh</string>
         <string>$BKUP_PATH</string>
         <string>run</string>
         <string>$NAME</string>
@@ -1075,7 +1073,6 @@ with open('$new_config_file', 'w') as f:
     <string>$PLIST_PREFIX.$NAME</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/zsh</string>
         <string>$BKUP_PATH</string>
         <string>run</string>
         <string>$NAME</string>

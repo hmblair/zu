@@ -61,7 +61,6 @@ cmd_setup() {
     <string>com.zu.freed</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/zsh</string>
         <string>$DAEMON_PATH</string>
     </array>
     <key>StartInterval</key>

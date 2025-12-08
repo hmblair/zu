@@ -366,7 +366,6 @@ cmd_setup() {
     <string>$PLIST_NAME</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/zsh</string>
         <string>$daemon_script</string>
     </array>
     <key>RunAtLoad</key>
@@ -426,7 +425,6 @@ cmd_reload() {
     <string>$PLIST_NAME</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/zsh</string>
         <string>$daemon_script</string>
     </array>
     <key>RunAtLoad</key>
