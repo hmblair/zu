@@ -6,6 +6,7 @@
 setopt nullglob
 
 SCRIPT_DIR="${0:A:h}"
+SRC_DIR="$SCRIPT_DIR/src"
 BIN_DIR="$SCRIPT_DIR/bin"
 
 mkdir -p "$BIN_DIR"
@@ -13,25 +14,23 @@ mkdir -p "$BIN_DIR"
 # Clear existing symlinks
 rm -f "$BIN_DIR"/* 2>/dev/null
 
-# Link dir/dir pattern scripts (e.g., bkup/bkup, blk/blk)
-for script in "$SCRIPT_DIR"/*/*; do
+# Link dir/dir pattern scripts (e.g., src/bkup/bkup, src/blk/blk)
+for script in "$SRC_DIR"/*/*; do
     [[ ! -x "$script" ]] && continue
     dir="${script:h:t}"
     name="${script:t}"
-    [[ "$dir" == "bin" ]] && continue
     [[ "$dir" == "completions" ]] && continue
     [[ "$name" != "$dir" ]] && continue
-    ln -sf "../$dir/$name" "$BIN_DIR/$name"
+    ln -sf "../src/$dir/$name" "$BIN_DIR/$name"
 done
 
-# Link root-level executables (excluding special files)
-for script in "$SCRIPT_DIR"/*; do
+# Link root-level executables in src/ (excluding special files)
+for script in "$SRC_DIR"/*; do
     [[ -d "$script" ]] && continue
     [[ ! -x "$script" ]] && continue
     name="${script:t}"
-    [[ "$name" == "configure" ]] && continue
     [[ "$name" == "common" ]] && continue
-    ln -sf "../$name" "$BIN_DIR/$name"
+    ln -sf "../src/$name" "$BIN_DIR/$name"
 done
 
 echo "Configured $(ls -1 "$BIN_DIR" | wc -l | tr -d ' ') commands in bin/"
