@@ -14,9 +14,11 @@ SALT_FILE="$BLOCK_DIR/salt"
 TRIGGER_FILE="$BLOCK_DIR/trigger"
 ADD_REQUEST_FILE="$BLOCK_DIR/add_request"
 SUMMARY_FILE="$BLOCK_DIR/summary"
+DNS_BACKUP_FILE="$BLOCK_DIR/dns_backup"
 PLIST_LABEL="com.zu.blkd"
 DAEMON_PASS_FILE="/var/root/.blk_pass"
 OP_ITEM_NAME="blk"  # 1Password item name for storing password
+FAMILY_DNS="1.1.1.3"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -31,6 +33,9 @@ usage() {
     echo "  remove <domain>             Remove a daily schedule (only when not active)"
     echo "  list [--show-hidden]        Show all active blocks with time remaining"
     echo "  status <domain>             Check if a domain is blocked"
+    echo "  dns on                      Switch DNS to 1.1.1.3 (blocks malware/adult content)"
+    echo "  dns off                     Restore original DNS settings"
+    echo "  dns status                  Show current DNS status"
     echo "  setup                       One-time setup (installs daemon)"
     echo "  reload                      Restart the daemon"
     echo "  uninstall                   Remove daemon and config (only if no active blocks)"
@@ -954,6 +959,89 @@ else:
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+cmd_dns() {
+    local subcmd="${1:-status}"
+
+    # Get all network services (skip first line which is a header message)
+    local services=("${(@f)$(networksetup -listallnetworkservices 2>/dev/null | tail -n +2)}")
+
+    case "$subcmd" in
+        on)
+            mkdir -p "$BLOCK_DIR"
+
+            # Backup current DNS for each service
+            local backup=""
+            for service in "${services[@]}"; do
+                [[ "$service" == "*"* ]] && continue  # Skip disabled services
+                local dns=$(networksetup -getdnsservers "$service" 2>/dev/null)
+                if [[ "$dns" != "There aren't any DNS Servers set on"* ]]; then
+                    backup+="$service|$dns"$'\n'
+                else
+                    backup+="$service|empty"$'\n'
+                fi
+            done
+            echo -n "$backup" > "$DNS_BACKUP_FILE"
+
+            # Set DNS to family-friendly Cloudflare
+            for service in "${services[@]}"; do
+                [[ "$service" == "*"* ]] && continue
+                sudo networksetup -setdnsservers "$service" "$FAMILY_DNS" 2>/dev/null
+            done
+
+            success "DNS set to $FAMILY_DNS (Cloudflare family-friendly)"
+            ;;
+        off)
+            if [[ ! -f "$DNS_BACKUP_FILE" ]]; then
+                error "No DNS backup found. Run 'blk dns on' first."
+            fi
+
+            # Restore DNS for each service
+            while IFS='|' read -r service dns; do
+                [[ -z "$service" ]] && continue
+                if [[ "$dns" == "empty" ]]; then
+                    sudo networksetup -setdnsservers "$service" "Empty" 2>/dev/null
+                else
+                    sudo networksetup -setdnsservers "$service" ${(f)dns} 2>/dev/null
+                fi
+            done < "$DNS_BACKUP_FILE"
+
+            rm -f "$DNS_BACKUP_FILE"
+            success "DNS restored to original settings"
+            ;;
+        status)
+            echo ""
+            echo "${BOLD}DNS Status${NC}"
+            echo "─────────────────────────────────────────"
+
+            local is_family=false
+            for service in "${services[@]}"; do
+                [[ "$service" == "*"* ]] && continue
+                local dns=$(networksetup -getdnsservers "$service" 2>/dev/null)
+                if [[ "$dns" == "There aren't any DNS Servers set on"* ]]; then
+                    dns="(automatic)"
+                fi
+                if [[ "$dns" == "$FAMILY_DNS" ]]; then
+                    is_family=true
+                    printf "  %-20s ${GREEN}%s${NC} (family)\n" "$service:" "$dns"
+                else
+                    printf "  %-20s %s\n" "$service:" "$dns"
+                fi
+            done
+
+            echo ""
+            if [[ -f "$DNS_BACKUP_FILE" ]]; then
+                echo "  ${YELLOW}Family DNS is active${NC} (backup saved)"
+            else
+                echo "  ${GREY}Family DNS is not active${NC}"
+            fi
+            echo ""
+            ;;
+        *)
+            error "Unknown dns command: $subcmd (use on, off, or status)"
+            ;;
+    esac
+}
+
 case "${1:-}" in
     add)
         shift
@@ -972,6 +1060,9 @@ case "${1:-}" in
         ;;
     status)
         cmd_status "$2"
+        ;;
+    dns)
+        cmd_dns "$2"
         ;;
     setup)
         cmd_setup
