@@ -12,9 +12,10 @@ source "$SCRIPT_DIR/../common"
 
 usage() {
     cat << EOF
-Usage: findrm [options] <name>...
+Usage: findrm [options] <pattern>...
 
-Recursively find and remove all files/directories matching the given name(s).
+Recursively find and remove all files/directories matching the given pattern(s).
+Patterns support glob wildcards (*, ?, []) - remember to quote them.
 
 Options:
   -D, --no-dirs    Skip directories (files only)
@@ -26,10 +27,10 @@ Options:
 Examples:
   findrm node_modules              # Remove all node_modules files and directories
   findrm __pycache__ .pytest_cache # Remove multiple patterns
+  findrm "*.pyc"                   # Remove all .pyc files and directories
+  findrm -F "*.log"                # Remove all .log files only
   findrm -n build                  # Preview what would be deleted
   findrm -f dist                   # Delete without confirmation
-  findrm -F .DS_Store              # Remove all .DS_Store files only
-  findrm -D "*.pyc"                # Remove all .pyc directories only
 EOF
 }
 
