@@ -2,17 +2,13 @@
 
 _photosort() {
     local -a commands=(
-        'setup:Manage photo libraries (add, remove, list)'
+        'add:Add a new photo library'
+        'remove:Remove a photo library'
+        'list:List configured libraries'
         'stats:Show photo counts for all libraries'
         'iphone:Import photos from connected iPhone'
         'fix-exif:Add EXIF dates to files based on folder structure'
         'help:Show usage'
-    )
-
-    local -a setup_commands=(
-        'add:Add a new photo library'
-        'remove:Remove a photo library'
-        'list:List configured libraries'
     )
 
     local -a options=(
@@ -34,9 +30,6 @@ _photosort() {
             ;;
         args)
             case $words[1] in
-                setup)
-                    _describe -t setup-commands 'setup command' setup_commands
-                    ;;
                 stats)
                     _message 'year (optional)'
                     ;;

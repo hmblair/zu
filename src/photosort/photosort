@@ -113,9 +113,9 @@ Usage: photosort [options] <source>
 Organize photos from source folder into LIBRARY/YYYY/MM/DD/
 
 Commands:
-  setup add       Add a new photo library
-  setup remove    Remove a photo library
-  setup list      List configured libraries
+  add             Add a new photo library
+  remove          Remove a photo library
+  list            List configured libraries
   stats [year]    Show photo counts for all libraries
   iphone          Import photos from connected iPhone
   fix-exif        Add EXIF dates to files based on folder structure
@@ -127,7 +127,7 @@ Options:
   --help       Show this help message
 
 Examples:
-  photosort setup add                 # Add a new library
+  photosort add                       # Add a new library
   photosort ~/DCIM                    # Copy photos (prompts for library)
   photosort --dry-run /mnt/sd/DCIM    # Preview without copying
   photosort --move ~/Downloads        # Move instead of copy
@@ -1176,13 +1176,18 @@ USE_HASH=0
 SOURCE=""
 
 # Check for subcommands first
-if [[ "$1" == "setup" ]]; then
-    case "$2" in
-        add) cmd_setup_add ;;
-        remove|rm) cmd_setup_remove ;;
-        list|ls|"") cmd_setup_list ;;
-        *) error "Unknown setup command: $2. Use add, remove, or list." ;;
-    esac
+if [[ "$1" == "add" ]]; then
+    cmd_setup_add
+    exit 0
+fi
+
+if [[ "$1" == "remove" || "$1" == "rm" ]]; then
+    cmd_setup_remove
+    exit 0
+fi
+
+if [[ "$1" == "list" || "$1" == "ls" ]]; then
+    cmd_setup_list
     exit 0
 fi
 
