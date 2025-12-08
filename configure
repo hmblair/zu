@@ -37,11 +37,15 @@ done
 
 echo "Configured $(ls -1 "$BIN_DIR" | wc -l | tr -d ' ') commands in bin/"
 
-# Link completions to site-functions
-mkdir -p "$SITE_FUNCTIONS"
-for comp in "$COMPLETIONS_DIR"/_*; do
-    [[ ! -f "$comp" ]] && continue
-    name="${comp:t}"
-    ln -sf "$comp" "$SITE_FUNCTIONS/$name"
-done
-echo "Linked $(ls -1 "$COMPLETIONS_DIR"/_* 2>/dev/null | wc -l | tr -d ' ') completions to $SITE_FUNCTIONS"
+# Link completions to site-functions (if writable and in fpath)
+if [[ -w "${SITE_FUNCTIONS:h}" ]] && [[ " $fpath " == *" $SITE_FUNCTIONS "* ]]; then
+    mkdir -p "$SITE_FUNCTIONS"
+    for comp in "$COMPLETIONS_DIR"/_*; do
+        [[ ! -f "$comp" ]] && continue
+        name="${comp:t}"
+        ln -sf "$comp" "$SITE_FUNCTIONS/$name"
+    done
+    echo "Linked $(ls -1 "$COMPLETIONS_DIR"/_* 2>/dev/null | wc -l | tr -d ' ') completions to $SITE_FUNCTIONS"
+else
+    echo "Note: Add $COMPLETIONS_DIR to fpath for completions"
+fi
