@@ -391,30 +391,6 @@ find_duplicate_in_folder() {
 # Associative array for batch EXIF dates: EXIF_DATES[filepath]=date
 typeset -gA EXIF_DATES
 
-# Cache directory
-EXIF_CACHE_DIR="$HOME/.cache/photosort"
-EXIF_CACHE_FILE="$EXIF_CACHE_DIR/exif_cache.txt"
-
-# Load cached EXIF dates
-load_exif_cache() {
-    [[ -f "$EXIF_CACHE_FILE" ]] || return
-    while IFS=$'\t' read -r filepath date mtime; do
-        [[ -n "$filepath" && -n "$date" ]] && EXIF_DATES[$filepath]="$date:$mtime"
-    done < "$EXIF_CACHE_FILE"
-}
-
-# Save EXIF dates to cache
-save_exif_cache() {
-    mkdir -p "$EXIF_CACHE_DIR"
-    : > "$EXIF_CACHE_FILE"
-    for filepath in "${(@k)EXIF_DATES}"; do
-        local val="${EXIF_DATES[$filepath]}"
-        local date="${val%:*}"
-        local mtime="${val#*:}"
-        [[ -n "$date" && "$date" != "$mtime" ]] && printf '%s\t%s\t%s\n' "$filepath" "$date" "$mtime"
-    done >> "$EXIF_CACHE_FILE"
-}
-
 # Check if exiv2 is available (faster than exiftool)
 USE_EXIV2=0
 if command -v exiv2 &>/dev/null; then
@@ -438,39 +414,10 @@ batch_fetch_exif() {
 
         [[ ! -s "$tmpfile" ]] && return
 
-        # Filter out files already in cache with matching mtime
-        local need_fetch="$tmpdir/need_fetch.txt"
-        : > "$need_fetch"
-        while IFS= read -r filepath; do
-            local cached="${EXIF_DATES[$filepath]}"
-            if [[ -n "$cached" ]]; then
-                local cached_mtime="${cached#*:}"
-                local current_mtime=$(stat -c '%Y' "$filepath" 2>/dev/null || stat -f '%m' "$filepath" 2>/dev/null)
-                if [[ "$cached_mtime" == "$current_mtime" ]]; then
-                    continue  # Cache hit
-                fi
-            fi
-            echo "$filepath" >> "$need_fetch"
-        done < "$tmpfile"
-
-        local total=$(wc -l < "$tmpfile" | tr -d ' ')
-        local cached=$((total - $(wc -l < "$need_fetch" | tr -d ' ')))
-        local to_fetch=$(wc -l < "$need_fetch" | tr -d ' ')
-
-        if [[ $cached -gt 0 ]]; then
-            printf "  [%d cached, %d to fetch]\n" "$cached" "$to_fetch"
-        fi
-
-        [[ ! -s "$need_fetch" ]] && return
+        local to_fetch=$(wc -l < "$tmpfile" | tr -d ' ')
 
         # Split into chunks for parallel processing
-        split -n "l/$num_cores" "$need_fetch" "$tmpdir/chunk_"
-
-        # Get mtimes for all files (fast)
-        while IFS= read -r f; do
-            local mtime=$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)
-            printf '%s\t%s\n' "$f" "$mtime"
-        done < "$need_fetch" > "$tmpdir/mtimes.txt"
+        split -n "l/$num_cores" "$tmpfile" "$tmpdir/chunk_"
 
         # Run EXIF reader on each chunk in parallel
         local pids=()
@@ -513,22 +460,20 @@ batch_fetch_exif() {
         local processed=$(cat "$tmpdir"/out_*.txt 2>/dev/null | wc -l)
         printf "\r  [%d/%d]\n" "$processed" "$to_fetch"
 
-        # Parse output and update EXIF_DATES (join with mtimes)
+        # Parse output and update EXIF_DATES
         if [[ $USE_EXIV2 -eq 1 ]]; then
-            # exiv2 format: filepath\tdate, join with mtimes
-            awk -F'\t' 'NR==FNR {mtime[$1]=$2; next}
-            {
+            # exiv2 format: filepath\tdate
+            awk -F'\t' '{
                 if ($1 != "" && $2 != "") {
-                    filepath = $1; date = $2; mt = mtime[filepath]
+                    filepath = $1; date = $2
                     gsub(/'\''/, "'\''\\'\'''\''", filepath)
-                    print "EXIF_DATES['\''" filepath "'\'']='\''" date ":" mt "'\''"
+                    print "EXIF_DATES['\''" filepath "'\'']='\''" date "'\''"
                 }
-            }' "$tmpdir/mtimes.txt" "$tmpdir"/out_*.txt > "$tmpdir/assignments.zsh"
+            }' "$tmpdir"/out_*.txt > "$tmpdir/assignments.zsh"
         else
-            # exiftool format: filepath\tdate1\tdate2\tdate3, join with mtimes
-            awk -F'\t' 'NR==FNR {mtime[$1]=$2; next}
-            {
-                filepath = $1; mt = mtime[filepath]
+            # exiftool format: filepath\tdate1\tdate2\tdate3
+            awk -F'\t' '{
+                filepath = $1
                 date = ""
                 for (i = 2; i <= 4; i++) {
                     if ($i != "" && $i != "-" && $i !~ /^0000/) {
@@ -538,9 +483,9 @@ batch_fetch_exif() {
                 }
                 if (date != "" && filepath != "" && filepath != "-") {
                     gsub(/'\''/, "'\''\\'\'''\''", filepath)
-                    print "EXIF_DATES['\''" filepath "'\'']='\''" date ":" mt "'\''"
+                    print "EXIF_DATES['\''" filepath "'\'']='\''" date "'\''"
                 }
-            }' "$tmpdir/mtimes.txt" "$tmpdir"/out_*.txt > "$tmpdir/assignments.zsh"
+            }' "$tmpdir"/out_*.txt > "$tmpdir/assignments.zsh"
         fi
         source "$tmpdir/assignments.zsh"
     } always {
@@ -551,9 +496,9 @@ batch_fetch_exif() {
 get_date_from_exif() {
     local file="$1"
 
-    # Use pre-fetched/cached date if available (format: "date:mtime")
+    # Use pre-fetched date if available
     if [[ -n "${EXIF_DATES[$file]}" ]]; then
-        echo "${EXIF_DATES[$file]%:*}"  # Strip mtime suffix
+        echo "${EXIF_DATES[$file]}"
         return
     fi
 
@@ -814,14 +759,11 @@ cmd_sort() {
     # Batch fetch EXIF dates (much faster than per-file calls)
     if [[ ${#new_files[@]} -gt 0 ]]; then
         info "Reading EXIF data..."
-        load_exif_cache
         local -a filepaths=()
         for entry in "${new_files[@]}"; do
             filepaths+=("${entry#*:*:}")
         done
         printf '%s\n' "${filepaths[@]}" | batch_fetch_exif
-        save_exif_cache
-        info "  Cached ${#EXIF_DATES[@]} dates"
         echo ""
     fi
 
