@@ -687,7 +687,8 @@ cmd_stats() {
     # Display by year
     for year in "${years[@]}"; do
         local year_total="${year_totals[$year]}"
-        echo "${BOLD}$year${NC}  ($year_total photos)"
+        echo "${BOLD}$year${NC}  (${CYAN}$year_total${NC} photos)"
+        echo "────────────────────"
 
         # Get months for this year
         local -a months=()
@@ -715,8 +716,8 @@ cmd_stats() {
         echo ""
     done
 
-    echo "─────────────────"
-    echo "${BOLD}Total: $grand_total photos${NC}"
+    echo "────────────────────"
+    echo "${BOLD}Total: ${CYAN}$grand_total${NC}${BOLD} photos${NC}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
