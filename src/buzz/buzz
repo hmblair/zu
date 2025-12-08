@@ -75,7 +75,12 @@ buzz_status() {
     fi
 
     if zu_service_exists "$PLIST_LABEL"; then
-        echo "Auto-start: ${GREEN}enabled${NC}"
+        local plist_file="$(zu_service_path "$PLIST_LABEL")"
+        if ! /usr/bin/grep -q "<string>$SCRIPT_PATH</string>" "$plist_file"; then
+            echo "Auto-start: ${RED}broken${NC} (wrong path - run 'buzz uninstall && buzz install')"
+        else
+            echo "Auto-start: ${GREEN}enabled${NC}"
+        fi
     else
         echo "Auto-start: ${RED}disabled${NC}"
     fi
