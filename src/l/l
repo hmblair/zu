@@ -166,10 +166,10 @@ print_line() {
 
     local out="${char}${colour}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
-        local size=$(du -hs "$line" 2>/dev/null | awk '{print $1}')
+        local size=$(/usr/bin/du -hs "$line" 2>/dev/null | /usr/bin/awk '{print $1}')
         out+=" (${size:-?})"
     elif [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
-        local linecount=$(wc -l < "$line" 2>/dev/null | tr -d ' ' || echo "0")
+        local linecount=$(/usr/bin/wc -l < "$line" 2>/dev/null | /usr/bin/tr -d ' ' || echo "0")
         out+=" (${linecount} lines)"
     fi
 
