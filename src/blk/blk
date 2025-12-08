@@ -247,6 +247,12 @@ parse_schedule() {
     local end="${schedule##*-}"
     parse_time "$start" > /dev/null  # validates
     parse_time "$end" > /dev/null    # validates
+
+    # Prevent 24-hour blocks (would never allow removal)
+    if [[ "$start" == "$end" ]]; then
+        error "Start and end times cannot be the same (would block 24 hours)"
+    fi
+
     echo "$start-$end"
 }
 
