@@ -19,6 +19,8 @@ MAX_TREE_DEPTH=50
 # Associative arrays
 typeset -A ICONS
 typeset -A GITIGNORE_CACHE
+typeset -A SIZE_CACHE
+typeset -A LINECOUNT_CACHE
 
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
@@ -86,6 +88,34 @@ build_gitignore_cache() {
 is_ignored() {
     local path="$1"
     (( ${+GITIGNORE_CACHE[$path]} ))
+}
+
+# Build size cache for all items under a path
+build_size_cache() {
+    local root="$1"
+    local maxdepth="$2"
+    local include_hidden="$3"
+
+    local find_args=(-maxdepth "$maxdepth")
+    (( ! include_hidden )) && find_args+=(-not -path '*/.*')
+
+    while IFS=$'\t' read -r size path; do
+        [[ -n "$path" ]] && SIZE_CACHE[$path]="$size"
+    done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/du -sh {} + 2>/dev/null)
+}
+
+# Build line count cache for all files under a path
+build_linecount_cache() {
+    local root="$1"
+    local maxdepth="$2"
+    local include_hidden="$3"
+
+    local find_args=(-maxdepth "$maxdepth" -type f)
+    (( ! include_hidden )) && find_args+=(-not -path '*/.*')
+
+    while read -r count path; do
+        [[ -n "$path" ]] && LINECOUNT_CACHE[$path]="$count"
+    done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null | /usr/bin/grep -v ' total$')
 }
 
 should_skip() {
@@ -166,10 +196,11 @@ print_line() {
 
     local out="${char}${colour}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
-        local size=$(/usr/bin/du -hs "$line" 2>/dev/null | /usr/bin/awk '{print $1}')
-        out+=" (${size:-?})"
-    elif [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
-        local linecount=$(/usr/bin/wc -l < "$line" 2>/dev/null | /usr/bin/tr -d ' ' || echo "0")
+        local size="${SIZE_CACHE[$line]:-?}"
+        out+=" (${size})"
+    fi
+    if [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
+        local linecount="${LINECOUNT_CACHE[$line]:-0}"
         out+=" (${linecount} lines)"
     fi
 
@@ -309,12 +340,21 @@ if [[ ${#DIRECTORIES[@]} -eq 0 ]]; then
     DIRECTORIES=(".")
 fi
 
-# Build gitignore cache if in a git repo
-if /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null; then
-    for dir in "${DIRECTORIES[@]}"; do
+# Build caches
+for dir in "${DIRECTORIES[@]}"; do
+    # Gitignore cache (only in git repos)
+    if /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null; then
         build_gitignore_cache "${dir:A}" "$DEPTH" "$HIDDEN"
-    done
-fi
+    fi
+    # Size cache
+    if (( SIZES )); then
+        build_size_cache "${dir:A}" "$DEPTH" "$HIDDEN"
+    fi
+    # Line count cache
+    if (( COUNT_LINES )); then
+        build_linecount_cache "${dir:A}" "$DEPTH" "$HIDDEN"
+    fi
+done
 
 # Print tree for each directory
 for dir in "${DIRECTORIES[@]}"; do
