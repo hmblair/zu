@@ -178,7 +178,7 @@ files_match() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 save_config() {
-    mkdir -p "$CONFIG_DIR"
+    /bin/mkdir -p "$CONFIG_DIR"
     {
         echo "# photosort configuration"
         echo "LIBRARIES=("
@@ -238,7 +238,7 @@ cmd_setup_add() {
         if [[ ! -d "$path" ]]; then
             if read -q "?Directory doesn't exist. Create it? [y/N] "; then
                 echo ""
-                mkdir -p "$path"
+                /bin/mkdir -p "$path"
                 success "Created $path"
             else
                 echo ""
@@ -610,7 +610,7 @@ process_file_new() {
 
     # Perform the operation
     if [[ "$dry_run" != "1" ]]; then
-        mkdir -p "$dest_dir"
+        /bin/mkdir -p "$dest_dir"
 
         local src_size=$(stat -c '%s' "$file" 2>/dev/null)
         if [[ -z "$src_size" ]]; then
@@ -699,7 +699,7 @@ process_file() {
 
     # Perform the operation
     if [[ "$dry_run" != "1" ]]; then
-        mkdir -p "$dest_dir"
+        /bin/mkdir -p "$dest_dir"
         if [[ "$copy_mode" == "1" ]]; then
             cp "$file" "$dest_file"
         else
@@ -1122,7 +1122,7 @@ cmd_iphone() {
     fi
 
     # Create mount point if needed
-    mkdir -p "$IPHONE_MOUNT"
+    /bin/mkdir -p "$IPHONE_MOUNT"
 
     # Mount if not already mounted
     if ! is_iphone_mounted; then
