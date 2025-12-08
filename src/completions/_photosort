@@ -1,8 +1,7 @@
 #compdef photosort
 
 _photosort() {
-    local -a commands
-    commands=(
+    local -a commands=(
         'setup:Manage photo libraries (add, remove, list)'
         'stats:Show photo counts for all libraries'
         'iphone:Import photos from connected iPhone'
@@ -10,15 +9,13 @@ _photosort() {
         'help:Show usage'
     )
 
-    local -a setup_commands
-    setup_commands=(
+    local -a setup_commands=(
         'add:Add a new photo library'
         'remove:Remove a photo library'
         'list:List configured libraries'
     )
 
-    local -a options
-    options=(
+    local -a options=(
         '--dry-run[Preview changes without copying files]'
         '--move[Move instead of copy (destructive)]'
         '--hash[Use MD5 hash for duplicate detection]'
@@ -28,24 +25,23 @@ _photosort() {
     _arguments -C \
         '1:command:->command' \
         '*::arg:->args' \
-        $options
+        "${options[@]}"
 
     case $state in
         command)
-            _alternative \
-                'commands:command:_describe -t commands "photosort command" commands' \
-                'directories:source directory:_files -/'
+            _describe -t commands 'photosort command' commands
+            _files -/
             ;;
         args)
             case $words[1] in
                 setup)
-                    _describe -t setup_commands 'setup command' setup_commands
+                    _describe -t setup-commands 'setup command' setup_commands
                     ;;
                 stats)
                     _message 'year (optional)'
                     ;;
                 iphone|fix-exif)
-                    _arguments $options
+                    _arguments "${options[@]}"
                     ;;
                 *)
                     _files -/
