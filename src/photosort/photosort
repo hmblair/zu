@@ -2,6 +2,7 @@
 
 # photosort - Organize photos by EXIF date into YYYY/MM/DD structure
 
+PATH="/usr/bin:/bin:$PATH"
 setopt nullglob
 
 SCRIPT_DIR="${0:A:h}"
@@ -27,18 +28,75 @@ else
     HASH_CMD="md5sum"
 fi
 
+# Libraries array: "name:path" or "name:host:path"
+typeset -a LIBRARIES=()
+
 # Load config
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
     fi
+    # Migrate old single-library config
+    if [[ -n "$DEST_DIR" && ${#LIBRARIES[@]} -eq 0 ]]; then
+        if [[ -n "$DEST_HOST" ]]; then
+            LIBRARIES+=("default:$DEST_HOST:$DEST_DIR")
+        else
+            LIBRARIES+=("default:$DEST_DIR")
+        fi
+    fi
 }
 
 # Check if setup has been run
 check_setup() {
-    if [[ ! -f "$CONFIG_FILE" ]] || [[ -z "$DEST_DIR" ]]; then
-        error "photosort not configured. Run 'photosort setup' first."
+    if [[ ! -f "$CONFIG_FILE" ]] || [[ ${#LIBRARIES[@]} -eq 0 ]]; then
+        error "photosort not configured. Run 'photosort setup add' first."
     fi
+}
+
+# Parse library entry into name, host, path
+# Usage: parse_library "name:host:path" or "name:path"
+# Sets: LIB_NAME, LIB_HOST, LIB_PATH
+parse_library() {
+    local entry="$1"
+    local parts=(${(s/:/)entry})
+
+    LIB_NAME="${parts[1]}"
+    if [[ ${#parts[@]} -eq 3 ]]; then
+        LIB_HOST="${parts[2]}"
+        LIB_PATH="${parts[3]}"
+    else
+        LIB_HOST=""
+        LIB_PATH="${parts[2]}"
+    fi
+}
+
+# Select a library via menu
+# Returns selected library entry, sets DEST_HOST and DEST_DIR
+select_library() {
+    if [[ ${#LIBRARIES[@]} -eq 1 ]]; then
+        parse_library "${LIBRARIES[1]}"
+        DEST_HOST="$LIB_HOST"
+        DEST_DIR="$LIB_PATH"
+        return 0
+    fi
+
+    local -a names=()
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        if [[ -n "$LIB_HOST" ]]; then
+            names+=("$LIB_NAME ($LIB_HOST:$LIB_PATH)")
+        else
+            names+=("$LIB_NAME ($LIB_PATH)")
+        fi
+    done
+
+    echo "Select library:"
+    menu "${names[@]}"
+    local idx=$((1 + $?))
+
+    parse_library "${LIBRARIES[$idx]}"
+    DEST_HOST="$LIB_HOST"
+    DEST_DIR="$LIB_PATH"
 }
 
 load_config
@@ -52,13 +110,15 @@ usage() {
 Usage: photosort [options] <source>
        photosort iphone [--dry-run]
 
-Organize photos from source folder into ${DEST_DIR:-<run setup>}/YYYY/MM/DD/
+Organize photos from source folder into LIBRARY/YYYY/MM/DD/
 
 Commands:
-  setup        Configure photosort destination directory
-  stats [year] Show photo counts by year and month
-  iphone       Import photos from connected iPhone (mounts automatically)
-  fix-exif     Add EXIF dates to files based on folder structure (YYYY/MM/DD)
+  setup add       Add a new photo library
+  setup remove    Remove a photo library
+  setup list      List configured libraries
+  stats [year]    Show photo counts for all libraries
+  iphone          Import photos from connected iPhone
+  fix-exif        Add EXIF dates to files based on folder structure
 
 Options:
   --dry-run    Preview changes without copying files
@@ -67,11 +127,11 @@ Options:
   --help       Show this help message
 
 Examples:
-  photosort ~/DCIM                    # Copy photos from DCIM
+  photosort setup add                 # Add a new library
+  photosort ~/DCIM                    # Copy photos (prompts for library)
   photosort --dry-run /mnt/sd/DCIM    # Preview without copying
   photosort --move ~/Downloads        # Move instead of copy
   photosort iphone                    # Import from iPhone
-  photosort iphone --dry-run          # Preview iPhone import
 EOF
 }
 
@@ -114,69 +174,129 @@ files_match() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Setup command
+# Setup commands
 # ─────────────────────────────────────────────────────────────────────────────
 
-cmd_setup() {
-    info "photosort setup"
+save_config() {
+    mkdir -p "$CONFIG_DIR"
+    {
+        echo "# photosort configuration"
+        echo "LIBRARIES=("
+        for lib in "${LIBRARIES[@]}"; do
+            echo "  \"$lib\""
+        done
+        echo ")"
+    } > "$CONFIG_FILE"
+}
+
+cmd_setup_add() {
+    info "Add photo library"
     echo ""
 
-    # Get current values or defaults
-    local current_host="${DEST_HOST:-}"
-    local current_dest="${DEST_DIR:-/mnt/external/photography/pictures}"
+    # Prompt for name
+    local name=""
+    vared -p "Library name (e.g., pictures, raw): " name
+    [[ -z "$name" ]] && error "Name is required"
+
+    # Check for duplicate name
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        if [[ "$LIB_NAME" == "$name" ]]; then
+            error "Library '$name' already exists"
+        fi
+    done
 
     # Prompt for optional SSH host
-    local new_host=""
-    vared -p "SSH host (leave empty for local) [$current_host]: " new_host
-    [[ -z "$new_host" ]] && new_host="$current_host"
+    local host=""
+    vared -p "SSH host (leave empty for local): " host
 
-    # Prompt for destination directory
-    local new_dest=""
-    vared -p "Photo library directory [$current_dest]: " new_dest
-    [[ -z "$new_dest" ]] && new_dest="$current_dest"
+    # Prompt for path
+    local path=""
+    vared -p "Directory path: " path
+    [[ -z "$path" ]] && error "Path is required"
 
     # Validate based on local or remote
-    if [[ -n "$new_host" ]]; then
+    if [[ -n "$host" ]]; then
         # Remote: test SSH connection and directory
-        if ! ssh -o ConnectTimeout=5 "$new_host" "test -d '$new_dest'" 2>/dev/null; then
-            if ! ssh -o ConnectTimeout=5 "$new_host" "exit 0" 2>/dev/null; then
-                error "Cannot connect to $new_host"
+        if ! ssh -o ConnectTimeout=5 "$host" "test -d '$path'" 2>/dev/null; then
+            if ! ssh -o ConnectTimeout=5 "$host" "exit 0" 2>/dev/null; then
+                error "Cannot connect to $host"
             fi
-            if read -q "?Directory doesn't exist on $new_host. Create it? [y/N] "; then
+            if read -q "?Directory doesn't exist on $host. Create it? [y/N] "; then
                 echo ""
-                ssh "$new_host" "mkdir -p '$new_dest'"
-                success "Created $new_dest on $new_host"
+                ssh "$host" "mkdir -p '$path'"
+                success "Created $path on $host"
             else
                 echo ""
                 error "Directory must exist"
             fi
         fi
+        LIBRARIES+=("$name:$host:$path")
     else
         # Local: expand path and validate
-        new_dest="${new_dest:A}"
-        if [[ ! -d "$new_dest" ]]; then
+        path="${path:A}"
+        if [[ ! -d "$path" ]]; then
             if read -q "?Directory doesn't exist. Create it? [y/N] "; then
                 echo ""
-                mkdir -p "$new_dest"
-                success "Created $new_dest"
+                mkdir -p "$path"
+                success "Created $path"
             else
                 echo ""
                 error "Directory must exist"
             fi
         fi
+        LIBRARIES+=("$name:$path")
     fi
 
-    # Save config
-    mkdir -p "$CONFIG_DIR"
-    cat > "$CONFIG_FILE" << EOF
-# photosort configuration
-DEST_HOST="$new_host"
-DEST_DIR="$new_dest"
-EOF
-
+    save_config
     echo ""
-    success "Configuration saved to $CONFIG_FILE"
-    [[ -n "$new_host" ]] && info "Photo library: $new_host:$new_dest" || info "Photo library: $new_dest"
+    success "Library '$name' added"
+}
+
+cmd_setup_remove() {
+    if [[ ${#LIBRARIES[@]} -eq 0 ]]; then
+        warn "No libraries configured"
+        return
+    fi
+
+    info "Remove photo library"
+    echo ""
+
+    local -a names=()
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        names+=("$LIB_NAME")
+    done
+
+    echo "Select library to remove:"
+    menu "${names[@]}"
+    local idx=$((1 + $?))
+    local removed_name="${names[$idx]}"
+
+    # Remove from array
+    LIBRARIES=("${LIBRARIES[@]:0:$((idx-1))}" "${LIBRARIES[@]:$idx}")
+
+    save_config
+    echo ""
+    success "Library '$removed_name' removed"
+}
+
+cmd_setup_list() {
+    if [[ ${#LIBRARIES[@]} -eq 0 ]]; then
+        warn "No libraries configured. Run 'photosort setup add' to add one."
+        return
+    fi
+
+    info "Configured libraries:"
+    echo ""
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        if [[ -n "$LIB_HOST" ]]; then
+            echo "  ${BOLD}$LIB_NAME${NC}  $LIB_HOST:$LIB_PATH"
+        else
+            echo "  ${BOLD}$LIB_NAME${NC}  $LIB_PATH"
+        fi
+    done
 }
 
 # Global size index: SIZE_INDEX[size]="file1|file2|..."
@@ -658,11 +778,31 @@ cmd_fix_exif() {
 # Stats command
 # ─────────────────────────────────────────────────────────────────────────────
 
-cmd_stats() {
-    local filter_year="$1"
+# Helper to get directory size (local or remote)
+get_dir_size() {
+    local host="$1"
+    local path="$2"
+    if [[ -n "$host" ]]; then
+        ssh "$host" "du -sh '$path' 2>/dev/null" | cut -f1
+    else
+        du -sh "$path" 2>/dev/null | cut -f1
+    fi
+}
 
-    [[ -n "$DEST_HOST" ]] && info "Photo library: $DEST_HOST:$DEST_DIR" || info "Photo library: $DEST_DIR"
-    [[ -n "$filter_year" ]] && info "Filtering: $filter_year"
+# Stats for a single library
+cmd_stats_library() {
+    local lib_name="$1"
+    local lib_host="$2"
+    local lib_path="$3"
+    local filter_year="$4"
+
+    # Header
+    if [[ -n "$lib_host" ]]; then
+        echo "${BOLD}$lib_name${NC}  ($lib_host:$lib_path)"
+    else
+        echo "${BOLD}$lib_name${NC}  ($lib_path)"
+    fi
+    echo "════════════════════════════════════════"
     echo ""
 
     typeset -A year_totals
@@ -670,26 +810,28 @@ cmd_stats() {
     local grand_total=0
 
     # Build search path
-    local search_path="$DEST_DIR"
-    [[ -n "$filter_year" ]] && search_path="$DEST_DIR/$filter_year"
+    local search_path="$lib_path"
+    [[ -n "$filter_year" ]] && search_path="$lib_path/$filter_year"
 
     # Check if filtered year exists
     if [[ -n "$filter_year" ]]; then
-        if [[ -n "$DEST_HOST" ]]; then
-            if ! ssh "$DEST_HOST" "test -d '$search_path'" 2>/dev/null; then
+        if [[ -n "$lib_host" ]]; then
+            if ! ssh "$lib_host" "test -d '$search_path'" 2>/dev/null; then
                 warn "No photos found for $filter_year"
+                echo ""
                 return
             fi
         elif [[ ! -d "$search_path" ]]; then
             warn "No photos found for $filter_year"
+            echo ""
             return
         fi
     fi
 
     # Scan all files and count by year/month
     local find_output
-    if [[ -n "$DEST_HOST" ]]; then
-        find_output=$(ssh "$DEST_HOST" "find '$search_path' -type f 2>/dev/null")
+    if [[ -n "$lib_host" ]]; then
+        find_output=$(ssh "$lib_host" "find '$search_path' -type f 2>/dev/null")
     else
         find_output=$(find "$search_path" -type f 2>/dev/null)
     fi
@@ -724,21 +866,10 @@ cmd_stats() {
     done
     years=(${(on)years})
 
-    # Helper to get directory size
-    get_size() {
-        local path="$1"
-        if [[ -n "$DEST_HOST" ]]; then
-            /usr/bin/ssh "$DEST_HOST" "du -sh '$path' 2>/dev/null" | /usr/bin/cut -f1
-        else
-            /usr/bin/du -sh "$path" 2>/dev/null | /usr/bin/cut -f1
-        fi
-    }
-
     # Display by year
-    local total_size=""
     for year in "${years[@]}"; do
         local year_total="${year_totals[$year]}"
-        local year_size=$(get_size "$DEST_DIR/$year")
+        local year_size=$(get_dir_size "$lib_host" "$lib_path/$year")
         echo "${BOLD}$year${NC}  (${CYAN}$year_total${NC} photos, ${CYAN}$year_size${NC})"
         echo "────────────────────"
 
@@ -769,8 +900,20 @@ cmd_stats() {
     done
 
     echo "────────────────────"
-    total_size=$(get_size "$search_path")
+    local total_size=$(get_dir_size "$lib_host" "$search_path")
     echo "${BOLD}Total: ${CYAN}$grand_total${NC}${BOLD} photos, ${CYAN}$total_size${NC}"
+    echo ""
+}
+
+cmd_stats() {
+    local filter_year="$1"
+
+    [[ -n "$filter_year" ]] && info "Filtering: $filter_year" && echo ""
+
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        cmd_stats_library "$LIB_NAME" "$LIB_HOST" "$LIB_PATH" "$filter_year"
+    done
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -846,7 +989,12 @@ SOURCE=""
 
 # Check for subcommands first
 if [[ "$1" == "setup" ]]; then
-    cmd_setup
+    case "$2" in
+        add) cmd_setup_add ;;
+        remove|rm) cmd_setup_remove ;;
+        list|ls|"") cmd_setup_list ;;
+        *) error "Unknown setup command: $2. Use add, remove, or list." ;;
+    esac
     exit 0
 fi
 
@@ -866,6 +1014,7 @@ if [[ "$1" == "iphone" ]]; then
             *) shift ;;
         esac
     done
+    select_library
     cmd_iphone "$DRY_RUN" "$USE_HASH"
     exit 0
 fi
@@ -874,6 +1023,7 @@ if [[ "$1" == "fix-exif" ]]; then
     check_setup
     shift
     [[ "$1" == "--dry-run" ]] && DRY_RUN=1
+    select_library
     cmd_fix_exif "$DRY_RUN"
     exit 0
 fi
@@ -907,8 +1057,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$SOURCE" ]] && usage && exit 1
+[[ ! -d "$SOURCE" ]] && error "Source directory not found: $SOURCE"
 
 check_setup
+select_library
 # copy_mode is inverse of MOVE_MODE (copy by default)
 local copy_mode=$((1 - MOVE_MODE))
 cmd_sort "$SOURCE" "$DRY_RUN" "$copy_mode" "$USE_HASH"
