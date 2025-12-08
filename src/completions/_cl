@@ -1,9 +1,8 @@
-#compdef l
+#compdef cl
 
-_l() {
+_cl() {
     _arguments -s \
         '-a[Show hidden files]' \
-        '-c[Clear screen before displaying]' \
         '-s[Show file/directory sizes]' \
         '-l[Show line counts for files]' \
         '(-t --tree)'{-t,--tree}'[Show full tree]' \
@@ -13,4 +12,4 @@ _l() {
         '*:file or directory:_files'
 }
 
-_l "$@"
+_cl "$@"
