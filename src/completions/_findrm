@@ -1,0 +1,13 @@
+#compdef findrm
+
+_findrm() {
+    _arguments -s \
+        '(-D --no-dirs)'{-D,--no-dirs}'[Skip directories (files only)]' \
+        '(-F --no-files)'{-F,--no-files}'[Skip files (directories only)]' \
+        '(-n --dry-run)'{-n,--dry-run}'[Show what would be deleted without deleting]' \
+        '(-f --force)'{-f,--force}'[Skip confirmation prompt]' \
+        '(-h --help)'{-h,--help}'[Show help message]' \
+        '*:pattern:'
+}
+
+_findrm "$@"
