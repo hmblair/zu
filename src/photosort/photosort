@@ -908,6 +908,15 @@ get_dir_size() {
     fi
 }
 
+# Check if extension is a video
+is_video_ext() {
+    local ext="${1:l}"
+    for e in $VIDEO_EXTENSIONS; do
+        [[ "$ext" == "$e" ]] && return 0
+    done
+    return 1
+}
+
 # Stats for a single library
 cmd_stats_library() {
     local lib_name="$1"
@@ -924,9 +933,12 @@ cmd_stats_library() {
     echo "════════════════════════════════════════"
     echo ""
 
-    typeset -A year_totals
-    typeset -A month_counts
-    local grand_total=0
+    typeset -A year_photos
+    typeset -A year_videos
+    typeset -A month_photos
+    typeset -A month_videos
+    local total_photos=0
+    local total_videos=0
 
     # Build search path
     local search_path="$lib_path"
@@ -971,38 +983,67 @@ cmd_stats_library() {
             continue
         fi
 
-        # Count
+        # Count by type (photo vs video)
+        local ext="${file:e}"
         local key="$year:$month"
-        ((month_counts[$key]++))
-        ((year_totals[$year]++))
-        ((grand_total++))
+        if is_video_ext "$ext"; then
+            ((month_videos[$key]++))
+            ((year_videos[$year]++))
+            ((total_videos++))
+        else
+            ((month_photos[$key]++))
+            ((year_photos[$year]++))
+            ((total_photos++))
+        fi
     done <<< "$find_output"
 
-    # Get sorted unique years
+    # Get sorted unique years (from both photos and videos)
     local -a years=()
-    for key in "${(@k)year_totals}"; do
+    for key in "${(@k)year_photos}"; do
         years+=("$key")
+    done
+    for key in "${(@k)year_videos}"; do
+        [[ ! " ${years[*]} " =~ " $key " ]] && years+=("$key")
     done
     years=(${(on)years})
 
     # Display by year
     for year in "${years[@]}"; do
-        local year_total="${year_totals[$year]}"
+        local photos="${year_photos[$year]:-0}"
+        local videos="${year_videos[$year]:-0}"
         local year_size=$(get_dir_size "$lib_host" "$lib_path/$year")
-        echo "${BOLD}$year${NC}  (${CYAN}$year_total${NC} photos, ${CYAN}$year_size${NC})"
+
+        # Build count string (with proper pluralization)
+        local count_str=""
+        if [[ $photos -gt 0 ]]; then
+            [[ $photos -eq 1 ]] && count_str="${CYAN}$photos${NC} photo" || count_str="${CYAN}$photos${NC} photos"
+        fi
+        if [[ $videos -gt 0 ]]; then
+            [[ -n "$count_str" ]] && count_str="$count_str, "
+            [[ $videos -eq 1 ]] && count_str="${count_str}${CYAN}$videos${NC} video" || count_str="${count_str}${CYAN}$videos${NC} videos"
+        fi
+
+        echo "${BOLD}$year${NC}  ($count_str, ${CYAN}$year_size${NC})"
         echo "────────────────────"
 
-        # Get months for this year
+        # Get months for this year (from both photos and videos)
         local -a months=()
-        for key in "${(@k)month_counts}"; do
+        for key in "${(@k)month_photos}"; do
             if [[ "$key" == "$year:"* ]]; then
                 months+=("${key#*:}")
+            fi
+        done
+        for key in "${(@k)month_videos}"; do
+            if [[ "$key" == "$year:"* ]]; then
+                local m="${key#*:}"
+                [[ ! " ${months[*]} " =~ " $m " ]] && months+=("$m")
             fi
         done
         months=(${(on)months})
 
         for month in "${months[@]}"; do
-            local count="${month_counts[$year:$month]}"
+            local p="${month_photos[$year:$month]:-0}"
+            local v="${month_videos[$year:$month]:-0}"
             local month_name=""
             case "$month" in
                 01) month_name="Jan" ;; 02) month_name="Feb" ;;
@@ -1013,14 +1054,29 @@ cmd_stats_library() {
                 11) month_name="Nov" ;; 12) month_name="Dec" ;;
                 *) month_name="$month" ;;
             esac
-            printf "  %s %s  %5d\n" "$month" "$month_name" "$count"
+            if [[ $v -gt 0 ]]; then
+                printf "  %s %s  %5d  %5d\n" "$month" "$month_name" "$p" "$v"
+            else
+                printf "  %s %s  %5d\n" "$month" "$month_name" "$p"
+            fi
         done
         echo ""
     done
 
     echo "────────────────────"
     local total_size=$(get_dir_size "$lib_host" "$search_path")
-    echo "${BOLD}Total: ${CYAN}$grand_total${NC}${BOLD} photos, ${CYAN}$total_size${NC}"
+
+    # Build total string (with proper pluralization)
+    local total_str=""
+    if [[ $total_photos -gt 0 ]]; then
+        [[ $total_photos -eq 1 ]] && total_str="${CYAN}$total_photos${NC}${BOLD} photo" || total_str="${CYAN}$total_photos${NC}${BOLD} photos"
+    fi
+    if [[ $total_videos -gt 0 ]]; then
+        [[ -n "$total_str" ]] && total_str="$total_str, "
+        [[ $total_videos -eq 1 ]] && total_str="${total_str}${CYAN}$total_videos${NC}${BOLD} video" || total_str="${total_str}${CYAN}$total_videos${NC}${BOLD} videos"
+    fi
+
+    echo "${BOLD}Total: $total_str, ${CYAN}$total_size${NC}"
     echo ""
 }
 
