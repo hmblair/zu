@@ -174,8 +174,15 @@ cmd_list() {
     done
 
     path_to_file | while read -r p; do
-        full="${p:A}"
-        if [[ -d "$full" ]]; then
+        local full="${p:A}"
+        local display=""
+        local symlink_target=""
+
+        # Check if path is a symlink
+        if [[ -L "$p" ]]; then
+            symlink_target="$full"
+            display="$p"
+        elif [[ -d "$full" ]]; then
             display="$full"
         else
             display="${ST}$p${NST}"
@@ -192,7 +199,11 @@ cmd_list() {
             suffix=""
         fi
 
-        echo -e "${icon} ${display}${suffix}"
+        if [[ -n "$symlink_target" ]]; then
+            echo -e "${icon} ${display}${suffix} ${CYAN}→ ${symlink_target}${NC}"
+        else
+            echo -e "${icon} ${display}${suffix}"
+        fi
     done
 }
 
