@@ -531,7 +531,7 @@ cmd_status() {
 
     echo ""
     printf "  ${BOLD}%-15s %-14s %-12s %-18s %s${NC}\n" "BACKUP" "DAEMON" "STATUS" "LAST RUN" "SIZE (DEDUP)"
-    echo "  ─────────────────────────────────────────────────────────────────────────"
+    echo "  ───────────────────────────────────────────────────────────────────────────"
 
     for config_file in "$BACKUPS_DIR"/*.json; do
         [[ ! -f "$config_file" ]] && continue
@@ -539,10 +539,10 @@ cmd_status() {
         local status_file="$STATUS_DIR/$name.json"
         local label="$(plist_label "$name")"
 
-        # Check daemon status
-        local daemon_status="${YELLOW}✗ missing${NC}"
+        # Check daemon status (pad to 15 chars to match header)
+        local daemon_status="${YELLOW}✗ missing${NC}      "
         if zu_service_exists "$label"; then
-            daemon_status="${GREEN}✓ installed${NC}"
+            daemon_status="${GREEN}✓ installed${NC}    "
         fi
 
         # Get repo size
@@ -578,14 +578,14 @@ cmd_status() {
             fi
 
             if [[ "$run_status" == "success" ]]; then
-                printf "  %-15s $daemon_status %-12s %-18s %s\n" "$name" "✓ success" "$time_ago" "$repo_size"
+                printf "  %-15s " "$name"; print -n "$daemon_status"; printf "${GREEN}%-12s${NC} %-18s %s\n" "✓ success" "$time_ago" "$repo_size"
             else
-                printf "  %-15s $daemon_status %-12s %-18s %s\n" "$name" "✗ failed" "$time_ago" "$repo_size"
+                printf "  %-15s " "$name"; print -n "$daemon_status"; printf "${RED}%-12s${NC} %-18s %s\n" "✗ failed" "$time_ago" "$repo_size"
                 printf "  ${GREY}%-15s log: %s${NC}\n" "" "$log"
                 has_failures=true
             fi
         else
-            printf "  %-15s $daemon_status %-12s %-18s %s\n" "$name" "? unknown" "never run" "$repo_size"
+            printf "  %-15s " "$name"; print -n "$daemon_status"; printf "${YELLOW}%-12s${NC} %-18s %s\n" "? unknown" "never run" "$repo_size"
         fi
     done
     echo ""
