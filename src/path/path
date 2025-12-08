@@ -33,9 +33,15 @@ usage() {
     echo "  path list"
 }
 
-# Get system paths
+# Get system paths (macOS and Linux)
 system_paths() {
+    # macOS: /etc/paths and /etc/paths.d/*
     cat /etc/paths /etc/paths.d/*(N) 2>/dev/null
+
+    # Linux: parse PATH from /etc/environment
+    if [[ -f /etc/environment ]]; then
+        grep '^PATH=' /etc/environment 2>/dev/null | sed 's/^PATH="//;s/"$//' | tr ':' '\n'
+    fi
 }
 
 # Check if string contains line
