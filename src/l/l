@@ -197,11 +197,11 @@ print_line() {
     local out="${char}${colour}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
         local size="${SIZE_CACHE[$line]:-?}"
-        out+=" (${size})"
+        out+=" ${GREY}(${size})${NC}"
     fi
     if [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
         local linecount="${LINECOUNT_CACHE[$line]:-0}"
-        out+=" (${linecount} lines)"
+        out+=" ${GREY}(${linecount} lines)${NC}"
     fi
 
     if [[ -z $target ]]; then
