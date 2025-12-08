@@ -17,20 +17,19 @@ Usage: findrm [options] <name>...
 Recursively find and remove all files/directories matching the given name(s).
 
 Options:
-  -d, --dirs       Remove directories only (default)
-  -F, --files      Remove files only
-  -a, --all        Remove both files and directories
+  -D, --no-dirs    Skip directories (files only)
+  -F, --no-files   Skip files (directories only)
   -n, --dry-run    Show what would be deleted without deleting
   -f, --force      Skip confirmation prompt
   -h, --help       Show this help message
 
 Examples:
-  findrm node_modules              # Remove all node_modules directories
+  findrm node_modules              # Remove all node_modules files and directories
   findrm __pycache__ .pytest_cache # Remove multiple patterns
   findrm -n build                  # Preview what would be deleted
   findrm -f dist                   # Delete without confirmation
-  findrm -F .DS_Store              # Remove all .DS_Store files
-  findrm -a "*.pyc"                # Remove all .pyc files and directories
+  findrm -F .DS_Store              # Remove all .DS_Store files only
+  findrm -D "*.pyc"                # Remove all .pyc directories only
 EOF
 }
 
@@ -41,22 +40,19 @@ EOF
 main() {
     local dry_run=false
     local force=false
-    local mode="dirs"  # dirs, files, or all
+    local include_dirs=true
+    local include_files=true
     local names=()
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -d|--dirs)
-                mode="dirs"
+            -D|--no-dirs)
+                include_dirs=false
                 shift
                 ;;
-            -F|--files)
-                mode="files"
-                shift
-                ;;
-            -a|--all)
-                mode="all"
+            -F|--no-files)
+                include_files=false
                 shift
                 ;;
             -n|--dry-run)
@@ -81,6 +77,10 @@ main() {
         esac
     done
 
+    if ! $include_dirs && ! $include_files; then
+        error "Cannot use both --no-dirs and --no-files"
+    fi
+
     if [[ ${#names[@]} -eq 0 ]]; then
         usage
         exit 1
@@ -90,17 +90,13 @@ main() {
     local find_args=()
     for name in "${names[@]}"; do
         [[ ${#find_args[@]} -gt 0 ]] && find_args+=("-o")
-        case "$mode" in
-            dirs)
-                find_args+=("-type" "d" "-name" "$name")
-                ;;
-            files)
-                find_args+=("-type" "f" "-name" "$name")
-                ;;
-            all)
-                find_args+=("-name" "$name")
-                ;;
-        esac
+        if $include_dirs && $include_files; then
+            find_args+=("-name" "$name")
+        elif $include_dirs; then
+            find_args+=("-type" "d" "-name" "$name")
+        else
+            find_args+=("-type" "f" "-name" "$name")
+        fi
     done
 
     # Find all matching items
