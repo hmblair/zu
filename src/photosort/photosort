@@ -121,26 +121,48 @@ cmd_setup() {
     info "photosort setup"
     echo ""
 
-    # Get current value or default
+    # Get current values or defaults
+    local current_host="${DEST_HOST:-}"
     local current_dest="${DEST_DIR:-/mnt/external/photography/pictures}"
+
+    # Prompt for optional SSH host
+    local new_host=""
+    vared -p "SSH host (leave empty for local) [$current_host]: " new_host
+    [[ -z "$new_host" ]] && new_host="$current_host"
 
     # Prompt for destination directory
     local new_dest=""
     vared -p "Photo library directory [$current_dest]: " new_dest
     [[ -z "$new_dest" ]] && new_dest="$current_dest"
 
-    # Expand path
-    new_dest="${new_dest:A}"
-
-    # Validate directory exists
-    if [[ ! -d "$new_dest" ]]; then
-        if read -q "?Directory doesn't exist. Create it? [y/N] "; then
-            echo ""
-            mkdir -p "$new_dest"
-            success "Created $new_dest"
-        else
-            echo ""
-            error "Directory must exist"
+    # Validate based on local or remote
+    if [[ -n "$new_host" ]]; then
+        # Remote: test SSH connection and directory
+        if ! ssh -o ConnectTimeout=5 "$new_host" "test -d '$new_dest'" 2>/dev/null; then
+            if ! ssh -o ConnectTimeout=5 "$new_host" "exit 0" 2>/dev/null; then
+                error "Cannot connect to $new_host"
+            fi
+            if read -q "?Directory doesn't exist on $new_host. Create it? [y/N] "; then
+                echo ""
+                ssh "$new_host" "mkdir -p '$new_dest'"
+                success "Created $new_dest on $new_host"
+            else
+                echo ""
+                error "Directory must exist"
+            fi
+        fi
+    else
+        # Local: expand path and validate
+        new_dest="${new_dest:A}"
+        if [[ ! -d "$new_dest" ]]; then
+            if read -q "?Directory doesn't exist. Create it? [y/N] "; then
+                echo ""
+                mkdir -p "$new_dest"
+                success "Created $new_dest"
+            else
+                echo ""
+                error "Directory must exist"
+            fi
         fi
     fi
 
@@ -148,12 +170,13 @@ cmd_setup() {
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" << EOF
 # photosort configuration
+DEST_HOST="$new_host"
 DEST_DIR="$new_dest"
 EOF
 
     echo ""
     success "Configuration saved to $CONFIG_FILE"
-    info "Photo library: $new_dest"
+    [[ -n "$new_host" ]] && info "Photo library: $new_host:$new_dest" || info "Photo library: $new_dest"
 }
 
 # Global size index: SIZE_INDEX[size]="file1|file2|..."
@@ -638,7 +661,7 @@ cmd_fix_exif() {
 cmd_stats() {
     local filter_year="$1"
 
-    info "Photo library: $DEST_DIR"
+    [[ -n "$DEST_HOST" ]] && info "Photo library: $DEST_HOST:$DEST_DIR" || info "Photo library: $DEST_DIR"
     [[ -n "$filter_year" ]] && info "Filtering: $filter_year"
     echo ""
 
@@ -650,13 +673,30 @@ cmd_stats() {
     local search_path="$DEST_DIR"
     [[ -n "$filter_year" ]] && search_path="$DEST_DIR/$filter_year"
 
-    if [[ -n "$filter_year" && ! -d "$search_path" ]]; then
-        warn "No photos found for $filter_year"
-        return
+    # Check if filtered year exists
+    if [[ -n "$filter_year" ]]; then
+        if [[ -n "$DEST_HOST" ]]; then
+            if ! ssh "$DEST_HOST" "test -d '$search_path'" 2>/dev/null; then
+                warn "No photos found for $filter_year"
+                return
+            fi
+        elif [[ ! -d "$search_path" ]]; then
+            warn "No photos found for $filter_year"
+            return
+        fi
     fi
 
     # Scan all files and count by year/month
+    local find_output
+    if [[ -n "$DEST_HOST" ]]; then
+        find_output=$(ssh "$DEST_HOST" "find '$search_path' -type f 2>/dev/null")
+    else
+        find_output=$(find "$search_path" -type f 2>/dev/null)
+    fi
+
     while IFS= read -r file; do
+        [[ -z "$file" ]] && continue
+
         # Extract date from path: .../YYYY/MM/DD/filename
         local dir="${file:h}"
         local day="${dir:t}"
@@ -675,7 +715,7 @@ cmd_stats() {
         ((month_counts[$key]++))
         ((year_totals[$year]++))
         ((grand_total++))
-    done < <(find "$search_path" -type f 2>/dev/null)
+    done <<< "$find_output"
 
     # Get sorted unique years
     local -a years=()
