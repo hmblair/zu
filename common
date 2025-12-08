@@ -102,3 +102,243 @@ function menu {
   return $curr
 
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Service management (launchd)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ZU_USER_AGENTS_DIR="$HOME/Library/LaunchAgents"
+ZU_SYSTEM_DAEMONS_DIR="/Library/LaunchDaemons"
+
+# Get plist path for a service
+# Usage: zu_service_path <label> [user|system]
+zu_service_path() {
+    local label="$1"
+    local level="${2:-user}"
+
+    if [[ "$level" == "system" ]]; then
+        echo "$ZU_SYSTEM_DAEMONS_DIR/${label}.plist"
+    else
+        echo "$ZU_USER_AGENTS_DIR/${label}.plist"
+    fi
+}
+
+# Check if a service plist exists
+# Usage: zu_service_exists <label> [user|system]
+zu_service_exists() {
+    local label="$1"
+    local level="${2:-user}"
+    [[ -f "$(zu_service_path "$label" "$level")" ]]
+}
+
+# Load a service
+# Usage: zu_service_load <label> [user|system]
+zu_service_load() {
+    local label="$1"
+    local level="${2:-user}"
+    local plist_path="$(zu_service_path "$label" "$level")"
+
+    if [[ "$level" == "system" ]]; then
+        sudo launchctl load "$plist_path" 2>/dev/null
+    else
+        launchctl load "$plist_path" 2>/dev/null
+    fi
+}
+
+# Unload a service
+# Usage: zu_service_unload <label> [user|system]
+zu_service_unload() {
+    local label="$1"
+    local level="${2:-user}"
+    local plist_path="$(zu_service_path "$label" "$level")"
+
+    if [[ "$level" == "system" ]]; then
+        sudo launchctl unload "$plist_path" 2>/dev/null
+    else
+        launchctl unload "$plist_path" 2>/dev/null
+    fi
+}
+
+# Remove a service (unload + delete plist)
+# Usage: zu_service_remove <label> [user|system]
+zu_service_remove() {
+    local label="$1"
+    local level="${2:-user}"
+    local plist_path="$(zu_service_path "$label" "$level")"
+
+    zu_service_unload "$label" "$level"
+
+    if [[ "$level" == "system" ]]; then
+        sudo rm -f "$plist_path"
+    else
+        rm -f "$plist_path"
+    fi
+}
+
+# Reload a service (unload + load)
+# Usage: zu_service_reload <label> [user|system]
+zu_service_reload() {
+    local label="$1"
+    local level="${2:-user}"
+
+    zu_service_unload "$label" "$level"
+    zu_service_load "$label" "$level"
+}
+
+# Create a service plist
+# Usage: zu_service_create <label> <script> [options]
+#   --args <arg>...        Arguments to pass to script
+#   --type <type>          run_at_load (default), keep_alive, interval:N, calendar:HH:MM
+#   --level user|system    User or system service (default: user)
+#   --log <path>           Log file path
+#   --env <KEY=val>...     Environment variables
+zu_service_create() {
+    local label="$1"
+    local script="$2"
+    shift 2
+
+    local -a args=()
+    local type="run_at_load"
+    local level="user"
+    local log_path=""
+    local -a env_vars=()
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --args)
+                shift
+                while [[ $# -gt 0 && "$1" != --* ]]; do
+                    args+=("$1")
+                    shift
+                done
+                ;;
+            --type)
+                type="$2"
+                shift 2
+                ;;
+            --level)
+                level="$2"
+                shift 2
+                ;;
+            --log)
+                log_path="$2"
+                shift 2
+                ;;
+            --env)
+                shift
+                while [[ $# -gt 0 && "$1" != --* ]]; do
+                    env_vars+=("$1")
+                    shift
+                done
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    local plist_path="$(zu_service_path "$label" "$level")"
+
+    # Ensure directory exists
+    if [[ "$level" == "system" ]]; then
+        sudo mkdir -p "$(dirname "$plist_path")"
+    else
+        mkdir -p "$(dirname "$plist_path")"
+    fi
+
+    # Build plist content
+    local plist="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>$label</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$script</string>"
+
+    for arg in "${args[@]}"; do
+        plist+="
+        <string>$arg</string>"
+    done
+
+    plist+="
+    </array>"
+
+    # Schedule type
+    case "$type" in
+        run_at_load)
+            plist+="
+    <key>RunAtLoad</key>
+    <true/>"
+            ;;
+        keep_alive)
+            plist+="
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>"
+            ;;
+        interval:*)
+            local seconds="${type#interval:}"
+            plist+="
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>$seconds</integer>"
+            ;;
+        calendar:*)
+            local time="${type#calendar:}"
+            local hour="${time%%:*}"
+            local minute="${time#*:}"
+            plist+="
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$hour</integer>
+        <key>Minute</key>
+        <integer>$minute</integer>
+    </dict>"
+            ;;
+    esac
+
+    # Log paths
+    if [[ -n "$log_path" ]]; then
+        plist+="
+    <key>StandardOutPath</key>
+    <string>$log_path</string>
+    <key>StandardErrorPath</key>
+    <string>$log_path</string>"
+    fi
+
+    # Environment variables
+    if [[ ${#env_vars[@]} -gt 0 ]]; then
+        plist+="
+    <key>EnvironmentVariables</key>
+    <dict>"
+        for env in "${env_vars[@]}"; do
+            local key="${env%%=*}"
+            local value="${env#*=}"
+            plist+="
+        <key>$key</key>
+        <string>$value</string>"
+        done
+        plist+="
+    </dict>"
+    fi
+
+    plist+="
+</dict>
+</plist>"
+
+    # Write plist
+    if [[ "$level" == "system" ]]; then
+        echo "$plist" | sudo tee "$plist_path" > /dev/null
+        sudo chmod 644 "$plist_path"
+        sudo chown root:wheel "$plist_path"
+    else
+        echo "$plist" > "$plist_path"
+        chmod 644 "$plist_path"
+    fi
+}

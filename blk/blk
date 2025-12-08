@@ -14,8 +14,7 @@ SALT_FILE="$BLOCK_DIR/salt"
 TRIGGER_FILE="$BLOCK_DIR/trigger"
 ADD_REQUEST_FILE="$BLOCK_DIR/add_request"
 SUMMARY_FILE="$BLOCK_DIR/summary"
-PLIST_NAME="com.zu.blkd"
-PLIST_PATH="/Library/LaunchDaemons/$PLIST_NAME.plist"
+PLIST_LABEL="com.zu.blkd"
 DAEMON_PASS_FILE="/var/root/.blk_pass"
 OP_ITEM_NAME="blk"  # 1Password item name for storing password
 
@@ -357,51 +356,16 @@ cmd_setup() {
         error "Daemon script not found at $daemon_script"
     fi
 
-    # Create plist
-    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key>
-    <string>$PLIST_NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$daemon_script</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/blkd.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/blkd.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>HOME</key>
-        <string>$HOME</string>
-        <key>USER</key>
-        <string>$USER</string>
-    </dict>
-</dict>
-</plist>"
-
     echo ""
     info "Installing daemon (requires sudo)..."
 
-    # Write plist and load daemon
-    echo "$plist_content" | sudo tee "$PLIST_PATH" > /dev/null
-    if [[ $? -ne 0 ]]; then
-        rm -rf "$BLOCK_DIR"
-        sudo rm -f "$DAEMON_PASS_FILE"
-        error "Failed to install daemon plist."
-    fi
-
-    sudo chmod 644 "$PLIST_PATH"
-    sudo chown root:wheel "$PLIST_PATH"
-
-    # Load the daemon
-    sudo launchctl load "$PLIST_PATH" 2>/dev/null
+    # Create and load daemon plist
+    zu_service_create "$PLIST_LABEL" "$daemon_script" \
+        --type keep_alive \
+        --level system \
+        --log "/var/log/blkd.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$PLIST_LABEL" system
 
     echo ""
     success "Setup complete!"
@@ -416,47 +380,18 @@ cmd_reload() {
         error "Daemon script not found at $daemon_script"
     fi
 
-    # Regenerate plist with current path
-    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key>
-    <string>$PLIST_NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$daemon_script</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/blkd.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/blkd.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>HOME</key>
-        <string>$HOME</string>
-        <key>USER</key>
-        <string>$USER</string>
-    </dict>
-</dict>
-</plist>"
-
     info "Reloading daemon..."
-    sudo launchctl unload "$PLIST_PATH" 2>/dev/null
-    echo "$plist_content" | sudo tee "$PLIST_PATH" > /dev/null
-    sudo chmod 644 "$PLIST_PATH"
-    sudo chown root:wheel "$PLIST_PATH"
-    sudo launchctl load "$PLIST_PATH" 2>/dev/null
 
-    if [[ $? -eq 0 ]]; then
-        success "Daemon reloaded."
-    else
-        error "Failed to reload daemon."
-    fi
+    # Regenerate plist and reload
+    zu_service_unload "$PLIST_LABEL" system
+    zu_service_create "$PLIST_LABEL" "$daemon_script" \
+        --type keep_alive \
+        --level system \
+        --log "/var/log/blkd.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$PLIST_LABEL" system
+
+    success "Daemon reloaded."
 }
 
 cmd_uninstall() {
@@ -491,9 +426,8 @@ for domain, expiry in data.items():
 
     info "Uninstalling website blocker..."
 
-    # Unload daemon
-    sudo launchctl unload "$PLIST_PATH" 2>/dev/null
-    sudo rm -f "$PLIST_PATH"
+    # Unload and remove daemon
+    zu_service_remove "$PLIST_LABEL" system
 
     # Remove pf anchor
     sudo pfctl -a com.zu.blk -F all 2>/dev/null

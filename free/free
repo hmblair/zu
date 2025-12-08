@@ -8,7 +8,7 @@ CONFIG_DIR="$HOME/.config/free"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_FILE="$CONFIG_DIR/cache"
 STATUS_FILE="$CONFIG_DIR/status.json"
-PLIST_FILE="$HOME/Library/LaunchAgents/com.zu.freed.plist"
+PLIST_LABEL="com.zu.freed"
 DAEMON_PATH="$SCRIPT_DIR/freed"
 DEFAULT_CACHE_COUNT=100
 
@@ -38,7 +38,6 @@ time_ago() {
 # Command: setup
 cmd_setup() {
     mkdir -p "$CONFIG_DIR"
-    mkdir -p "$(dirname "$PLIST_FILE")"
 
     # Prompt for cache size
     local cache_count=$DEFAULT_CACHE_COUNT
@@ -51,39 +50,12 @@ cmd_setup() {
     # Write config file
     echo "{\"cache_count\": $cache_count}" > "$CONFIG_FILE"
 
-    # Generate plist
-    cat > "$PLIST_FILE" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.zu.freed</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$DAEMON_PATH</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>3600</integer>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/tmp/freed.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/freed.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>HOME</key>
-        <string>$HOME</string>
-        <key>USER</key>
-        <string>$USER</string>
-    </dict>
-</dict>
-</plist>
-EOF
-
-    chmod 644 "$PLIST_FILE"
-    launchctl load "$PLIST_FILE" 2>/dev/null
+    # Install daemon
+    zu_service_create "$PLIST_LABEL" "$DAEMON_PATH" \
+        --type "interval:3600" \
+        --log "/tmp/freed.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$PLIST_LABEL"
 
     success "Daemon installed"
     echo "Cache will update every hour"
@@ -93,9 +65,8 @@ EOF
 
 # Command: uninstall
 cmd_uninstall() {
-    if [[ -f "$PLIST_FILE" ]]; then
-        launchctl unload "$PLIST_FILE" 2>/dev/null
-        rm "$PLIST_FILE"
+    if zu_service_exists "$PLIST_LABEL"; then
+        zu_service_remove "$PLIST_LABEL"
         success "Daemon uninstalled"
     else
         echo "Daemon not installed"
@@ -104,9 +75,8 @@ cmd_uninstall() {
 
 # Command: reload
 cmd_reload() {
-    if [[ -f "$PLIST_FILE" ]]; then
-        launchctl unload "$PLIST_FILE" 2>/dev/null
-        launchctl load "$PLIST_FILE" 2>/dev/null
+    if zu_service_exists "$PLIST_LABEL"; then
+        zu_service_reload "$PLIST_LABEL"
         success "Daemon reloaded"
     else
         echo "Daemon not installed. Run ${CYAN}free setup${NC} first."

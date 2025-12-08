@@ -13,7 +13,6 @@ BACKUPS_DIR="$CONFIG_DIR/backups"
 PASS_FILE="$CONFIG_DIR/passphrase"
 DEFAULT_LOG_DIR="$CONFIG_DIR/logs"
 PLIST_PREFIX="com.zu.bkup"
-LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 # SSH options for borg - keep connection alive during long transfers
 export BORG_RSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o TCPKeepAlive=yes"
@@ -59,9 +58,9 @@ config_path() {
     echo "$BACKUPS_DIR/$1.json"
 }
 
-# Get plist path for a backup
-plist_path() {
-    echo "$LAUNCH_AGENTS_DIR/$PLIST_PREFIX.$1.plist"
+# Get plist label for a backup
+plist_label() {
+    echo "$PLIST_PREFIX.$1"
 }
 
 # Check if a backup config exists
@@ -212,8 +211,7 @@ cmd_add() {
         read -q "confirm?Backup '$NAME' already exists. Overwrite? [y/N] "
         echo ""
         [[ "$confirm" != "y" ]] && exit 0
-        local existing_plist="$(plist_path "$NAME")"
-        [[ -f "$existing_plist" ]] && launchctl unload "$existing_plist" 2>/dev/null
+        zu_service_unload "$(plist_label "$NAME")"
     fi
 
     if [[ -z "$REMOTE_USER" ]]; then
@@ -409,57 +407,25 @@ with open('$config_file', 'w') as f:
 "
     chmod 600 "$config_file"
 
-    # Create launchd plist
-    mkdir -p "$LAUNCH_AGENTS_DIR"
-    local BKUP_PATH="$SCRIPT_PATH"
-    local plist_file="$(plist_path "$NAME")"
-
-    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key>
-    <string>$PLIST_PREFIX.$NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$BKUP_PATH</string>
-        <string>run</string>
-        <string>$NAME</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>$HOUR</integer>
-        <key>Minute</key>
-        <integer>$MINUTE</integer>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/bkup-$NAME.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/bkup-$NAME.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>HOME</key>
-        <string>$HOME</string>
-        <key>USER</key>
-        <string>$USER</string>
-    </dict>
-</dict>
-</plist>"
+    # Create launchd service
+    local label="$(plist_label "$NAME")"
 
     # Check for existing plist
-    if [[ -f "$plist_file" ]]; then
+    if zu_service_exists "$label"; then
         echo ""
         echo "Existing schedule found for '$NAME'"
         read -q "replace_schedule?Replace it? [y/N] "
         echo ""
         [[ "$replace_schedule" != "y" ]] && exit 0
-        launchctl unload "$plist_file" 2>/dev/null
+        zu_service_unload "$label"
     fi
 
-    echo "$plist_content" > "$plist_file"
-    chmod 644 "$plist_file"
-    launchctl load "$plist_file" 2>/dev/null
+    zu_service_create "$label" "$SCRIPT_PATH" \
+        --args "run" "$NAME" \
+        --type "calendar:${HOUR}:${MINUTE}" \
+        --log "/tmp/bkup-$NAME.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$label"
 
     echo ""
     success "Added backup '$NAME'"
@@ -806,46 +772,14 @@ with open('$config_file', 'w') as f:
     chmod 600 "$config_file"
 
     # Update plist
-    local BKUP_PATH="$SCRIPT_PATH"
-    local plist_file="$(plist_path "$NAME")"
-
-    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key>
-    <string>$PLIST_PREFIX.$NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$BKUP_PATH</string>
-        <string>run</string>
-        <string>$NAME</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>$HOUR</integer>
-        <key>Minute</key>
-        <integer>$MINUTE</integer>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/bkup-$NAME.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/bkup-$NAME.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>HOME</key>
-        <string>$HOME</string>
-        <key>USER</key>
-        <string>$USER</string>
-    </dict>
-</dict>
-</plist>"
-
-    launchctl unload "$plist_file" 2>/dev/null
-    echo "$plist_content" > "$plist_file"
-    chmod 644 "$plist_file"
-    launchctl load "$plist_file" 2>/dev/null
+    local label="$(plist_label "$NAME")"
+    zu_service_unload "$label"
+    zu_service_create "$label" "$SCRIPT_PATH" \
+        --args "run" "$NAME" \
+        --type "calendar:${HOUR}:${MINUTE}" \
+        --log "/tmp/bkup-$NAME.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$label"
 
     echo ""
     success "Updated backup '$NAME'"
@@ -899,8 +833,7 @@ cmd_copy() {
         read -q "confirm?Backup '$NAME' already exists. Overwrite? [y/N] "
         echo ""
         [[ "$confirm" != "y" ]] && exit 0
-        local existing_plist="$(plist_path "$NAME")"
-        [[ -f "$existing_plist" ]] && launchctl unload "$existing_plist" 2>/dev/null
+        zu_service_unload "$(plist_label "$NAME")"
     fi
 
     # Edit each field with current value pre-filled
@@ -1061,47 +994,14 @@ with open('$new_config_file', 'w') as f:
     chmod 600 "$new_config_file"
 
     # Create plist
-    mkdir -p "$LAUNCH_AGENTS_DIR"
-    local BKUP_PATH="$SCRIPT_PATH"
-    local plist_file="$(plist_path "$NAME")"
-
-    local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key>
-    <string>$PLIST_PREFIX.$NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$BKUP_PATH</string>
-        <string>run</string>
-        <string>$NAME</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>$HOUR</integer>
-        <key>Minute</key>
-        <integer>$MINUTE</integer>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/bkup-$NAME.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/bkup-$NAME.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>HOME</key>
-        <string>$HOME</string>
-        <key>USER</key>
-        <string>$USER</string>
-    </dict>
-</dict>
-</plist>"
-
-    launchctl unload "$plist_file" 2>/dev/null
-    echo "$plist_content" > "$plist_file"
-    chmod 644 "$plist_file"
-    launchctl load "$plist_file" 2>/dev/null
+    local label="$(plist_label "$NAME")"
+    zu_service_unload "$label"
+    zu_service_create "$label" "$SCRIPT_PATH" \
+        --args "run" "$NAME" \
+        --type "calendar:${HOUR}:${MINUTE}" \
+        --log "/tmp/bkup-$NAME.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$label"
 
     echo ""
     success "Created backup '$NAME' (copied from '$SOURCE')"
@@ -1239,10 +1139,11 @@ cmd_test() {
         done
 
         # Test schedule plist
-        local plist_file="$(plist_path "$name")"
+        local label="$(plist_label "$name")"
+        local plist_file="$(zu_service_path "$label")"
         local bkup_path="$SCRIPT_PATH"
         printf "  Schedule plist... "
-        if [[ ! -f "$plist_file" ]]; then
+        if ! zu_service_exists "$label"; then
             echo "${RED}NOT FOUND${NC}"
             ok=false
         elif ! grep -q "<string>$bkup_path</string>" "$plist_file"; then
@@ -1254,7 +1155,7 @@ cmd_test() {
 
         # Test launchd status
         printf "  Launchd job... "
-        local launchd_status=$(launchctl list "$PLIST_PREFIX.$name" 2>&1)
+        local launchd_status=$(launchctl list "$label" 2>&1)
         if [[ $? -ne 0 ]]; then
             echo "${RED}NOT LOADED${NC} (run: launchctl load \"$plist_file\")"
             ok=false
@@ -1314,11 +1215,7 @@ cmd_remove() {
     fi
 
     # Unload and remove plist
-    local plist_file="$(plist_path "$NAME")"
-    if [[ -f "$plist_file" ]]; then
-        launchctl unload "$plist_file" 2>/dev/null
-        rm -f "$plist_file"
-    fi
+    zu_service_remove "$(plist_label "$NAME")"
 
     # Remove config
     rm -f "$(config_path "$NAME")"
@@ -1342,11 +1239,13 @@ cmd_uninstall() {
     info "Uninstalling bkup..."
 
     # Remove all backup schedules
-    setopt local_options null_glob
-    for plist_file in "$LAUNCH_AGENTS_DIR"/$PLIST_PREFIX.*.plist; do
-        launchctl unload "$plist_file" 2>/dev/null
-        rm -f "$plist_file"
-    done
+    if [[ -d "$BACKUPS_DIR" ]]; then
+        for config_file in "$BACKUPS_DIR"/*.json; do
+            [[ -f "$config_file" ]] || continue
+            local name=$(basename "$config_file" .json)
+            zu_service_remove "$(plist_label "$name")"
+        done
+    fi
     success "Removed scheduled jobs"
 
     # Remove config directory (configs + passphrase)

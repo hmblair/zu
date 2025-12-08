@@ -4,11 +4,11 @@
 # Uses caffeinate to prevent system sleep
 
 SCRIPT_DIR="${0:A:h}"
+SCRIPT_PATH="${0:A}"
 source "$SCRIPT_DIR/../common"
 
 PID_FILE="$HOME/.buzz.pid"
-PLIST_NAME="com.zu.buzz"
-PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+PLIST_LABEL="com.zu.buzz"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -74,7 +74,7 @@ buzz_status() {
         rm -f "$PID_FILE"  # Clean up stale PID file
     fi
 
-    if [[ -f "$PLIST_PATH" ]]; then
+    if zu_service_exists "$PLIST_LABEL"; then
         echo "Auto-start: ${GREEN}enabled${NC}"
     else
         echo "Auto-start: ${RED}disabled${NC}"
@@ -82,45 +82,23 @@ buzz_status() {
 }
 
 buzz_install() {
-    if [[ -f "$PLIST_PATH" ]]; then
+    if zu_service_exists "$PLIST_LABEL"; then
         warn "Already installed."
         return 0
     fi
 
-    mkdir -p "$(dirname "$PLIST_PATH")"
-
-    local SCRIPT_PATH="${0:A}"
-    cat > "$PLIST_PATH" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$PLIST_NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$SCRIPT_PATH</string>
-        <string>on</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-    chmod 644 "$PLIST_PATH"
-    launchctl load "$PLIST_PATH" 2>/dev/null
+    zu_service_create "$PLIST_LABEL" "$SCRIPT_PATH" --args "on"
+    zu_service_load "$PLIST_LABEL"
     success "Installed - buzz will start on login."
 }
 
 buzz_uninstall() {
-    if [[ ! -f "$PLIST_PATH" ]]; then
+    if ! zu_service_exists "$PLIST_LABEL"; then
         warn "Not installed."
         return 0
     fi
 
-    launchctl unload "$PLIST_PATH" 2>/dev/null
-    rm -f "$PLIST_PATH"
+    zu_service_remove "$PLIST_LABEL"
     success "Uninstalled - buzz will no longer start on login."
 }
 
