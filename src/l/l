@@ -22,10 +22,6 @@ typeset -A GITIGNORE_CACHE
 typeset -A SIZE_CACHE
 typeset -A LINECOUNT_CACHE
 
-# Max widths for alignment
-MAX_SIZE_WIDTH=0
-MAX_LINECOUNT_WIDTH=0
-
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
     RED="" GREEN="" YELLOW="" BLUE="" CYAN="" WHITE="" GREY="" NC=""
@@ -104,11 +100,7 @@ build_size_cache() {
     (( ! include_hidden )) && find_args+=(-not -path '*/.*')
 
     while IFS=$'\t' read -r size path; do
-        if [[ -n "$path" ]]; then
-            size="${size#"${size%%[! ]*}"}"
-            SIZE_CACHE[$path]="$size"
-            (( ${#size} > MAX_SIZE_WIDTH )) && MAX_SIZE_WIDTH=${#size}
-        fi
+        [[ -n "$path" ]] && SIZE_CACHE[$path]="$size"
     done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/du -sh {} + 2>/dev/null)
 }
 
@@ -122,10 +114,7 @@ build_linecount_cache() {
     (( ! include_hidden )) && find_args+=(-not -path '*/.*')
 
     while read -r count path; do
-        if [[ -n "$path" ]]; then
-            LINECOUNT_CACHE[$path]="$count"
-            (( ${#count} > MAX_LINECOUNT_WIDTH )) && MAX_LINECOUNT_WIDTH=${#count}
-        fi
+        [[ -n "$path" ]] && LINECOUNT_CACHE[$path]="$count"
     done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null | /usr/bin/grep -v ' total$')
 }
 
@@ -208,11 +197,11 @@ print_line() {
     local out="${char}${colour}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
         local size="${SIZE_CACHE[$line]:-?}"
-        out+=" ($(printf "%${MAX_SIZE_WIDTH}s" "$size"))"
+        out+=" (${size})"
     fi
     if [[ $COUNT_LINES -gt 0 ]] && [[ -f $line ]]; then
         local linecount="${LINECOUNT_CACHE[$line]:-0}"
-        out+=" ($(printf "%${MAX_LINECOUNT_WIDTH}s" "$linecount") lines)"
+        out+=" (${linecount} lines)"
     fi
 
     if [[ -z $target ]]; then
