@@ -1,0 +1,98 @@
+#!/usr/bin/env zsh
+
+# buzz - Keep your Mac awake
+# Uses caffeinate to prevent system sleep
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+PID_FILE="$HOME/.buzz.pid"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << EOF
+Usage: buzz <command>
+
+Keep your Mac awake by preventing system sleep.
+
+Commands:
+  on       Start keeping the computer awake
+  off      Allow the computer to sleep again
+  status   Show current status
+
+EOF
+}
+
+is_running() {
+    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+buzz_on() {
+    if ! command -v caffeinate >/dev/null 2>&1; then
+        error "caffeinate not found. This tool requires macOS."
+    fi
+
+    if is_running; then
+        warn "Already running."
+        return 0
+    fi
+
+    nohup caffeinate -di >/dev/null 2>&1 &
+    disown
+    echo $! > "$PID_FILE"
+    success "Buzz on - computer will stay awake."
+}
+
+buzz_off() {
+    if ! is_running; then
+        warn "Not running."
+        rm -f "$PID_FILE"
+        return 0
+    fi
+
+    kill "$(cat "$PID_FILE")" 2>/dev/null
+    rm -f "$PID_FILE"
+    success "Buzz off - computer can sleep again."
+}
+
+buzz_status() {
+    if is_running; then
+        echo "Buzz is ${GREEN}on${NC} (PID: $(cat "$PID_FILE"))"
+    else
+        echo "Buzz is ${RED}off${NC}"
+        rm -f "$PID_FILE"  # Clean up stale PID file
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    case "$1" in
+        on)
+            buzz_on
+            ;;
+        off)
+            buzz_off
+            ;;
+        status|"")
+            buzz_status
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            error "Unknown command: $1"
+            ;;
+    esac
+}
+
+main "$@"
