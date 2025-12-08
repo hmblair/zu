@@ -175,7 +175,7 @@ print_line() {
     if [[ -z $target ]]; then
         echo "${out}"
     else
-        echo "${out}  ${colour}${target/#$HOME/~}${NC}"
+        echo "${out}  ${colour}${target/#$HOME/~}${NC}"
     fi
 }
 
