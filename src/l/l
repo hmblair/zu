@@ -100,7 +100,7 @@ build_size_cache() {
     (( ! include_hidden )) && find_args+=(-not -path '*/.*')
 
     while IFS=$'\t' read -r size path; do
-        [[ -n "$path" ]] && SIZE_CACHE[$path]="$size"
+        [[ -n "$path" ]] && SIZE_CACHE[$path]="${size#"${size%%[! ]*}"}"
     done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/du -sh {} + 2>/dev/null)
 }
 
