@@ -7,6 +7,8 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/../common"
 
 PID_FILE="$HOME/.buzz.pid"
+PLIST_NAME="com.zu.buzz"
+PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -19,9 +21,11 @@ Usage: buzz <command>
 Keep your Mac awake by preventing system sleep.
 
 Commands:
-  on       Start keeping the computer awake
-  off      Allow the computer to sleep again
-  status   Show current status
+  on        Start keeping the computer awake
+  off       Allow the computer to sleep again
+  status    Show current status
+  install   Start automatically on login
+  uninstall Remove automatic startup
 
 EOF
 }
@@ -69,6 +73,55 @@ buzz_status() {
         echo "Buzz is ${RED}off${NC}"
         rm -f "$PID_FILE"  # Clean up stale PID file
     fi
+
+    if [[ -f "$PLIST_PATH" ]]; then
+        echo "Auto-start: ${GREEN}enabled${NC}"
+    else
+        echo "Auto-start: ${RED}disabled${NC}"
+    fi
+}
+
+buzz_install() {
+    if [[ -f "$PLIST_PATH" ]]; then
+        warn "Already installed."
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$PLIST_PATH")"
+
+    local SCRIPT_PATH="${0:A}"
+    cat > "$PLIST_PATH" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$PLIST_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$SCRIPT_PATH</string>
+        <string>on</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+    chmod 644 "$PLIST_PATH"
+    launchctl load "$PLIST_PATH" 2>/dev/null
+    success "Installed - buzz will start on login."
+}
+
+buzz_uninstall() {
+    if [[ ! -f "$PLIST_PATH" ]]; then
+        warn "Not installed."
+        return 0
+    fi
+
+    launchctl unload "$PLIST_PATH" 2>/dev/null
+    rm -f "$PLIST_PATH"
+    success "Uninstalled - buzz will no longer start on login."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,7 +139,13 @@ main() {
         status|"")
             buzz_status
             ;;
-        -h|--help)
+        install)
+            buzz_install
+            ;;
+        uninstall)
+            buzz_uninstall
+            ;;
+        -h|--help|help)
             usage
             ;;
         *)
