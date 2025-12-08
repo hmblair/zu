@@ -60,27 +60,32 @@ load_icons() {
     done < "$toml_file"
 }
 
-# Build gitignore cache for all directories under a path
+# Build gitignore cache for all files and directories under a path
 build_gitignore_cache() {
     local root="$1"
     local maxdepth="$2"
     local include_hidden="$3"
 
-    local dirs
+    local items
     if (( include_hidden )); then
-        dirs=$(find "$root" -maxdepth "$maxdepth" -type d 2>/dev/null)
+        items=$(/usr/bin/find "$root" -maxdepth "$maxdepth" 2>/dev/null)
     else
-        dirs=$(find "$root" -maxdepth "$maxdepth" -type d -not -path '*/.*' 2>/dev/null)
+        items=$(/usr/bin/find "$root" -maxdepth "$maxdepth" -not -path '*/.*' 2>/dev/null)
     fi
 
-    if [[ -n "$dirs" ]]; then
+    if [[ -n "$items" ]]; then
         local ignored
-        ignored=$(echo "$dirs" | /usr/bin/git check-ignore --stdin 2>/dev/null)
+        ignored=$(echo "$items" | /usr/bin/git check-ignore --stdin 2>/dev/null)
 
         while IFS= read -r path; do
             [[ -n "$path" ]] && GITIGNORE_CACHE[$path]=1
         done <<< "$ignored"
     fi
+}
+
+is_ignored() {
+    local path="$1"
+    (( ${+GITIGNORE_CACHE[$path]} ))
 }
 
 should_skip() {
@@ -93,18 +98,13 @@ should_skip() {
         fi
     done
 
-    if (( ${+GITIGNORE_CACHE[$path]} )); then
-        return 0
-    fi
-
-    return 1
+    is_ignored "$path"
 }
 
 print_line() {
     local line="$1"
     local depth="$2"
     local arr="$3"
-    local skipped="$4"
 
     local ix
     local target=""
@@ -142,7 +142,8 @@ print_line() {
         colour=$YELLOW_B
     fi
 
-    if (( skipped )); then
+    # Color ignored items red (gitignore + .git)
+    if is_ignored "$line" || [[ "${line:t}" =~ '^\.git$' ]]; then
         colour=$RED
     fi
 
@@ -188,15 +189,15 @@ print_dir() {
 
     local ix
     local files
-    local skipped=0
+    local skip_expand=0
 
     if [[ -d $file ]] && [[ $depth -lt $maxdepth ]] && (( ! EXPAND_ALL )) && should_skip "${file:t}" "$file"; then
-        skipped=1
+        skip_expand=1
     fi
 
-    print_line "$file" "$depth" "$arr" "$skipped"
+    print_line "$file" "$depth" "$arr"
 
-    if [[ ! -d $file ]] || [[ $depth -ge $maxdepth ]] || (( skipped )); then
+    if [[ ! -d $file ]] || [[ $depth -ge $maxdepth ]] || (( skip_expand )); then
         return
     fi
 
