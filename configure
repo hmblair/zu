@@ -8,6 +8,8 @@ setopt nullglob
 SCRIPT_DIR="${0:A:h}"
 SRC_DIR="$SCRIPT_DIR/src"
 BIN_DIR="$SCRIPT_DIR/bin"
+COMPLETIONS_DIR="$SRC_DIR/completions"
+SITE_FUNCTIONS="/usr/local/share/zsh/site-functions"
 
 mkdir -p "$BIN_DIR"
 
@@ -34,3 +36,12 @@ for script in "$SRC_DIR"/*; do
 done
 
 echo "Configured $(ls -1 "$BIN_DIR" | wc -l | tr -d ' ') commands in bin/"
+
+# Link completions to site-functions
+mkdir -p "$SITE_FUNCTIONS"
+for comp in "$COMPLETIONS_DIR"/_*; do
+    [[ ! -f "$comp" ]] && continue
+    name="${comp:t}"
+    ln -sf "$comp" "$SITE_FUNCTIONS/$name"
+done
+echo "Linked $(ls -1 "$COMPLETIONS_DIR"/_* 2>/dev/null | wc -l | tr -d ' ') completions to $SITE_FUNCTIONS"
