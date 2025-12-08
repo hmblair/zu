@@ -18,6 +18,15 @@ PHOTO_EXTENSIONS=(jpg jpeg heic png cr2 cr3 nef arw dng raf)
 VIDEO_EXTENSIONS=(mp4 mov avi mkv)
 ALL_EXTENSIONS=($PHOTO_EXTENSIONS $VIDEO_EXTENSIONS)
 
+# Detect fastest available hash command (xxhash is 5-10x faster than md5)
+if command -v xxhsum &>/dev/null; then
+    HASH_CMD="xxhsum"
+elif command -v xxh64sum &>/dev/null; then
+    HASH_CMD="xxh64sum"
+else
+    HASH_CMD="md5sum"
+fi
+
 # Load config
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -81,7 +90,7 @@ progress_bar() {
 }
 
 file_hash() {
-    md5sum "$1" 2>/dev/null | cut -d' ' -f1
+    $HASH_CMD "$1" 2>/dev/null | cut -d' ' -f1
 }
 
 files_match() {
@@ -240,26 +249,20 @@ get_date_from_exif() {
     local file="$1"
     local date=""
 
-    # Try DateTimeOriginal first (when photo was taken)
-    date=$(exiftool -s -s -s -DateTimeOriginal "$file" 2>/dev/null)
+    # Get all date fields in single exiftool call (3x faster than sequential calls)
+    # Output format: one value per line in order requested
+    local -a dates
+    dates=("${(@f)$(exiftool -s -s -s -DateTimeOriginal -CreateDate -MediaCreateDate "$file" 2>/dev/null)}")
 
-    # Fall back to CreateDate
-    if [[ -z "$date" ]]; then
-        date=$(exiftool -s -s -s -CreateDate "$file" 2>/dev/null)
-    fi
+    # Use first valid date (DateTimeOriginal > CreateDate > MediaCreateDate)
+    for d in "${dates[@]}"; do
+        if [[ -n "$d" && "$d" != "0000:00:00 00:00:00" ]]; then
+            echo "$d"
+            return
+        fi
+    done
 
-    # Fall back to MediaCreateDate (for videos)
-    if [[ -z "$date" ]]; then
-        date=$(exiftool -s -s -s -MediaCreateDate "$file" 2>/dev/null)
-    fi
-
-    # Return empty if no valid date found
-    if [[ -z "$date" ]] || [[ "$date" == "0000:00:00 00:00:00" ]]; then
-        echo ""
-        return
-    fi
-
-    echo "$date"
+    echo ""
 }
 
 get_date_from_filename() {
