@@ -1074,9 +1074,12 @@ cmd_stats_library() {
             du_output=$(/usr/bin/ssh "$lib_host" "du -sh $year_paths 2>/dev/null")
             total_size=$(/usr/bin/ssh "$lib_host" "du -sh '$search_path' 2>/dev/null" | /usr/bin/cut -f1)
         else
-            du_output=$(du -sh "${years[@]/#/$lib_path/}" 2>/dev/null)
-            total_size=$(du -sh "$search_path" 2>/dev/null | /usr/bin/cut -f1)
+            du_output=$(/usr/bin/du -sh "${years[@]/#/$lib_path/}" 2>/dev/null)
+            total_size=$(/usr/bin/du -sh "$search_path" 2>/dev/null | /usr/bin/cut -f1)
         fi
+        # DEBUG
+        echo "DEBUG du_output for $lib_name: [$du_output]" >&2
+        echo "DEBUG total_size for $lib_name: [$total_size]" >&2
         # Parse du output
         while IFS=$'\t' read -r size path; do
             local y="${path:t}"
