@@ -7,6 +7,7 @@ _free() {
         'uninstall:Remove daemon and config'
         'reload:Restart the daemon'
         'update:Update the cache'
+        'status:Show daemon and cache status'
     )
 
     _arguments -C \
