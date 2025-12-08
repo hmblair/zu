@@ -917,6 +917,15 @@ is_video_ext() {
     return 1
 }
 
+# Generate underline matching visible length of text (strips ANSI codes)
+underline() {
+    local text="$1"
+    # Strip ANSI escape codes to get visible length
+    local stripped=$(echo -n "$text" | sed 's/\x1b\[[0-9;]*m//g')
+    local len=${#stripped}
+    printf '─%.0s' $(seq 1 $len)
+}
+
 # Stats for a single library
 cmd_stats_library() {
     local lib_name="$1"
@@ -1023,8 +1032,10 @@ cmd_stats_library() {
             [[ $videos -eq 1 ]] && count_str="${count_str}${CYAN}$videos${NC} video" || count_str="${count_str}${CYAN}$videos${NC} videos"
         fi
 
-        echo "${BOLD}$year${NC}  ($count_str, ${CYAN}$year_size${NC})"
-        echo "────────────────────"
+        local year_line="${BOLD}$year${NC}  ($count_str, ${CYAN}$year_size${NC})"
+        echo "$year_line"
+        underline "$year_line"
+        echo
 
         # Get months for this year (from both photos and videos)
         local -a months=()
@@ -1063,7 +1074,6 @@ cmd_stats_library() {
         echo ""
     done
 
-    echo "────────────────────"
     local total_size=$(get_dir_size "$lib_host" "$search_path")
 
     # Build total string (with proper pluralization)
@@ -1076,7 +1086,10 @@ cmd_stats_library() {
         [[ $total_videos -eq 1 ]] && total_str="${total_str}${CYAN}$total_videos${NC}${BOLD} video" || total_str="${total_str}${CYAN}$total_videos${NC}${BOLD} videos"
     fi
 
-    echo "${BOLD}Total: $total_str, ${CYAN}$total_size${NC}"
+    local total_line="${BOLD}Total: $total_str, ${CYAN}$total_size${NC}"
+    underline "$total_line"
+    echo
+    echo "$total_line"
     echo ""
 }
 
