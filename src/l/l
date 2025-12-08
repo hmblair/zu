@@ -365,6 +365,7 @@ done
 # Clear screen if requested
 if (( CLEAR_SCREEN )); then
     /usr/bin/clear
+    /usr/bin/clear
 fi
 
 # Print tree for each directory
