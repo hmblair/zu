@@ -87,6 +87,13 @@ main() {
         exit 1
     fi
 
+    # Protect against dangerous patterns
+    for name in "${names[@]}"; do
+        if [[ "$name" == "*" || "$name" == "." || "$name" == ".." || "$name" == "/" ]]; then
+            error "Refusing dangerous pattern: $name"
+        fi
+    done
+
     # Build find command for all patterns
     local find_args=()
     for name in "${names[@]}"; do
@@ -107,7 +114,7 @@ main() {
     done < <(/usr/bin/find . \( "${find_args[@]}" \) 2>/dev/null | /usr/bin/sort)
 
     if [[ ${#items[@]} -eq 0 ]]; then
-        echo "No matches found."
+        echo "${YELLOW}No matches found.${NC}"
         exit 0
     fi
 
@@ -165,8 +172,14 @@ main() {
     fi
 
     # Delete items (deepest first to avoid issues with directories)
+    # Sort by path depth descending to delete children before parents
+    local sorted_items=()
+    while IFS= read -r item; do
+        [[ -n "$item" ]] && sorted_items+=("$item")
+    done < <(printf '%s\n' "${items[@]}" | /usr/bin/awk -F/ '{print NF "\t" $0}' | /usr/bin/sort -rn | /usr/bin/cut -f2-)
+
     local deleted=0
-    for item in $(printf '%s\n' "${items[@]}" | /usr/bin/awk -F/ '{print NF, $0}' | /usr/bin/sort -rn | /usr/bin/cut -d' ' -f2-); do
+    for item in "${sorted_items[@]}"; do
         if [[ -e "$item" ]]; then
             /bin/rm -rf "$item"
             ((deleted++))
