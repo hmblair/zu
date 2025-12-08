@@ -1012,8 +1012,12 @@ cmd_stats_library() {
     if [[ -n "$lib_host" ]]; then
         counts=$(/usr/bin/ssh "$lib_host" "find '$search_path' -type f 2>/dev/null" | /usr/bin/awk "$awk_script")
     else
-        counts=$(find "$search_path" -type f 2>/dev/null | /usr/bin/awk "$awk_script")
+        counts=$(/usr/bin/find "$search_path" -type f 2>/dev/null | /usr/bin/awk "$awk_script")
     fi
+
+    # DEBUG
+    echo "DEBUG counts for $lib_name:" >&2
+    echo "$counts" >&2
 
     # Parse awk output into arrays
     typeset -A year_photos year_videos month_photos month_videos
