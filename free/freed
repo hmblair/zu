@@ -7,6 +7,7 @@ CONFIG_DIR="$HOME/.config/free"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_FILE="$CONFIG_DIR/cache"
 STATUS_FILE="$CONFIG_DIR/status.json"
+LOG_FILE="/tmp/freed.log"
 DEFAULT_CACHE_COUNT=100
 
 # Read cache_count from config, fallback to default
@@ -23,9 +24,20 @@ find ~ -type f -size +1M -print0 2>/dev/null | \
     xargs -0 du -h 2>/dev/null | \
     sort -hr | \
     head -n $CACHE_COUNT > "$CACHE_FILE.tmp"
+exit_code=$?
 
-# Atomically replace cache file
-mv "$CACHE_FILE.tmp" "$CACHE_FILE"
-
-# Update status with timestamp
-echo "{\"updated\": $(date +%s)}" > "$STATUS_FILE"
+# Check if we got any results
+if [[ $exit_code -eq 0 ]] && [[ -s "$CACHE_FILE.tmp" ]]; then
+    # Atomically replace cache file
+    mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+    # Update status with success
+    cat > "$STATUS_FILE" <<EOF
+{"updated": $(date +%s), "status": "success", "log": "$LOG_FILE"}
+EOF
+else
+    rm -f "$CACHE_FILE.tmp"
+    # Update status with failure
+    cat > "$STATUS_FILE" <<EOF
+{"updated": $(date +%s), "status": "failed", "log": "$LOG_FILE"}
+EOF
+fi
