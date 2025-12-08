@@ -17,12 +17,15 @@ usage() {
     echo "Usage: path <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  read                  Load all paths from config files into PATH"
+    echo "  read                  Output export statement (use with eval)"
     echo "  add <path>...         Add path(s) to a group"
     echo "  remove [path]         Remove a path from a group"
     echo "  clean                 Remove nonexistent paths from groups"
     echo "  list                  Show all paths in current PATH"
     echo "  dir                   Show path config directory"
+    echo ""
+    echo "Add to .zshrc:"
+    echo "  eval \"\$(path read)\""
     echo ""
     echo "Examples:"
     echo "  path add ~/bin"
@@ -32,7 +35,7 @@ usage() {
 
 # Get system paths
 system_paths() {
-    cat /etc/paths /etc/paths.d/* 2>/dev/null
+    cat /etc/paths /etc/paths.d/*(N) 2>/dev/null
 }
 
 # Check if string contains line
@@ -60,7 +63,8 @@ file_to_path() {
 
 cmd_read() {
     mkdir -p "$PATH_DIR"
-    export PATH="$PATH:$(file_to_path "$PATH_DIR"/*)"
+    # Output export statement to be eval'd: eval "$(path read)"
+    echo "export PATH=\"\$PATH:$(file_to_path "$PATH_DIR"/*(N))\""
 }
 
 cmd_add() {
