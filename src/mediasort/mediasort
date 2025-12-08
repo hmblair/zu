@@ -1,0 +1,789 @@
+#!/usr/bin/env zsh
+
+# mediasort - Organize audiobooks into Author/Book structure
+
+PATH="/usr/bin:/bin:$PATH"
+setopt nullglob
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONFIG_DIR="$HOME/.config/mediasort"
+CONFIG_FILE="$CONFIG_DIR/config"
+AUDIO_EXTENSIONS=(m4b mp3 m4a flac ogg opus aac wav wma)
+
+# Detect fastest available hash command
+if command -v xxhsum &>/dev/null; then
+    HASH_CMD="xxhsum"
+elif command -v xxh64sum &>/dev/null; then
+    HASH_CMD="xxh64sum"
+else
+    HASH_CMD="md5sum"
+fi
+
+# Libraries array: "name:path"
+typeset -a LIBRARIES=()
+
+# Load config
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Save config
+save_config() {
+    /bin/mkdir -p "$CONFIG_DIR"
+    {
+        echo "# mediasort configuration"
+        echo "LIBRARIES=("
+        for lib in "${LIBRARIES[@]}"; do
+            echo "  \"$lib\""
+        done
+        echo ")"
+    } > "$CONFIG_FILE"
+}
+
+# Check if setup has been run
+check_setup() {
+    if [[ ! -f "$CONFIG_FILE" ]] || [[ ${#LIBRARIES[@]} -eq 0 ]]; then
+        error "mediasort not configured. Run 'mediasort add' first."
+    fi
+}
+
+# Parse library entry into name and path
+# Usage: parse_library "name:path"
+# Sets: LIB_NAME, LIB_PATH
+parse_library() {
+    local entry="$1"
+    local parts=(${(s/:/)entry})
+
+    LIB_NAME="${parts[1]}"
+    LIB_PATH="${parts[2]}"
+}
+
+# Select a library via menu
+# Sets DEST_DIR
+select_library() {
+    if [[ ${#LIBRARIES[@]} -eq 1 ]]; then
+        parse_library "${LIBRARIES[1]}"
+        DEST_DIR="$LIB_PATH"
+        return 0
+    fi
+
+    local -a names=()
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        names+=("$LIB_NAME ($LIB_PATH)")
+    done
+
+    echo "Select library:"
+    menu "${names[@]}"
+    local idx=$((1 + $?))
+
+    parse_library "${LIBRARIES[$idx]}"
+    DEST_DIR="$LIB_PATH"
+}
+
+load_config
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    /bin/cat << EOF
+Usage: mediasort [options] <source>
+
+Organize audiobooks from source folder into LIBRARY/Author/Book/
+
+Commands:
+  add             Add a new audiobook library
+  remove          Remove an audiobook library
+  list            List configured libraries
+  stats           Show library statistics
+
+Options:
+  --dry-run    Preview changes without copying files
+  --move       Move instead of copy (destructive)
+  --help       Show this help message
+
+Examples:
+  mediasort add                       # Add a new library
+  mediasort ~/Downloads/audiobooks    # Import audiobooks
+  mediasort --dry-run /mnt/usb        # Preview without copying
+  mediasort --move ~/incoming         # Move instead of copy
+EOF
+}
+
+progress_bar() {
+    local current="$1"
+    local total="$2"
+    local width=40
+    local pct=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+
+    printf "\r  [%s%s] %d/%d (%d%%)" \
+        "$(printf '#%.0s' $(seq 1 $filled 2>/dev/null))" \
+        "$(printf '.%.0s' $(seq 1 $empty 2>/dev/null))" \
+        "$current" "$total" "$pct"
+}
+
+file_hash() {
+    $HASH_CMD "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+files_match() {
+    local file1="$1"
+    local file2="$2"
+
+    local size1=$(stat -c '%s' "$file1" 2>/dev/null)
+    local size2=$(stat -c '%s' "$file2" 2>/dev/null)
+
+    [[ "$size1" == "$size2" ]] && [[ "$(file_hash "$file1")" == "$(file_hash "$file2")" ]]
+}
+
+is_audio_file() {
+    local file="$1"
+    local ext="${file:e:l}"
+    for e in "${AUDIO_EXTENSIONS[@]}"; do
+        [[ "$ext" == "$e" ]] && return 0
+    done
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Setup commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_setup_add() {
+    echo "Add a new audiobook library"
+    echo ""
+
+    local name=""
+    local path=""
+
+    vared -p "Library name: " name
+    [[ -z "$name" ]] && error "Library name required"
+
+    # Check for duplicate name
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        [[ "$LIB_NAME" == "$name" ]] && error "Library '$name' already exists"
+    done
+
+    vared -p "Library path: " path
+    [[ -z "$path" ]] && error "Library path required"
+
+    # Expand path
+    path="${path/#\~/$HOME}"
+
+    # Validate path
+    if [[ ! -d "$path" ]]; then
+        echo ""
+        if read -q "?Directory doesn't exist. Create it? [y/N] "; then
+            echo ""
+            /bin/mkdir -p "$path" || error "Failed to create directory"
+            success "Created $path"
+        else
+            echo ""
+            error "Directory doesn't exist"
+        fi
+    fi
+
+    LIBRARIES+=("$name:$path")
+    save_config
+    echo ""
+    success "Added library '$name' at $path"
+}
+
+cmd_setup_remove() {
+    check_setup
+
+    if [[ ${#LIBRARIES[@]} -eq 0 ]]; then
+        error "No libraries configured"
+    fi
+
+    local -a names=()
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        names+=("$LIB_NAME ($LIB_PATH)")
+    done
+
+    echo "Select library to remove:"
+    menu "${names[@]}"
+    local idx=$((1 + $?))
+
+    parse_library "${LIBRARIES[$idx]}"
+    local removed_name="$LIB_NAME"
+
+    # Remove from array
+    LIBRARIES[$idx]=()
+    LIBRARIES=("${LIBRARIES[@]}")
+
+    save_config
+    echo ""
+    success "Removed library '$removed_name'"
+}
+
+cmd_setup_list() {
+    if [[ ${#LIBRARIES[@]} -eq 0 ]]; then
+        warn "No libraries configured. Run 'mediasort add' to add one."
+        return
+    fi
+
+    echo "Configured libraries:"
+    echo ""
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        echo "  ${BOLD}$LIB_NAME${NC}"
+        echo "    $LIB_PATH"
+        echo ""
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Library helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Get list of existing authors in library
+# Sets: RESULT_AUTHORS
+get_existing_authors() {
+    RESULT_AUTHORS=()
+
+    for dir in "$DEST_DIR"/*/; do
+        [[ -d "$dir" ]] && RESULT_AUTHORS+=("${dir:h:t}")
+    done
+
+    # Sort alphabetically
+    RESULT_AUTHORS=(${(o)RESULT_AUTHORS})
+}
+
+# Get list of existing books for an author
+# Sets: RESULT_BOOKS
+get_existing_books() {
+    local author="$1"
+    RESULT_BOOKS=()
+
+    for dir in "$DEST_DIR/$author"/*/; do
+        [[ -d "$dir" ]] && RESULT_BOOKS+=("${dir:h:t}")
+    done
+
+    # Sort alphabetically
+    RESULT_BOOKS=(${(o)RESULT_BOOKS})
+}
+
+# Interactive author selection
+# Sets: SELECTED_AUTHOR
+select_author() {
+    get_existing_authors
+
+    local -a menu_opts=()
+    for author in "${RESULT_AUTHORS[@]}"; do
+        menu_opts+=("$author")
+    done
+    menu_opts+=("${GREEN}+ Create new author${NC}")
+
+    echo "Select author:"
+    menu "${menu_opts[@]}"
+    local idx=$?
+
+    if [[ $idx -eq ${#RESULT_AUTHORS[@]} ]]; then
+        # Create new
+        local new_author=""
+        vared -p "Author name: " new_author
+        [[ -z "$new_author" ]] && error "Author name required"
+        SELECTED_AUTHOR="$new_author"
+    else
+        SELECTED_AUTHOR="${RESULT_AUTHORS[$((idx+1))]}"
+    fi
+}
+
+# Interactive book selection
+# Sets: SELECTED_BOOK
+select_book() {
+    local author="$1"
+    get_existing_books "$author"
+
+    local -a menu_opts=()
+    for book in "${RESULT_BOOKS[@]}"; do
+        menu_opts+=("$book")
+    done
+    menu_opts+=("${GREEN}+ Create new book${NC}")
+
+    echo "Select book for ${BOLD}$author${NC}:"
+    menu "${menu_opts[@]}"
+    local idx=$?
+
+    if [[ $idx -eq ${#RESULT_BOOKS[@]} ]]; then
+        local new_book=""
+        vared -p "Book title: " new_book
+        [[ -z "$new_book" ]] && error "Book title required"
+        SELECTED_BOOK="$new_book"
+    else
+        SELECTED_BOOK="${RESULT_BOOKS[$((idx+1))]}"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Author/Book detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Clean up book/author titles by removing common cruft
+clean_title() {
+    local title="$1"
+    # Remove (Unabridged), [Unabridged], etc. using sed for reliable pattern matching
+    title=$(echo "$title" | sed -E 's/ *\(Unabridged\)//gi; s/ *\[Unabridged\]//gi; s/  +/ /g; s/^ +//; s/ +$//')
+    echo "$title"
+}
+
+# Try to extract metadata from audio file using ffprobe
+# Sets: META_ARTIST, META_ALBUM
+extract_metadata() {
+    local file="$1"
+    META_ARTIST=""
+    META_ALBUM=""
+
+    if ! command -v ffprobe &>/dev/null; then
+        return 1
+    fi
+
+    local metadata
+    metadata=$(ffprobe -v quiet -print_format json -show_format "$file" 2>/dev/null)
+    [[ -z "$metadata" ]] && return 1
+
+    if command -v jq &>/dev/null; then
+        META_ARTIST=$(echo "$metadata" | jq -r '.format.tags.artist // .format.tags.album_artist // .format.tags.ARTIST // .format.tags.ALBUM_ARTIST // empty' 2>/dev/null)
+        META_ALBUM=$(echo "$metadata" | jq -r '.format.tags.album // .format.tags.ALBUM // .format.tags.title // .format.tags.TITLE // empty' 2>/dev/null)
+    fi
+
+    [[ -n "$META_ARTIST" && -n "$META_ALBUM" ]]
+}
+
+# Try to deduce author and book from source path
+# Sets: DEDUCED_AUTHOR, DEDUCED_BOOK
+# Returns: 0 if successful, 1 if manual selection needed
+deduce_author_book() {
+    local source_path="$1"
+    DEDUCED_AUTHOR=""
+    DEDUCED_BOOK=""
+
+    # Strategy 1: Check directory structure
+    # If path is like /something/Author/Book/files, use that
+    local parent="${source_path:h}"
+    local grandparent="${parent:h}"
+
+    if [[ -d "$source_path" ]]; then
+        # source_path is a directory containing audio files
+        local book_name="${source_path:t}"
+        local author_name="${parent:t}"
+
+        # Validate: author shouldn't be a common generic name
+        case "${author_name:l}" in
+            downloads|audiobooks|media|incoming|tmp|temp|home|external|mnt)
+                # Fall through to other strategies
+                ;;
+            *)
+                DEDUCED_AUTHOR="$author_name"
+                DEDUCED_BOOK=$(clean_title "$book_name")
+                return 0
+                ;;
+        esac
+    fi
+
+    # Strategy 2: Try metadata from first audio file
+    local first_audio=""
+    if [[ -d "$source_path" ]]; then
+        for ext in "${AUDIO_EXTENSIONS[@]}"; do
+            first_audio=$(find "$source_path" -maxdepth 2 -type f -iname "*.$ext" -print -quit 2>/dev/null)
+            [[ -n "$first_audio" ]] && break
+        done
+    elif is_audio_file "$source_path"; then
+        first_audio="$source_path"
+    fi
+
+    if [[ -n "$first_audio" ]] && extract_metadata "$first_audio"; then
+        DEDUCED_AUTHOR="$META_ARTIST"
+        DEDUCED_BOOK=$(clean_title "$META_ALBUM")
+        return 0
+    fi
+
+    # Strategy 3: Parse filename pattern like "Author - Title.m4b"
+    local basename="${source_path:t:r}"
+    if [[ "$basename" == *" - "* ]]; then
+        DEDUCED_AUTHOR="${basename%% - *}"
+        DEDUCED_BOOK=$(clean_title "${basename#* - }")
+        return 0
+    fi
+
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Import functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Find audiobook folders/files in source directory
+# An audiobook is: a directory containing audio files, or a single audio file
+# Sets: RESULT_AUDIOBOOKS
+find_audiobooks() {
+    local source_dir="$1"
+    RESULT_AUDIOBOOKS=()
+
+    # Find directories containing audio files
+    local -A seen_dirs=()
+    for ext in "${AUDIO_EXTENSIONS[@]}"; do
+        while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            local dir="${file:h}"
+            if [[ -z "${seen_dirs[$dir]}" ]]; then
+                seen_dirs[$dir]=1
+                RESULT_AUDIOBOOKS+=("$dir")
+            fi
+        done < <(find "$source_dir" -type f -iname "*.$ext" 2>/dev/null)
+    done
+
+    # Sort by path
+    RESULT_AUDIOBOOKS=(${(o)RESULT_AUDIOBOOKS})
+}
+
+# Build size index for duplicate detection
+typeset -A SIZE_INDEX=()
+
+build_size_index() {
+    SIZE_INDEX=()
+    info "Building size index..."
+
+    local count=0
+    while IFS=: read -r size filepath; do
+        [[ -z "$size" ]] && continue
+        if [[ -n "${SIZE_INDEX[$size]}" ]]; then
+            SIZE_INDEX[$size]+="|$filepath"
+        else
+            SIZE_INDEX[$size]="$filepath"
+        fi
+        ((count++))
+    done < <(find "$DEST_DIR" -type f -printf '%s:%p\n' 2>/dev/null)
+
+    info "  Indexed $count files"
+}
+
+# Check if file is a duplicate
+# Returns: 0 if duplicate (sets DUPLICATE_PATH), 1 if unique
+check_duplicate() {
+    local file="$1"
+    DUPLICATE_PATH=""
+
+    local size=$(stat -c '%s' "$file" 2>/dev/null)
+    [[ -z "$size" ]] && return 1
+
+    local matches="${SIZE_INDEX[$size]}"
+    [[ -z "$matches" ]] && return 1
+
+    # Size match found - verify with hash
+    local source_hash=$(file_hash "$file")
+    local IFS='|'
+    for existing in ${=matches}; do
+        if [[ "$source_hash" == "$(file_hash "$existing")" ]]; then
+            DUPLICATE_PATH="$existing"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Process a single audiobook (directory or file)
+process_audiobook() {
+    local source_path="$1"
+    local author="$2"
+    local book="$3"
+    local dry_run="$4"
+    local copy_mode="$5"
+
+    local dest_dir="$DEST_DIR/$author/$book"
+
+    if [[ "$dry_run" -eq 1 ]]; then
+        info "[DRY RUN] Would create: $dest_dir"
+    else
+        /bin/mkdir -p "$dest_dir"
+    fi
+
+    # Find all audio files to process
+    local -a files=()
+    if [[ -d "$source_path" ]]; then
+        for ext in "${AUDIO_EXTENSIONS[@]}"; do
+            while IFS= read -r file; do
+                [[ -n "$file" ]] && files+=("$file")
+            done < <(find "$source_path" -type f -iname "*.$ext" 2>/dev/null)
+        done
+    elif is_audio_file "$source_path"; then
+        files+=("$source_path")
+    fi
+
+    local total=${#files[@]}
+    local current=0
+    local copied=0
+    local skipped=0
+    local duplicates=0
+
+    for file in "${files[@]}"; do
+        ((current++))
+        progress_bar $current $total
+
+        local filename="${file:t}"
+        local dest_file="$dest_dir/$filename"
+
+        # Check for duplicate
+        if check_duplicate "$file"; then
+            ((duplicates++))
+            continue
+        fi
+
+        # Handle name collision
+        if [[ -f "$dest_file" ]]; then
+            if files_match "$file" "$dest_file"; then
+                ((skipped++))
+                continue
+            fi
+            # Find unique name
+            local base="${filename:r}"
+            local ext="${filename:e}"
+            local counter=1
+            while [[ -f "$dest_file" ]]; do
+                dest_file="$dest_dir/${base}-${counter}.${ext}"
+                ((counter++))
+            done
+        fi
+
+        if [[ "$dry_run" -eq 1 ]]; then
+            ((copied++))
+        else
+            if [[ "$copy_mode" -eq 1 ]]; then
+                cp "$file" "$dest_file" && ((copied++))
+            else
+                mv "$file" "$dest_file" && ((copied++))
+            fi
+        fi
+    done
+
+    echo ""  # Clear progress bar line
+
+    local action=$([[ "$copy_mode" -eq 1 ]] && echo "Copied" || echo "Moved")
+    [[ "$dry_run" -eq 1 ]] && action="Would ${action:l}"
+
+    echo "  $action: $copied, Skipped: $skipped, Duplicates: $duplicates"
+}
+
+# Main import command
+cmd_import() {
+    local source_dir="$1"
+    local dry_run="$2"
+    local copy_mode="$3"
+
+    [[ ! -d "$source_dir" ]] && error "Source directory not found: $source_dir"
+
+    select_library
+    build_size_index
+
+    info "Scanning for audiobooks in $source_dir..."
+
+    find_audiobooks "$source_dir"
+
+    if [[ ${#RESULT_AUDIOBOOKS[@]} -eq 0 ]]; then
+        warn "No audiobooks found in $source_dir"
+        return
+    fi
+
+    info "Found ${#RESULT_AUDIOBOOKS[@]} audiobook(s)"
+    echo ""
+
+    for audiobook_path in "${RESULT_AUDIOBOOKS[@]}"; do
+        echo "${BOLD}Processing:${NC} ${audiobook_path:t}"
+
+        # Try automatic detection
+        if deduce_author_book "$audiobook_path"; then
+            echo "  Detected: ${CYAN}$DEDUCED_AUTHOR${NC} / ${CYAN}$DEDUCED_BOOK${NC}"
+            echo ""
+            local reply=""
+            read -k1 "reply?  Use detected values? [Y/n] "
+            echo ""
+            if [[ "${reply:l}" == "n" ]]; then
+                DEDUCED_AUTHOR=""
+                DEDUCED_BOOK=""
+            else
+                SELECTED_AUTHOR="$DEDUCED_AUTHOR"
+                SELECTED_BOOK="$DEDUCED_BOOK"
+            fi
+        fi
+
+        # If not deduced or user declined, show interactive menu
+        if [[ -z "$DEDUCED_AUTHOR" ]]; then
+            echo ""
+            select_author
+        fi
+
+        if [[ -z "$DEDUCED_BOOK" ]]; then
+            echo ""
+            select_book "$SELECTED_AUTHOR"
+        fi
+
+        echo ""
+        echo "  Destination: ${BOLD}$DEST_DIR/$SELECTED_AUTHOR/$SELECTED_BOOK${NC}"
+
+        process_audiobook "$audiobook_path" "$SELECTED_AUTHOR" "$SELECTED_BOOK" "$dry_run" "$copy_mode"
+
+        # Add to size index for subsequent duplicate detection
+        if [[ "$dry_run" -eq 0 ]]; then
+            local new_dest="$DEST_DIR/$SELECTED_AUTHOR/$SELECTED_BOOK"
+            while IFS=: read -r size filepath; do
+                [[ -z "$size" ]] && continue
+                if [[ -n "${SIZE_INDEX[$size]}" ]]; then
+                    SIZE_INDEX[$size]+="|$filepath"
+                else
+                    SIZE_INDEX[$size]="$filepath"
+                fi
+            done < <(find "$new_dest" -type f -printf '%s:%p\n' 2>/dev/null)
+        fi
+
+        echo ""
+    done
+
+    success "Import complete!"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stats command
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_stats() {
+    check_setup
+
+    for lib in "${LIBRARIES[@]}"; do
+        parse_library "$lib"
+        cmd_stats_library "$LIB_NAME" "$LIB_PATH"
+        echo ""
+    done
+}
+
+cmd_stats_library() {
+    local lib_name="$1"
+    local lib_path="$2"
+
+    if [[ ! -d "$lib_path" ]]; then
+        warn "Library path not found: $lib_path"
+        return
+    fi
+
+    local total_size=$(du -sh "$lib_path" 2>/dev/null | cut -f1)
+
+    echo "${BOLD}Audiobook Library: $lib_name${NC} ($lib_path)"
+    local header_len=$((19 + ${#lib_name} + ${#lib_path} + 3))
+    printf '═%.0s' $(seq 1 $header_len)
+    echo ""
+    echo ""
+
+    local total_authors=0
+    local total_books=0
+
+    for author_dir in "$lib_path"/*/; do
+        [[ ! -d "$author_dir" ]] && continue
+        local author="${author_dir:h:t}"
+        ((total_authors++))
+
+        local book_count=0
+        local author_size=0
+
+        for book_dir in "$author_dir"/*/; do
+            [[ ! -d "$book_dir" ]] && continue
+            ((book_count++))
+            ((total_books++))
+
+            local book_size=$(du -sk "$book_dir" 2>/dev/null | cut -f1)
+            ((author_size += book_size))
+        done
+
+        local size_human
+        if command -v numfmt &>/dev/null; then
+            size_human=$(numfmt --to=iec-i --suffix=B $((author_size * 1024)) 2>/dev/null)
+        else
+            size_human="${author_size}K"
+        fi
+
+        local books_word=$([[ $book_count -eq 1 ]] && echo "book" || echo "books")
+        printf "%-30s (%d %s, %s)\n" "$author" "$book_count" "$books_word" "$size_human"
+    done
+
+    echo ""
+    printf '─%.0s' $(seq 1 55)
+    echo ""
+
+    local authors_word=$([[ $total_authors -eq 1 ]] && echo "author" || echo "authors")
+    local books_word=$([[ $total_books -eq 1 ]] && echo "book" || echo "books")
+    echo "Total: $total_authors $authors_word, $total_books $books_word, $total_size"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+DRY_RUN=0
+COPY_MODE=1  # Default to copy
+SOURCE=""
+
+# Check for subcommands first
+if [[ "$1" == "add" ]]; then
+    cmd_setup_add
+    exit 0
+fi
+
+if [[ "$1" == "remove" || "$1" == "rm" ]]; then
+    cmd_setup_remove
+    exit 0
+fi
+
+if [[ "$1" == "list" || "$1" == "ls" ]]; then
+    cmd_setup_list
+    exit 0
+fi
+
+if [[ "$1" == "stats" ]]; then
+    cmd_stats
+    exit 0
+fi
+
+# Parse options for import command
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --move)
+            COPY_MODE=0
+            shift
+            ;;
+        --help|-h|help)
+            usage
+            exit 0
+            ;;
+        -*)
+            error "Unknown option: $1"
+            ;;
+        *)
+            SOURCE="$1"
+            shift
+            ;;
+    esac
+done
+
+[[ -z "$SOURCE" ]] && usage && exit 1
+[[ ! -d "$SOURCE" ]] && error "Source directory not found: $SOURCE"
+
+check_setup
+cmd_import "$SOURCE" "$DRY_RUN" "$COPY_MODE"

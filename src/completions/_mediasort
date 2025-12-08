@@ -1,0 +1,41 @@
+#compdef mediasort
+
+_mediasort() {
+    local -a commands=(
+        'add:Add a new audiobook library'
+        'remove:Remove an audiobook library'
+        'list:List configured libraries'
+        'stats:Show library statistics'
+        'help:Show usage'
+    )
+
+    local -a options=(
+        '--dry-run[Preview changes without copying files]'
+        '--move[Move instead of copy (destructive)]'
+        '--help[Show help message]'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args' \
+        "${options[@]}"
+
+    case $state in
+        command)
+            _describe -t commands 'mediasort command' commands
+            _files -/
+            ;;
+        args)
+            case $words[1] in
+                stats)
+                    _message 'author filter (optional)'
+                    ;;
+                *)
+                    _files -/
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_mediasort "$@"
