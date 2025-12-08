@@ -3,6 +3,9 @@
 # freed - Cache daemon for free script
 # Updates the list of largest files in the home directory
 
+# Ensure PATH is set for launchd environment
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
 CONFIG_DIR="$HOME/.config/free"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_FILE="$CONFIG_DIR/cache"
@@ -19,15 +22,14 @@ CACHE_COUNT=${CACHE_COUNT:-$DEFAULT_CACHE_COUNT}
 # Ensure config directory exists
 mkdir -p "$CONFIG_DIR"
 
-# Scan for largest files
-find ~ -type f -size +1M -print0 2>/dev/null | \
-    xargs -0 du -h 2>/dev/null | \
+# Scan for largest files (capture stderr to log file)
+find ~ -type f -size +1M -print0 2>>"$LOG_FILE" | \
+    xargs -0 du -h 2>>"$LOG_FILE" | \
     sort -hr | \
     head -n $CACHE_COUNT > "$CACHE_FILE.tmp"
-exit_code=$?
 
-# Check if we got any results
-if [[ $exit_code -eq 0 ]] && [[ -s "$CACHE_FILE.tmp" ]]; then
+# Check if we got any results (temp file exists and has content)
+if [[ -s "$CACHE_FILE.tmp" ]]; then
     # Atomically replace cache file
     mv "$CACHE_FILE.tmp" "$CACHE_FILE"
     # Update status with success
@@ -35,6 +37,7 @@ if [[ $exit_code -eq 0 ]] && [[ -s "$CACHE_FILE.tmp" ]]; then
 {"updated": $(date +%s), "status": "success", "log": "$LOG_FILE"}
 EOF
 else
+    echo "[$(date)] Cache update failed: temp file empty or missing" >> "$LOG_FILE"
     rm -f "$CACHE_FILE.tmp"
     # Update status with failure
     cat > "$STATUS_FILE" <<EOF
