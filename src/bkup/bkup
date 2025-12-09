@@ -1205,14 +1205,14 @@ cmd_unmount() {
     # If no name provided, unmount all
     if [[ -z "$NAME" ]]; then
         local found=false
-        for mountpoint in /tmp/bkup-*; do
+        for mountpoint in /tmp/bkup-*(N); do
             [[ -d "$mountpoint" ]] || continue
             local backup_name="${mountpoint#/tmp/bkup-}"
             found=true
             cmd_unmount "$backup_name"
         done
         if ! $found; then
-            echo "No mounted backups found"
+            echo "${YELLOW}No backups mounted${NC}"
         fi
         return 0
     fi
