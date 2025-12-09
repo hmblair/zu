@@ -32,7 +32,6 @@ usage() {
     echo "  run <name>                       Run a backup manually"
     echo "  test [name]                      Test backup connectivity and paths"
     echo "  archives <name>                  List backup archives (snapshots)"
-    echo "  files <name> [archive] [opts]    List files in an archive"
     echo "  mount <name> [-a arch] [-m path]  Mount archive for browsing (requires macFUSE)"
     echo "  unmount <name>                   Unmount a mounted archive"
     echo "  status                           Show last run status of all backups"
@@ -50,17 +49,12 @@ usage() {
     echo "  --hour <0-23>             Hour to run backup (default: 2)"
     echo "  --minute <0-59>           Minute to run backup (default: 0)"
     echo ""
-    echo "Files options:"
-    echo "  -p, --path <filter>       Filter output by substring (case-insensitive)"
-    echo ""
     echo "Examples:"
     echo "  bkup setup"
     echo "  bkup add personal -u john -H backup.example.com -d /backups \\"
     echo "    -l ~/logs --hour 3 ~/documents ~/projects"
     echo "  bkup run personal"
     echo "  bkup archives personal"
-    echo "  bkup files personal"
-    echo "  bkup files personal 2025-12-01"
     echo "  bkup list"
 }
 
@@ -1076,72 +1070,6 @@ cmd_archives() {
     echo ""
 }
 
-cmd_files() {
-    check_setup
-
-    local NAME=""
-    local ARCHIVE=""
-    local PATH_FILTER=""
-
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -p|--path)
-                PATH_FILTER="$2"
-                shift 2
-                ;;
-            -*)
-                error "Unknown option: $1"
-                ;;
-            *)
-                if [[ -z "$NAME" ]]; then
-                    NAME="$1"
-                elif [[ -z "$ARCHIVE" ]]; then
-                    ARCHIVE="$1"
-                else
-                    error "Too many arguments"
-                fi
-                shift
-                ;;
-        esac
-    done
-
-    if [[ -z "$NAME" ]]; then
-        error "Usage: bkup files <name> [archive] [-p|--path <path>]"
-    fi
-
-    load_config "$NAME"
-
-    export BORG_PASSPHRASE=$(<"$PASS_FILE")
-    local REPO="$REMOTE_USER@$HOST:$HOST_DIR"
-
-    # If no archive specified, use latest
-    if [[ -z "$ARCHIVE" ]]; then
-        ARCHIVE=$(/opt/homebrew/bin/borg list --last 1 --format '{archive}' "$REPO" 2>/dev/null)
-        if [[ -z "$ARCHIVE" ]]; then
-            error "No archives found in repository"
-        fi
-    fi
-
-    echo ""
-    info "Files in '$NAME::$ARCHIVE'"
-    echo "─────────────────────────────────────────"
-
-    local output
-    if [[ -n "$PATH_FILTER" ]]; then
-        output=$(/opt/homebrew/bin/borg list "$REPO::$ARCHIVE" 2>&1 | grep -i "$PATH_FILTER")
-    else
-        output=$(/opt/homebrew/bin/borg list "$REPO::$ARCHIVE" 2>&1)
-    fi
-
-    if [[ $? -ne 0 ]] && [[ -z "$PATH_FILTER" ]]; then
-        echo "$output" >&2
-        error "Failed to list files (archive '$ARCHIVE' may not exist)"
-    fi
-    echo "$output"
-    echo ""
-}
-
 cmd_mount() {
     check_setup
 
@@ -1629,10 +1557,6 @@ case "${1:-}" in
         ;;
     archives)
         cmd_archives "$2"
-        ;;
-    files)
-        shift
-        cmd_files "$@"
         ;;
     mount)
         shift
