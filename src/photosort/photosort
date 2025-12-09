@@ -19,14 +19,48 @@ PHOTO_EXTENSIONS=(jpg jpeg heic png cr2 cr3 nef arw dng raf)
 VIDEO_EXTENSIONS=(mp4 mov avi mkv)
 ALL_EXTENSIONS=($PHOTO_EXTENSIONS $VIDEO_EXTENSIONS)
 
+# Detect OS for portable commands
+IS_MACOS=0
+[[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=1
+
 # Detect fastest available hash command (xxhash is 5-10x faster than md5)
 if command -v xxhsum &>/dev/null; then
     HASH_CMD="xxhsum"
 elif command -v xxh64sum &>/dev/null; then
     HASH_CMD="xxh64sum"
+elif [[ $IS_MACOS -eq 1 ]]; then
+    HASH_CMD="md5 -r"
 else
     HASH_CMD="md5sum"
 fi
+
+# Portable stat for file size
+file_size() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        stat -f '%z' "$1" 2>/dev/null
+    else
+        stat -c '%s' "$1" 2>/dev/null
+    fi
+}
+
+# Portable stat for mtime
+file_mtime() {
+    if [[ $IS_MACOS -eq 1 ]]; then
+        stat -f '%Sm' -t '%Y:%m:%d %H:%M:%S' "$1" 2>/dev/null
+    else
+        stat -c '%y' "$1" 2>/dev/null | sed 's/-/:/g; s/\.[0-9]*//'
+    fi
+}
+
+# Portable find with size output (size\tpath per line)
+find_with_sizes() {
+    local dir="$1"
+    if [[ $IS_MACOS -eq 1 ]]; then
+        /usr/bin/find "$dir" -type f -exec stat -f '%z	%N' {} + 2>/dev/null
+    else
+        /usr/bin/find "$dir" -type f -printf '%s\t%p\n' 2>/dev/null
+    fi
+}
 
 # Libraries array: "name:path" or "name:host:path"
 typeset -a LIBRARIES=()
@@ -159,7 +193,7 @@ files_match() {
     local use_hash="$3"
 
     # First check size (fast)
-    if [[ $(stat -c '%s' "$file1") -ne $(stat -c '%s' "$file2") ]]; then
+    if [[ $(file_size "$file1") -ne $(file_size "$file2") ]]; then
         return 1  # Different size = different file
     fi
 
@@ -308,15 +342,15 @@ build_size_index() {
     info "Building size index of existing photos..."
 
     local count=0
-    # Use find -printf for speed (one command vs 13000+ stat calls)
-    while IFS=: read -r size filepath; do
+    # Use portable find + stat to get file sizes
+    while IFS=$'\t' read -r size filepath; do
         if [[ -n "${SIZE_INDEX[$size]}" ]]; then
             SIZE_INDEX[$size]+="|$filepath"
         else
             SIZE_INDEX[$size]="$filepath"
         fi
         ((count++))
-    done < <(find "$DEST_DIR" -type f -printf '%s:%p\n' 2>/dev/null)
+    done < <(find_with_sizes "$DEST_DIR")
 
     info "  Indexed $count files"
     SIZE_INDEX_BUILT=1
@@ -326,7 +360,7 @@ check_size_duplicate() {
     local file="$1"
     local use_hash="$2"
 
-    local size=$(stat -c '%s' "$file" 2>/dev/null)
+    local size=$(file_size "$file")
     local matches="${SIZE_INDEX[$size]}"
 
     [[ -z "$matches" ]] && return 1  # No size match
@@ -353,7 +387,7 @@ find_duplicate_in_folder() {
     # Build cache for this folder if not already done
     build_folder_cache "$dest_dir"
 
-    local source_size=$(stat -c '%s' "$source_file")
+    local source_size=$(file_size "$source_file")
     local source_hash=""
     local cache="${FOLDER_CACHE[$dest_dir]}"
 
@@ -532,7 +566,7 @@ get_date_from_filename() {
 
 get_date_from_mtime() {
     local file="$1"
-    stat -c '%y' "$file" 2>/dev/null | sed 's/-/:/g; s/\.[0-9]*//'
+    file_mtime "$file"
 }
 
 format_date_path() {
@@ -612,7 +646,7 @@ process_file_new() {
     if [[ "$dry_run" != "1" ]]; then
         /bin/mkdir -p "$dest_dir"
 
-        local src_size=$(stat -c '%s' "$file" 2>/dev/null)
+        local src_size=$(file_size "$file")
         if [[ -z "$src_size" ]]; then
             ((STATS_FAILED++))
             return 1
@@ -630,7 +664,7 @@ process_file_new() {
             return 1
         fi
 
-        local dest_size=$(stat -c '%s' "$dest_file" 2>/dev/null)
+        local dest_size=$(file_size "$dest_file")
         if [[ "$src_size" != "$dest_size" ]]; then
             # Incomplete copy - remove corrupted file
             rm -f "$dest_file"
@@ -732,7 +766,7 @@ cmd_sort() {
     local total=0
     local skipped=0
 
-    while IFS=: read -r size filepath; do
+    while IFS=$'\t' read -r size filepath; do
         ((total++))
         # Check extension
         local ext="${filepath:e:l}"
@@ -751,7 +785,7 @@ cmd_sort() {
             # Definitely new - no size match
             new_files+=("NEW:$size:$filepath")
         fi
-    done < <(find "$source_dir" -type f -printf '%s:%p\n' 2>/dev/null)
+    done < <(find_with_sizes "$source_dir")
 
     info "  Found $total files, ${#new_files[@]} to check"
     echo ""

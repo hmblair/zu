@@ -93,8 +93,8 @@ load_config() {
     HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
     HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
     LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
-    EXCLUDES=($(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))"))
-    DIRS=($(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))"))
+    EXCLUDES=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
+    DIRS=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,7 +339,7 @@ cmd_add() {
 
     # Check if borg repository exists, offer to create if not
     local REPO="$REMOTE_USER@$HOST:$HOST_DIR"
-    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+    export BORG_PASSPHRASE=$(<"$PASS_FILE")
 
     echo ""
     info "Checking repository..."
@@ -451,7 +451,7 @@ cmd_run() {
     load_config "$NAME"
 
     # Load passphrase
-    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+    export BORG_PASSPHRASE=$(<"$PASS_FILE")
 
     # Set up date variables
     local MONTH=$(date +%Y-%m)
@@ -510,7 +510,7 @@ with open('$status_file', 'w') as f:
 
     # Delete logs older than one year
     local CUTOFF=$(date -v -1y +%Y-%m)
-    for dir in "$LOG_DIR"/*; do
+    for dir in "$LOG_DIR"/*(N); do
         if [[ -d "$dir" && "$(basename "$dir")" < "$CUTOFF" ]]; then
             rm -rf "$dir"
         fi
@@ -538,7 +538,7 @@ cmd_status() {
     printf "  ${BOLD}%-15s %-14s %-12s %-18s %s${NC}\n" "BACKUP" "DAEMON" "STATUS" "LAST RUN" "SIZE (DEDUP)"
     echo "  ───────────────────────────────────────────────────────────────────────────"
 
-    for config_file in "$BACKUPS_DIR"/*.json; do
+    for config_file in "$BACKUPS_DIR"/*.json(N); do
         [[ ! -f "$config_file" ]] && continue
         local name=$(basename "$config_file" .json)
         local display_name="$name"
@@ -631,7 +631,7 @@ cmd_list() {
     echo "${BOLD}Backup Configurations${NC}"
     echo "─────────────────────────────────────────"
 
-    for config_file in "$BACKUPS_DIR"/*.json; do
+    for config_file in "$BACKUPS_DIR"/*.json(N); do
         [[ ! -f "$config_file" ]] && continue
         local name=$(basename "$config_file" .json)
         local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
@@ -956,7 +956,7 @@ cmd_copy() {
 
     # Check/create repository
     local REPO="$REMOTE_USER@$HOST:$HOST_DIR"
-    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+    export BORG_PASSPHRASE=$(<"$PASS_FILE")
 
     echo ""
     info "Checking repository..."
@@ -1048,6 +1048,10 @@ cmd_archives() {
 
     if [[ -z "$NAME" ]]; then
         error "Usage: bkup archives <name>"
+    fi
+
+    if ! config_exists "$NAME"; then
+        error "Backup '$NAME' not found."
     fi
 
     load_config "$NAME"
@@ -1278,7 +1282,7 @@ cmd_test() {
         configs=("$BACKUPS_DIR"/*.json)
     fi
 
-    export BORG_PASSPHRASE=$(cat "$PASS_FILE")
+    export BORG_PASSPHRASE=$(<"$PASS_FILE")
     local all_ok=true
 
     echo ""
@@ -1523,7 +1527,7 @@ cmd_uninstall() {
 
     # Remove all backup schedules
     if [[ -d "$BACKUPS_DIR" ]]; then
-        for config_file in "$BACKUPS_DIR"/*.json; do
+        for config_file in "$BACKUPS_DIR"/*.json(N); do
             [[ -f "$config_file" ]] || continue
             local name=$(basename "$config_file" .json)
             zu_service_remove "$(plist_label "$name")"
