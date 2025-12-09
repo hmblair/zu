@@ -96,9 +96,9 @@ cmd_monitor() {
     format_usage "Memory Usage:" "$mem_val" "$mem_pct"
 
     # Parse and display all disks
+    local mount label
     while IFS='|' read -r disk_info disk_val disk_pct; do
-        local mount="${disk_info#disk:}"
-        local label
+        mount="${disk_info#disk:}"
         if [[ "$mount" == "/" ]]; then
             label="Disk (/):"
         else
