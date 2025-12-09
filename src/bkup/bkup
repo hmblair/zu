@@ -1220,9 +1220,9 @@ cmd_mount() {
         MOUNTPOINT="/tmp/bkup-$NAME"
     fi
 
-    # Check if already mounted
-    if mount | grep -q "on $MOUNTPOINT "; then
-        error "Something is already mounted at $MOUNTPOINT. Run 'bkup unmount $NAME' first."
+    # Check if already mounted (non-empty directory that we didn't just create)
+    if [[ -d "$MOUNTPOINT" ]] && [[ -n "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
+        error "Mountpoint is not empty: $MOUNTPOINT. Run 'bkup unmount $NAME' first."
     fi
 
     # Create mountpoint if needed
@@ -1233,10 +1233,6 @@ cmd_mount() {
         fi
     fi
 
-    # Check mountpoint is empty
-    if [[ -n "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
-        error "Mountpoint is not empty: $MOUNTPOINT"
-    fi
 
     # Mount the archive
     info "Mounting $NAME::$ARCHIVE to $MOUNTPOINT..."
@@ -1247,9 +1243,9 @@ cmd_mount() {
         error "Failed to mount archive"
     fi
 
-    # Verify mount succeeded
-    if ! mount | grep -q "on $MOUNTPOINT "; then
-        error "Mount command succeeded but $MOUNTPOINT is not mounted"
+    # Verify mount succeeded (check if mountpoint has content)
+    if [[ -z "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
+        error "Mount command succeeded but $MOUNTPOINT appears empty"
     fi
 
     echo ""
@@ -1268,16 +1264,16 @@ cmd_unmount() {
 
     local MOUNTPOINT="/tmp/bkup-$NAME"
 
-    # Check if mounted
-    if ! mount | grep -q "on $MOUNTPOINT "; then
-        # Check if mountpoint exists but is stale
-        if [[ -d "$MOUNTPOINT" ]]; then
-            info "Mountpoint exists but is not mounted. Cleaning up..."
-            rmdir "$MOUNTPOINT" 2>/dev/null
-            success "Cleaned up stale mountpoint"
-            return 0
-        fi
-        error "Nothing mounted at $MOUNTPOINT"
+    # Check if mounted (has content)
+    if [[ ! -d "$MOUNTPOINT" ]]; then
+        error "Mountpoint doesn't exist: $MOUNTPOINT"
+    fi
+
+    if [[ -z "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
+        info "Mountpoint exists but appears empty. Cleaning up..."
+        rmdir "$MOUNTPOINT" 2>/dev/null
+        success "Cleaned up stale mountpoint"
+        return 0
     fi
 
     info "Unmounting $MOUNTPOINT..."
