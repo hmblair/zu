@@ -1248,10 +1248,26 @@ cmd_mount() {
         error "Mount command succeeded but $MOUNTPOINT appears empty"
     fi
 
+    # Find the actual content path (skip single-child directories)
+    local content_path="$MOUNTPOINT"
+    while true; do
+        local children=("$content_path"/*(N))
+        if [[ ${#children[@]} -eq 1 ]] && [[ -d "${children[1]}" ]]; then
+            content_path="${children[1]}"
+        else
+            break
+        fi
+    done
+
     echo ""
     success "Mounted at $MOUNTPOINT"
     echo ""
-    echo "Browse with:  l $MOUNTPOINT"
+    if [[ "$content_path" != "$MOUNTPOINT" ]]; then
+        echo "Content at:   $content_path"
+        echo "Browse with:  l $content_path"
+    else
+        echo "Browse with:  l $MOUNTPOINT"
+    fi
     echo "Unmount with: bkup unmount $NAME"
 }
 
