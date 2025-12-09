@@ -9,6 +9,11 @@ _l() {
         '(-t --tree)'{-t,--tree}'[Show full tree]' \
         '--depth[Limit tree depth]:depth:' \
         '--expand-all[Expand all directories (ignore NO_EXPAND list)]' \
+        '--list[Flat list output (no tree structure)]' \
+        '-S[Sort by size (largest first)]' \
+        '-T[Sort by modification time (newest first)]' \
+        '-N[Sort by name (alphabetical)]' \
+        '-r[Reverse sort order]' \
         '(-h --help)'{-h,--help}'[Show help message]' \
         '*:file or directory:_files'
 }

@@ -13,6 +13,9 @@ SIZES=0
 COUNT_LINES=0
 EXPAND_ALL=0
 CLEAR_SCREEN=0
+LIST_MODE=0
+SORT_BY=""       # "", "size", "time", "name"
+SORT_REVERSE=0
 DIRECTORIES=()
 NO_EXPAND=('^\.git$')
 MAX_TREE_DEPTH=50
@@ -34,7 +37,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 usage() {
-    echo "Usage: l [-achlst] [--depth INT | --tree | --expand-all] [FILE ...]"
+    echo "Usage: l [OPTIONS] [FILE ...]"
     echo ""
     echo "Options:"
     echo "  -a              Show hidden files"
@@ -44,8 +47,17 @@ usage() {
     echo "  -t, --tree      Show full tree (depth $MAX_TREE_DEPTH)"
     echo "  --depth INT     Limit tree depth"
     echo "  --expand-all    Expand all directories (ignore NO_EXPAND list)"
+    echo "  --list          Flat list output (no tree structure)"
+    echo ""
+    echo "Sorting:"
+    echo "  -S              Sort by size (largest first)"
+    echo "  -T              Sort by modification time (newest first)"
+    echo "  -N              Sort by name (alphabetical)"
+    echo "  -r              Reverse sort order"
+    echo ""
     echo "  -h, --help      Show this help message"
 }
+
 
 # Load icons from TOML file
 load_icons() {
@@ -131,6 +143,55 @@ should_skip() {
     done
 
     is_ignored "$path"
+}
+
+# Sort files array based on SORT_BY and SORT_REVERSE
+sort_files() {
+    local -a input=("$@")
+    local -a sorted=()
+
+    case "$SORT_BY" in
+        size)
+            # Sort by size (largest first by default)
+            sorted=($(for f in "${input[@]}"; do
+                local size=0
+                if [[ -e "$f" ]]; then
+                    size=$(/usr/bin/stat -f '%z' "$f" 2>/dev/null || /usr/bin/stat -c '%s' "$f" 2>/dev/null || echo 0)
+                fi
+                printf '%s\t%s\n' "$size" "$f"
+            done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-))
+            ;;
+        time)
+            # Sort by mtime (newest first by default)
+            sorted=($(for f in "${input[@]}"; do
+                local mtime=0
+                if [[ -e "$f" ]]; then
+                    mtime=$(/usr/bin/stat -f '%m' "$f" 2>/dev/null || /usr/bin/stat -c '%Y' "$f" 2>/dev/null || echo 0)
+                fi
+                printf '%s\t%s\n' "$mtime" "$f"
+            done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-))
+            ;;
+        name)
+            # Sort alphabetically
+            sorted=($(printf '%s\n' "${input[@]}" | /usr/bin/sort))
+            ;;
+        *)
+            # No sorting
+            sorted=("${input[@]}")
+            ;;
+    esac
+
+    if (( SORT_REVERSE )) && [[ -n "$SORT_BY" ]]; then
+        # Reverse the array
+        local -a reversed=()
+        local i
+        for ((i=${#sorted[@]}; i>0; i--)); do
+            reversed+=("${sorted[$i]}")
+        done
+        sorted=("${reversed[@]}")
+    fi
+
+    printf '%s\n' "${sorted[@]}"
 }
 
 print_line() {
@@ -248,6 +309,15 @@ print_dir() {
         files=("$file"/*)
     fi
 
+    # Apply sorting if requested
+    if [[ -n "$SORT_BY" ]]; then
+        local -a sorted_files=()
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && sorted_files+=("$f")
+        done < <(sort_files "${files[@]}")
+        files=("${sorted_files[@]}")
+    fi
+
     for ((ix=1; ix<=${#files[@]}; ix++)); do
         local current="${files[$ix]}"
         if (( ix == ${#files[@]} )); then
@@ -256,6 +326,34 @@ print_dir() {
             arr[$((depth + 1))]=1
         fi
         print_dir "$current" $((depth + 1)) "$maxdepth" "$hidden" "$arr"
+    done
+}
+
+# Print flat list (no tree structure)
+print_list() {
+    local dir="$1"
+    local maxdepth="$2"
+    local hidden="$3"
+
+    local find_args=(-maxdepth "$maxdepth")
+    (( ! hidden )) && find_args+=(-not -path '*/.*')
+
+    local -a items=()
+    while IFS= read -r item; do
+        [[ -n "$item" ]] && items+=("$item")
+    done < <(/usr/bin/find "${dir:A}" "${find_args[@]}" 2>/dev/null | /usr/bin/tail -n +2)
+
+    # Apply sorting if requested
+    if [[ -n "$SORT_BY" ]]; then
+        local -a sorted_items=()
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && sorted_items+=("$f")
+        done < <(sort_files "${items[@]}")
+        items=("${sorted_items[@]}")
+    fi
+
+    for item in "${items[@]}"; do
+        print_line "$item" 0 ""
     done
 }
 
@@ -296,7 +394,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --depth=*)
-            local val="${1#--depth=}"
+            val="${1#--depth=}"
             if ! [[ "$val" =~ ^[0-9]+$ ]]; then
                 error "--depth requires a numeric argument, got '$val'"
             fi
@@ -327,6 +425,26 @@ while [[ $# -gt 0 ]]; do
             EXPAND_ALL=1
             shift
             ;;
+        --list)
+            LIST_MODE=1
+            shift
+            ;;
+        -S)
+            SORT_BY="size"
+            shift
+            ;;
+        -T)
+            SORT_BY="time"
+            shift
+            ;;
+        -N)
+            SORT_BY="name"
+            shift
+            ;;
+        -r)
+            SORT_REVERSE=1
+            shift
+            ;;
         -*)
             error "Unknown option: $1"
             ;;
@@ -346,19 +464,60 @@ if [[ ${#DIRECTORIES[@]} -eq 0 ]]; then
     DIRECTORIES=(".")
 fi
 
-# Build caches
+# Build caches (in parallel using temp files)
 for dir in "${DIRECTORIES[@]}"; do
-    # Gitignore cache (only in git repos)
-    if /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null; then
-        build_gitignore_cache "${dir:A}" "$DEPTH" "$HIDDEN"
+    abs_dir="${dir:A}"
+    in_git=0
+    /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null && in_git=1
+
+    # Create temp files for parallel cache building
+    local git_tmp="" size_tmp="" line_tmp=""
+    (( in_git )) && git_tmp=$(mktemp)
+    (( SIZES )) && size_tmp=$(mktemp)
+    (( COUNT_LINES )) && line_tmp=$(mktemp)
+
+    # Run cache builders in parallel, writing to temp files
+    if [[ -n "$git_tmp" ]]; then
+        {
+            local find_args=(-maxdepth "$DEPTH")
+            (( ! HIDDEN )) && find_args+=(-not -path '*/.*')
+            /usr/bin/find "$abs_dir" "${find_args[@]}" 2>/dev/null | /usr/bin/git check-ignore --stdin 2>/dev/null > "$git_tmp"
+        } &
     fi
-    # Size cache
-    if (( SIZES )); then
-        build_size_cache "${dir:A}" "$DEPTH" "$HIDDEN"
+    if [[ -n "$size_tmp" ]]; then
+        {
+            local find_args=(-maxdepth "$DEPTH")
+            (( ! HIDDEN )) && find_args+=(-not -path '*/.*')
+            /usr/bin/find "$abs_dir" "${find_args[@]}" -exec /usr/bin/du -sh {} + 2>/dev/null > "$size_tmp"
+        } &
     fi
-    # Line count cache
-    if (( COUNT_LINES )); then
-        build_linecount_cache "${dir:A}" "$DEPTH" "$HIDDEN"
+    if [[ -n "$line_tmp" ]]; then
+        {
+            local find_args=(-maxdepth "$DEPTH" -type f)
+            (( ! HIDDEN )) && find_args+=(-not -path '*/.*')
+            /usr/bin/find "$abs_dir" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null | /usr/bin/grep -v ' total$' > "$line_tmp"
+        } &
+    fi
+    wait
+
+    # Load results into caches
+    if [[ -n "$git_tmp" ]]; then
+        while IFS= read -r path; do
+            [[ -n "$path" ]] && GITIGNORE_CACHE[$path]=1
+        done < "$git_tmp"
+        /bin/rm -f "$git_tmp"
+    fi
+    if [[ -n "$size_tmp" ]]; then
+        while IFS=$'\t' read -r size path; do
+            [[ -n "$path" ]] && SIZE_CACHE[$path]="${size#"${size%%[! ]*}"}"
+        done < "$size_tmp"
+        /bin/rm -f "$size_tmp"
+    fi
+    if [[ -n "$line_tmp" ]]; then
+        while read -r count path; do
+            [[ -n "$path" ]] && LINECOUNT_CACHE[$path]="$count"
+        done < "$line_tmp"
+        /bin/rm -f "$line_tmp"
     fi
 done
 
@@ -368,11 +527,15 @@ if (( CLEAR_SCREEN )); then
     /usr/bin/clear
 fi
 
-# Print tree for each directory
+# Print output
 for dir in "${DIRECTORIES[@]}"; do
-    arr=()
-    for ((i=1; i<=DEPTH; i++)); do
-        arr+=1
-    done
-    print_dir "${dir:A}" 0 "$DEPTH" "$HIDDEN" "$arr"
+    if (( LIST_MODE )); then
+        print_list "$dir" "$DEPTH" "$HIDDEN"
+    else
+        arr=()
+        for ((i=1; i<=DEPTH; i++)); do
+            arr+=1
+        done
+        print_dir "${dir:A}" 0 "$DEPTH" "$HIDDEN" "$arr"
+    fi
 done
