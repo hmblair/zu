@@ -90,8 +90,7 @@ load_config() {
     fi
 
     # Load all config values in a single python3 call
-    local config_output
-    config_output=$(python3 -c "
+    local config_output=$(python3 -c "
 import json
 c = json.load(open('$config_file'))
 print(c['user'])
@@ -648,8 +647,7 @@ cmd_list() {
     for config_file in "$BACKUPS_DIR"/*.json(N); do
         [[ ! -f "$config_file" ]] && continue
         local name=$(basename "$config_file" .json)
-        local list_vals
-        list_vals=$(python3 -c "
+        local list_vals=$(python3 -c "
 import json
 c = json.load(open('$config_file'))
 print(c['host'])
@@ -690,8 +688,7 @@ cmd_edit() {
     local config_file="$(config_path "$NAME")"
 
     # Load current values in a single python3 call
-    local edit_vals
-    edit_vals=$(python3 -c "
+    local edit_vals=$(python3 -c "
 import json
 c = json.load(open('$config_file'))
 print(c['user'])
@@ -875,8 +872,7 @@ cmd_copy() {
     local config_file="$(config_path "$SOURCE")"
 
     # Load current values in a single python3 call
-    local copy_vals
-    copy_vals=$(python3 -c "
+    local copy_vals=$(python3 -c "
 import json
 c = json.load(open('$config_file'))
 print(c['user'])
@@ -1345,8 +1341,7 @@ cmd_test() {
         local name=$(basename "$config_file" .json)
 
         # Load config values in a single python3 call
-        local test_vals
-        test_vals=$(python3 -c "
+        local test_vals=$(python3 -c "
 import json
 c = json.load(open('$config_file'))
 print(c['user'])
@@ -1555,8 +1550,7 @@ cmd_reset() {
 
         local config_file="$(config_path "$NAME")"
         local label="$(plist_label "$NAME")"
-        local reset_vals
-        reset_vals=$(python3 -c "import json; c=json.load(open('$config_file')); print(c.get('hour', 2)); print(c.get('minute', 0))")
+        local reset_vals=$(python3 -c "import json; c=json.load(open('$config_file')); print(c.get('hour', 2)); print(c.get('minute', 0))")
         local -a rv=("${(@f)reset_vals}")
         local HOUR="${rv[1]}"
         local MINUTE="${rv[2]}"
