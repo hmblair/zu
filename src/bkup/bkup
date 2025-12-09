@@ -1048,11 +1048,14 @@ cmd_archives() {
     info "Archives for '$NAME'"
     echo "─────────────────────────────────────────"
 
-    /opt/homebrew/bin/borg list --format '{archive:<20} {time:%Y-%m-%d %H:%M}  {size:>10}{NL}' "$REPO" 2>/dev/null
+    local output
+    output=$(/opt/homebrew/bin/borg list --format '{archive:<20} {time:%Y-%m-%d %H:%M}{NL}' "$REPO" 2>&1)
 
     if [[ $? -ne 0 ]]; then
+        echo "$output" >&2
         error "Failed to list archives"
     fi
+    echo "$output"
     echo ""
 }
 
