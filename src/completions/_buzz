@@ -1,0 +1,24 @@
+#compdef buzz
+
+_buzz() {
+    local -a commands
+    commands=(
+        'on:Start keeping the computer awake'
+        'off:Allow the computer to sleep again'
+        'status:Show current status'
+        'install:Start automatically on login'
+        'uninstall:Remove automatic startup'
+        'help:Show usage'
+    )
+
+    _arguments -C \
+        '1:command:->command'
+
+    case $state in
+        command)
+            _describe -t commands 'buzz command' commands
+            ;;
+    esac
+}
+
+_buzz "$@"
