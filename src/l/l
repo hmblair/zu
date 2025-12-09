@@ -26,9 +26,6 @@ typeset -A GITIGNORE_CACHE
 typeset -A SIZE_CACHE
 typeset -A LINECOUNT_CACHE
 
-# Italic for hidden files
-ITALIC="\033[3m"
-
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
     RED="" GREEN="" YELLOW="" BLUE="" CYAN="" WHITE="" GREY="" NC=""
