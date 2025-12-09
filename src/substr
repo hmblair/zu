@@ -26,9 +26,10 @@ if [ "$end" -lt 0 ]; then
   end=$((str_len + end))
 fi
 
-if [ "$start" -lt 0 ] || [ "$end" -lt 0 ] || [ "$start" -gt "$end" ] || [ "$start" -ge "$str_len" ]; then
-  error "Invalid position values"
-fi
+[[ "$start" -ge 0 ]] || error "START position out of range"
+[[ "$end" -ge 0 ]] || error "END position out of range"
+[[ "$start" -le "$end" ]] || error "START ($start) must be <= END ($end)"
+[[ "$start" -lt "$str_len" ]] || error "START ($start) exceeds string length ($str_len)"
 
 length=$((end - start))
 result="${string:$start:$length}"
