@@ -69,11 +69,13 @@ cmd_monitor() {
         uptime -p 2>/dev/null | sed "s/^up //" || uptime | sed "s/.*up //" | sed "s/,.*$//"
         echo "---"
 
-        # Load average (with core count for percentage)
+        # Load average as percentage of CPU cores
         cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
         cat /proc/loadavg 2>/dev/null | awk -v cores="$cores" "{
-            pct = (\$1 / cores) * 100
-            printf \"load:%s (1m) %s (5m) %s (15m)|%.0f\n\", \$1, \$2, \$3, pct
+            pct1 = (\$1 / cores) * 100
+            pct5 = (\$2 / cores) * 100
+            pct15 = (\$3 / cores) * 100
+            printf \"load:%.0f%% (1m) %.0f%% (5m) %.0f%% (15m)|%.0f\n\", pct1, pct5, pct15, pct1
         }" || echo "load:N/A|0"
 
         # Memory usage (used / total in GB)
