@@ -1049,9 +1049,8 @@ cmd_archives() {
     echo "─────────────────────────────────────────"
 
     /opt/homebrew/bin/borg list --format '{archive:<20} {time:%Y-%m-%d %H:%M}  {size:>10}{NL}' "$REPO" 2>/dev/null
-    local status=$?
 
-    if [[ $status -ne 0 ]]; then
+    if [[ $? -ne 0 ]]; then
         error "Failed to list archives"
     fi
     echo ""
@@ -1114,9 +1113,8 @@ cmd_files() {
     fi
 
     /opt/homebrew/bin/borg list "${borg_args[@]}" "$REPO::$ARCHIVE" 2>/dev/null
-    local status=$?
 
-    if [[ $status -ne 0 ]]; then
+    if [[ $? -ne 0 ]]; then
         error "Failed to list files (archive '$ARCHIVE' may not exist)"
     fi
     echo ""
