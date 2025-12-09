@@ -33,7 +33,7 @@ usage() {
     echo "  test [name]                      Test backup connectivity and paths"
     echo "  archives <name>                  List backup archives (snapshots)"
     echo "  files <name> [archive] [opts]    List files in an archive"
-    echo "  mount <name> [archive] [path]    Mount archive for browsing (requires macFUSE)"
+    echo "  mount <name> [-a arch] [-m path]  Mount archive for browsing (requires macFUSE)"
     echo "  unmount <name>                   Unmount a mounted archive"
     echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
@@ -1152,23 +1152,22 @@ cmd_mount() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -a|--archive)
+                ARCHIVE="$2"
+                shift 2
+                ;;
+            -m|--mountpoint)
+                MOUNTPOINT="$2"
+                shift 2
+                ;;
             -*)
                 error "Unknown option: $1"
                 ;;
             *)
                 if [[ -z "$NAME" ]]; then
                     NAME="$1"
-                elif [[ -z "$ARCHIVE" ]]; then
-                    # If it looks like a path, treat as mountpoint not archive
-                    if [[ "$1" == /* || "$1" == ./* || "$1" == ../* ]]; then
-                        MOUNTPOINT="$1"
-                    else
-                        ARCHIVE="$1"
-                    fi
-                elif [[ -z "$MOUNTPOINT" ]]; then
-                    MOUNTPOINT="$1"
                 else
-                    error "Too many arguments"
+                    error "Too many arguments. Use -a/--archive and -m/--mountpoint."
                 fi
                 shift
                 ;;
@@ -1176,7 +1175,7 @@ cmd_mount() {
     done
 
     if [[ -z "$NAME" ]]; then
-        error "Usage: bkup mount <name> [archive] [mountpoint]"
+        error "Usage: bkup mount <name> [-a archive] [-m mountpoint]"
     fi
 
     if ! config_exists "$NAME"; then

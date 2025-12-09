@@ -34,7 +34,7 @@ _bkup() {
             ;;
         args)
             case $words[1] in
-                edit|copy|run|test|remove|reset|archives|mount|unmount)
+                edit|copy|run|test|remove|reset|archives|unmount)
                     if [[ -d "$backup_dir" ]]; then
                         backups=(${backup_dir}/*.json(:t:r))
                         _describe -t backups 'backup name' backups
@@ -45,6 +45,16 @@ _bkup() {
                         '1:backup name:->backup' \
                         '2:archive name:' \
                         '(-p --path)'{-p,--path}'[Filter by path pattern]:pattern:'
+                    if [[ $state == backup ]] && [[ -d "$backup_dir" ]]; then
+                        backups=(${backup_dir}/*.json(:t:r))
+                        _describe -t backups 'backup name' backups
+                    fi
+                    ;;
+                mount)
+                    _arguments \
+                        '1:backup name:->backup' \
+                        '(-a --archive)'{-a,--archive}'[Archive name]:archive:' \
+                        '(-m --mountpoint)'{-m,--mountpoint}'[Mountpoint path]:path:_files -/'
                     if [[ $state == backup ]] && [[ -d "$backup_dir" ]]; then
                         backups=(${backup_dir}/*.json(:t:r))
                         _describe -t backups 'backup name' backups
