@@ -1,5 +1,8 @@
 #!/usr/bin/env zsh
 
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/common"
+
 if [ $# -ne 3 ]; then
   echo "Usage: ${0:t} STR START END"
   exit 1
@@ -8,6 +11,10 @@ fi
 string="$1"
 start="$2"
 end="$3"
+
+# Validate that start and end are integers
+[[ "$start" =~ ^-?[0-9]+$ ]] || error "START must be an integer, got '$start'"
+[[ "$end" =~ ^-?[0-9]+$ ]] || error "END must be an integer, got '$end'"
 
 str_len=${#string}
 
@@ -20,8 +27,7 @@ if [ "$end" -lt 0 ]; then
 fi
 
 if [ "$start" -lt 0 ] || [ "$end" -lt 0 ] || [ "$start" -gt "$end" ] || [ "$start" -ge "$str_len" ]; then
-  echo "Error: Invalid position values"
-  exit 1
+  error "Invalid position values"
 fi
 
 length=$((end - start))
