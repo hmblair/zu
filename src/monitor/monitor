@@ -6,9 +6,6 @@
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/../common"
 
-# Configuration
-EXTERNAL_MOUNT="/mnt/external"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,32 +55,27 @@ cmd_monitor() {
 
     # Get all stats in a single SSH call (value|percentage format)
     local stats
-    stats=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "
+    stats=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" '
         # CPU usage
-        cpu=\$(top -bn1 2>/dev/null | grep 'Cpu(s)' | awk '{print \$2}')
-        if [[ -z \"\$cpu\" ]]; then
-            cpu=\$(top -bn1 2>/dev/null | grep '%Cpu' | awk '{print \$2}')
+        cpu=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk "{print \$2}")
+        if [[ -z "$cpu" ]]; then
+            cpu=$(top -bn1 2>/dev/null | grep "%Cpu" | awk "{print \$2}")
         fi
-        [[ -z \"\$cpu\" ]] && echo 'cpu:N/A|0' || echo \"cpu:\${cpu}%|\$cpu\"
+        [[ -z "$cpu" ]] && echo "cpu:N/A|0" || echo "cpu:${cpu}%|$cpu"
 
         # Memory usage (used / total in GB)
-        free -b 2>/dev/null | awk '/^Mem:/ {
+        free -b 2>/dev/null | awk "/^Mem:/ {
             used=\$3/1073741824; total=\$2/1073741824; pct=\$3/\$2*100
             printf \"mem:%.2f / %.2f GB|%.0f\n\", used, total, pct
-        }' || echo 'mem:N/A|0'
+        }" || echo "mem:N/A|0"
 
-        # Root storage usage (used / total in GB)
-        df -B1 / 2>/dev/null | awk 'NR==2 {
+        # All mounted filesystems (excluding virtual filesystems)
+        df -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | awk "NR>1 {
+            mount=\$6
             used=\$3/1073741824; total=\$2/1073741824; pct=\$3/\$2*100
-            printf \"storage:%.2f / %.2f GB|%.0f\n\", used, total, pct
-        }' || echo 'storage:N/A|0'
-
-        # External storage usage (used / total in GB)
-        df -B1 $EXTERNAL_MOUNT 2>/dev/null | awk 'NR==2 {
-            used=\$3/1073741824; total=\$2/1073741824; pct=\$3/\$2*100
-            printf \"external:%.2f / %.2f GB|%.0f\n\", used, total, pct
-        }' || echo 'external:N/A|0'
-    " 2>/dev/null)
+            printf \"disk:%s|%.2f / %.2f GB|%.0f\n\", mount, used, total, pct
+        }"
+    ' 2>/dev/null)
 
     if [[ -z "$stats" ]]; then
         error "Failed to retrieve stats from $host"
@@ -93,21 +85,28 @@ cmd_monitor() {
     echo "${BOLD}Server: ${CYAN}$host${NC}"
     echo "─────────────────────────────────────────"
 
-    # Parse results (value|percentage)
-    local cpu_val cpu_pct mem_val mem_pct storage_val storage_pct external_val external_pct
+    # Parse CPU and memory
+    local cpu_val cpu_pct mem_val mem_pct
     cpu_val=$(echo "$stats" | grep '^cpu:' | cut -d: -f2 | cut -d'|' -f1)
     cpu_pct=$(echo "$stats" | grep '^cpu:' | cut -d'|' -f2)
     mem_val=$(echo "$stats" | grep '^mem:' | cut -d: -f2 | cut -d'|' -f1)
     mem_pct=$(echo "$stats" | grep '^mem:' | cut -d'|' -f2)
-    storage_val=$(echo "$stats" | grep '^storage:' | cut -d: -f2 | cut -d'|' -f1)
-    storage_pct=$(echo "$stats" | grep '^storage:' | cut -d'|' -f2)
-    external_val=$(echo "$stats" | grep '^external:' | cut -d: -f2 | cut -d'|' -f1)
-    external_pct=$(echo "$stats" | grep '^external:' | cut -d'|' -f2)
 
     format_usage "CPU Usage:" "$cpu_val" "$cpu_pct"
     format_usage "Memory Usage:" "$mem_val" "$mem_pct"
-    format_usage "Storage Usage:" "$storage_val" "$storage_pct"
-    format_usage "External Usage:" "$external_val" "$external_pct"
+
+    # Parse and display all disks
+    echo "$stats" | grep '^disk:' | while IFS='|' read -r disk_info disk_val disk_pct; do
+        local mount="${disk_info#disk:}"
+        local label
+        if [[ "$mount" == "/" ]]; then
+            label="Disk (/):"
+        else
+            # Use the last component of the mount path as label
+            label="Disk (${mount##*/}):"
+        fi
+        format_usage "$label" "$disk_val" "$disk_pct"
+    done
     echo ""
 }
 
