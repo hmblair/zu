@@ -1159,7 +1159,12 @@ cmd_mount() {
                 if [[ -z "$NAME" ]]; then
                     NAME="$1"
                 elif [[ -z "$ARCHIVE" ]]; then
-                    ARCHIVE="$1"
+                    # If it looks like a path, treat as mountpoint not archive
+                    if [[ "$1" == /* || "$1" == ./* || "$1" == ../* ]]; then
+                        MOUNTPOINT="$1"
+                    else
+                        ARCHIVE="$1"
+                    fi
                 elif [[ -z "$MOUNTPOINT" ]]; then
                     MOUNTPOINT="$1"
                 else
