@@ -33,6 +33,8 @@ usage() {
     echo "  test [name]                      Test backup connectivity and paths"
     echo "  archives <name>                  List backup archives (snapshots)"
     echo "  files <name> [archive] [opts]    List files in an archive"
+    echo "  mount <name> [archive] [path]    Mount archive for browsing (requires macFUSE)"
+    echo "  unmount <name>                   Unmount a mounted archive"
     echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
     echo "  remove <name>                    Remove a backup and its schedule"
@@ -1140,6 +1142,167 @@ cmd_files() {
     echo ""
 }
 
+cmd_mount() {
+    check_setup
+
+    local NAME=""
+    local ARCHIVE=""
+    local MOUNTPOINT=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                if [[ -z "$NAME" ]]; then
+                    NAME="$1"
+                elif [[ -z "$ARCHIVE" ]]; then
+                    ARCHIVE="$1"
+                elif [[ -z "$MOUNTPOINT" ]]; then
+                    MOUNTPOINT="$1"
+                else
+                    error "Too many arguments"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$NAME" ]]; then
+        error "Usage: bkup mount <name> [archive] [mountpoint]"
+    fi
+
+    if ! config_exists "$NAME"; then
+        error "Backup '$NAME' not found"
+    fi
+
+    load_config "$NAME"
+
+    export BORG_PASSPHRASE=$(<"$PASS_FILE")
+    local REPO="$REMOTE_USER@$HOST:$HOST_DIR"
+
+    # Check if borg mount is available (requires FUSE)
+    if ! /opt/homebrew/bin/borg mount --help &>/dev/null; then
+        error "borg mount not available. Install macFUSE: brew install macfuse"
+    fi
+
+    # If no archive specified, use latest
+    if [[ -z "$ARCHIVE" ]]; then
+        info "Finding latest archive..."
+        ARCHIVE=$(/opt/homebrew/bin/borg list --last 1 --format '{archive}' "$REPO" 2>&1)
+        if [[ $? -ne 0 ]]; then
+            echo "$ARCHIVE" >&2
+            error "Failed to list archives"
+        fi
+        if [[ -z "$ARCHIVE" ]]; then
+            error "No archives found in repository"
+        fi
+        echo "Using archive: $ARCHIVE"
+    fi
+
+    # Verify archive exists
+    info "Verifying archive '$ARCHIVE'..."
+    local archive_check
+    archive_check=$(/opt/homebrew/bin/borg info "$REPO::$ARCHIVE" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo "$archive_check" >&2
+        error "Archive '$ARCHIVE' not found or inaccessible"
+    fi
+
+    # Default mountpoint
+    if [[ -z "$MOUNTPOINT" ]]; then
+        MOUNTPOINT="/tmp/bkup-$NAME"
+    fi
+
+    # Check if already mounted
+    if mount | grep -q "on $MOUNTPOINT "; then
+        error "Something is already mounted at $MOUNTPOINT. Run 'bkup unmount $NAME' first."
+    fi
+
+    # Create mountpoint if needed
+    if [[ ! -d "$MOUNTPOINT" ]]; then
+        info "Creating mountpoint $MOUNTPOINT..."
+        if ! mkdir -p "$MOUNTPOINT"; then
+            error "Failed to create mountpoint: $MOUNTPOINT"
+        fi
+    fi
+
+    # Check mountpoint is empty
+    if [[ -n "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
+        error "Mountpoint is not empty: $MOUNTPOINT"
+    fi
+
+    # Mount the archive
+    info "Mounting $NAME::$ARCHIVE to $MOUNTPOINT..."
+    local mount_output
+    mount_output=$(/opt/homebrew/bin/borg mount "$REPO::$ARCHIVE" "$MOUNTPOINT" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo "$mount_output" >&2
+        error "Failed to mount archive"
+    fi
+
+    # Verify mount succeeded
+    if ! mount | grep -q "on $MOUNTPOINT "; then
+        error "Mount command succeeded but $MOUNTPOINT is not mounted"
+    fi
+
+    echo ""
+    success "Mounted at $MOUNTPOINT"
+    echo ""
+    echo "Browse with:  l $MOUNTPOINT"
+    echo "Unmount with: bkup unmount $NAME"
+}
+
+cmd_unmount() {
+    local NAME="$1"
+
+    if [[ -z "$NAME" ]]; then
+        error "Usage: bkup unmount <name>"
+    fi
+
+    local MOUNTPOINT="/tmp/bkup-$NAME"
+
+    # Check if mounted
+    if ! mount | grep -q "on $MOUNTPOINT "; then
+        # Check if mountpoint exists but is stale
+        if [[ -d "$MOUNTPOINT" ]]; then
+            info "Mountpoint exists but is not mounted. Cleaning up..."
+            rmdir "$MOUNTPOINT" 2>/dev/null
+            success "Cleaned up stale mountpoint"
+            return 0
+        fi
+        error "Nothing mounted at $MOUNTPOINT"
+    fi
+
+    info "Unmounting $MOUNTPOINT..."
+
+    # Try fusermount first (Linux), then umount (macOS)
+    local unmount_output
+    if command -v fusermount &>/dev/null; then
+        unmount_output=$(fusermount -u "$MOUNTPOINT" 2>&1)
+    else
+        unmount_output=$(umount "$MOUNTPOINT" 2>&1)
+    fi
+
+    if [[ $? -ne 0 ]]; then
+        echo "$unmount_output" >&2
+        echo ""
+        echo "If the mount is busy, try:"
+        echo "  - Close any terminals or programs using $MOUNTPOINT"
+        echo "  - Run: umount -f $MOUNTPOINT"
+        error "Failed to unmount"
+    fi
+
+    # Clean up mountpoint
+    if [[ -d "$MOUNTPOINT" ]]; then
+        rmdir "$MOUNTPOINT" 2>/dev/null
+    fi
+
+    success "Unmounted $MOUNTPOINT"
+}
+
 cmd_test() {
     check_setup
 
@@ -1454,6 +1617,13 @@ case "${1:-}" in
     files)
         shift
         cmd_files "$@"
+        ;;
+    mount)
+        shift
+        cmd_mount "$@"
+        ;;
+    unmount)
+        cmd_unmount "$2"
         ;;
     status)
         cmd_status

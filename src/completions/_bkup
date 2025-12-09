@@ -11,6 +11,8 @@ _bkup() {
         'test:Test backup connectivity and paths'
         'archives:List backup archives (snapshots)'
         'files:List files in an archive'
+        'mount:Mount archive for browsing'
+        'unmount:Unmount a mounted archive'
         'status:Show last run status of all backups'
         'list:List all backup configurations'
         'remove:Remove a backup and its schedule'
@@ -32,7 +34,7 @@ _bkup() {
             ;;
         args)
             case $words[1] in
-                edit|copy|run|test|remove|reset|archives)
+                edit|copy|run|test|remove|reset|archives|mount|unmount)
                     if [[ -d "$backup_dir" ]]; then
                         backups=(${backup_dir}/*.json(:t:r))
                         _describe -t backups 'backup name' backups
