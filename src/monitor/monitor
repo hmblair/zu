@@ -117,8 +117,14 @@ cmd_monitor() {
         # Running processes
         ps aux 2>/dev/null | wc -l | awk "{printf \"procs:%d\n\", \$1-1}" || echo "procs:N/A"
 
-        # Logged in users
-        who 2>/dev/null | wc -l | awk "{printf \"users:%d\n\", \$1}" || echo "users:N/A"
+        # Logged in users (unique names)
+        users=$(who 2>/dev/null | awk "{print \$1}" | sort -u | tr "\n" " " | sed "s/ *$//")
+        count=$(echo "$users" | wc -w | tr -d " ")
+        if [[ -z "$users" || "$count" -eq 0 ]]; then
+            echo "users:none"
+        else
+            echo "users:$users ($count)"
+        fi
 
         # Network I/O (total bytes since boot)
         cat /proc/net/dev 2>/dev/null | awk "
