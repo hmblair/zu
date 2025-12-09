@@ -341,7 +341,7 @@ print_list() {
     local -a items=()
     while IFS= read -r item; do
         [[ -n "$item" ]] && items+=("$item")
-    done < <(/usr/bin/find "${dir:A}" "${find_args[@]}" 2>/dev/null | /usr/bin/tail -n +2)
+    done < <(/usr/bin/find "${dir:A}" "${find_args[@]}" 2>/dev/null | /usr/bin/tail -n +2 | /usr/bin/sort)
 
     # Apply sorting if requested
     if [[ -n "$SORT_BY" ]]; then
