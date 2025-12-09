@@ -13,6 +13,7 @@ usage() {
 Usage: whereami [command]
 
 Output user@host:path for easy rsync/scp usage.
+Run on a remote server, then paste the output into a local command.
 
 Commands:
   (none)    Print user@host:path
@@ -21,9 +22,12 @@ Commands:
   reset     Remove configuration
 
 Examples:
-  whereami                    # Outputs: user@hpc.university.edu:/path/to/cwd
-  whereami setup              # Configure DNS interactively
-  rsync file.txt \$(whereami) # Copy file to current remote directory
+  whereami          # Outputs: user@hpc.edu:/home/user/project
+  whereami | copy   # Copy to clipboard (with OSC 52 over SSH)
+  whereami setup    # Configure DNS name for this machine
+
+  # Then on your local machine:
+  rsync file.txt user@hpc.edu:/home/user/project
 EOF
 }
 
