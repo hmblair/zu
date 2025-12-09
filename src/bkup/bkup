@@ -36,7 +36,7 @@ usage() {
     echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
     echo "  remove <name>                    Remove a backup and its schedule"
-    echo "  reset <name>                     Reload schedule (fixes timezone drift)"
+    echo "  reset <name...>                  Reload schedule (fixes timezone drift)"
     echo "  uninstall                        Remove passphrase and all backups"
     echo ""
     echo "Add options:"
@@ -1352,37 +1352,38 @@ cmd_remove() {
 }
 
 cmd_reset() {
-    local NAME="$1"
-
-    if [[ -z "$NAME" ]]; then
-        error "Usage: bkup reset <name>"
+    if [[ $# -eq 0 ]]; then
+        error "Usage: bkup reset <name> [name...]"
     fi
 
-    if ! config_exists "$NAME"; then
-        error "Backup '$NAME' not found."
-    fi
+    for NAME in "$@"; do
+        if ! config_exists "$NAME"; then
+            echo "${RED}Backup '$NAME' not found, skipping${NC}"
+            continue
+        fi
 
-    local config_file="$(config_path "$NAME")"
-    local label="$(plist_label "$NAME")"
-    local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
-    local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
+        local config_file="$(config_path "$NAME")"
+        local label="$(plist_label "$NAME")"
+        local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
+        local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
 
-    info "Resetting schedule for '$NAME'..."
+        info "Resetting schedule for '$NAME'..."
 
-    # Unload existing plist if present
-    if zu_service_exists "$label"; then
-        zu_service_unload "$label"
-    fi
+        # Unload existing plist if present
+        if zu_service_exists "$label"; then
+            zu_service_unload "$label"
+        fi
 
-    # Recreate and load plist
-    zu_service_create "$label" "$SCRIPT_PATH" \
-        --args "run" "$NAME" \
-        --type "calendar:${HOUR}:${MINUTE}" \
-        --log "/tmp/bkup-$NAME.log" \
-        --env "HOME=$HOME" "USER=$USER"
-    zu_service_load "$label"
+        # Recreate and load plist
+        zu_service_create "$label" "$SCRIPT_PATH" \
+            --args "run" "$NAME" \
+            --type "calendar:${HOUR}:${MINUTE}" \
+            --log "/tmp/bkup-$NAME.log" \
+            --env "HOME=$HOME" "USER=$USER"
+        zu_service_load "$label"
 
-    success "Schedule reset to $(printf '%02d:%02d' $HOUR $MINUTE)"
+        success "Schedule reset to $(printf '%02d:%02d' $HOUR $MINUTE)"
+    done
 }
 
 cmd_uninstall() {
@@ -1462,7 +1463,8 @@ case "${1:-}" in
         cmd_remove "$2"
         ;;
     reset)
-        cmd_reset "$2"
+        shift
+        cmd_reset "$@"
         ;;
     uninstall)
         cmd_uninstall
