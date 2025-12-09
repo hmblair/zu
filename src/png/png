@@ -16,12 +16,14 @@ Supported formats: jpeg, jpg, gif, tiff, bmp, pdf, heic, webp
 
 Options:
   -o, --output <dir>   Output directory (default: same as input)
-  -q, --quality <val>  Quality for lossy sources (default: best)
+  -s, --size <pixels>  Max dimension in pixels (default: 2000 for PDF, original for images)
   -h, --help           Show this help
 
 Examples:
-  png photo.jpg              # Creates photo.png
-  png scan.pdf               # Creates scan.png (first page)
+  png photo.jpg              # Creates photo.png (original size)
+  png scan.pdf               # Creates scan.png (2000px)
+  png -s 4000 doc.pdf        # Higher resolution PDF
+  png -s 800 *.heic          # Resize images to max 800px
   png -o ~/Desktop *.heic    # Convert all HEIC to Desktop
 EOF
 }
@@ -29,6 +31,7 @@ EOF
 convert_file() {
     local input="$1"
     local output_dir="$2"
+    local size="$3"
 
     if [[ ! -f "$input" ]]; then
         warn "File not found: $input"
@@ -49,8 +52,9 @@ convert_file() {
     case "$ext" in
         pdf)
             # Use qlmanage (Quick Look) for PDF - built into macOS
+            local pdf_size="${size:-2000}"
             local tmpdir=$(mktemp -d)
-            qlmanage -t -s 2000 -o "$tmpdir" "$input" &>/dev/null
+            qlmanage -t -s "$pdf_size" -o "$tmpdir" "$input" &>/dev/null
             local preview="$tmpdir/${input:t}.png"
             if [[ -f "$preview" ]]; then
                 mv "$preview" "$output"
@@ -63,7 +67,12 @@ convert_file() {
             ;;
         jpg|jpeg|gif|tiff|tif|bmp|heic|heif|webp|png)
             # Use sips for image formats - built into macOS
-            sips -s format png "$input" --out "$output" &>/dev/null
+            if [[ -n "$size" ]]; then
+                # Resize to fit within size (maintains aspect ratio)
+                sips -s format png -Z "$size" "$input" --out "$output" &>/dev/null
+            else
+                sips -s format png "$input" --out "$output" &>/dev/null
+            fi
             if [[ $? -ne 0 ]]; then
                 warn "Failed to convert: $input"
                 return 1
@@ -81,12 +90,17 @@ convert_file() {
 
 main() {
     local output_dir=""
+    local size=""
     local files=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -o|--output)
                 output_dir="$2"
+                shift 2
+                ;;
+            -s|--size)
+                size="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -116,7 +130,7 @@ main() {
         [[ "$dir" == "." ]] && dir="$(pwd)"
         mkdir -p "$dir"
 
-        if convert_file "$file" "$dir"; then
+        if convert_file "$file" "$dir" "$size"; then
             ((success++))
         else
             ((failed++))
