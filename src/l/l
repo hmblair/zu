@@ -182,7 +182,7 @@ sort_files() {
             ;;
     esac
 
-    if (( SORT_REVERSE )) && [[ -n "$SORT_BY" ]]; then
+    if (( SORT_REVERSE )); then
         # Reverse the array
         local -a reversed=()
         local i
@@ -311,7 +311,7 @@ print_dir() {
     fi
 
     # Apply sorting if requested
-    if [[ -n "$SORT_BY" ]]; then
+    if [[ -n "$SORT_BY" ]] || (( SORT_REVERSE )); then
         local -a sorted_files=()
         while IFS= read -r f; do
             [[ -n "$f" ]] && sorted_files+=("$f")
@@ -345,7 +345,7 @@ print_list() {
     done < <(/usr/bin/find "${dir:A}" "${find_args[@]}" 2>/dev/null | /usr/bin/tail -n +2 | /usr/bin/sort)
 
     # Apply sorting if requested
-    if [[ -n "$SORT_BY" ]]; then
+    if [[ -n "$SORT_BY" ]] || (( SORT_REVERSE )); then
         local -a sorted_items=()
         while IFS= read -r f; do
             [[ -n "$f" ]] && sorted_items+=("$f")
