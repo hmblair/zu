@@ -53,9 +53,14 @@ link_completions() {
 }
 
 if [[ -w "$SITE_FUNCTIONS" || -w "${SITE_FUNCTIONS:h}" ]] && [[ " $fpath " == *" $SITE_FUNCTIONS "* ]]; then
+    # System location is writable and in fpath
     link_completions "$SITE_FUNCTIONS"
-elif [[ " $fpath " == *" $USER_SITE_FUNCTIONS "* ]]; then
+elif [[ -d "$USER_SITE_FUNCTIONS" ]] || [[ " $fpath " == *" $USER_SITE_FUNCTIONS "* ]]; then
+    # User location exists or is in fpath
     link_completions "$USER_SITE_FUNCTIONS"
+    if [[ " $fpath " != *" $USER_SITE_FUNCTIONS "* ]]; then
+        echo "Note: Add to ~/.zshrc:  fpath=($USER_SITE_FUNCTIONS \$fpath)"
+    fi
 else
     # Create user dir and link there
     link_completions "$USER_SITE_FUNCTIONS"
