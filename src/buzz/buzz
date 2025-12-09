@@ -31,7 +31,10 @@ EOF
 }
 
 is_running() {
-    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    [[ -f "$PID_FILE" ]] || return 1
+    local pid=$(cat "$PID_FILE")
+    # Check if the PID is actually caffeinate (not a reused PID)
+    ps -p "$pid" -o comm= 2>/dev/null | grep -q caffeinate
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
