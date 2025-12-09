@@ -168,15 +168,16 @@ cmd_monitor() {
     echo "─────────────────────────────────────────"
 
     # System health
+    echo " ${BOLD}System${NC}"
     format_stat "Uptime:" "$uptime_val"
     format_usage "Load:" "$load_val" "$load_pct"
     format_usage "Memory:" "$mem_val" "$mem_pct"
     format_usage "Swap:" "$swap_val" "$swap_pct"
     format_usage "Temperature:" "$temp_val" "$temp_pct" 60 80
 
-    echo ""
-
     # Disks
+    echo ""
+    echo " ${BOLD}Storage${NC}"
     local mount label
     while IFS='|' read -r disk_info disk_val disk_pct; do
         mount="${disk_info#disk:}"
@@ -188,9 +189,9 @@ cmd_monitor() {
         format_usage "$label" "$disk_val" "$disk_pct"
     done < <(echo "$stats" | grep '^disk:')
 
-    echo ""
-
     # Activity
+    echo ""
+    echo " ${BOLD}Activity${NC}"
     format_stat "Processes:" "$procs_val"
     format_stat "Users:" "$users_val"
     format_stat "Network (rx/tx):" "$net_val"
