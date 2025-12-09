@@ -5,21 +5,32 @@ source $PARENT/common
 
 DIRS=("$SCDIR" "$DLDIR" "$HOME/.trash")
 
+# Filter to only existing directories
+existing_dirs=()
+for dir in "${DIRS[@]}"; do
+  [[ -d "$dir" ]] && existing_dirs+=("$dir")
+done
+
+if [[ ${#existing_dirs[@]} -eq 0 ]]; then
+  echo "No directories to clean."
+  exit 0
+fi
+
 total-size() {
-  du -hscL $@ | tail -n1 | awk '{print $1}'
+  du -hscL "$@" 2>/dev/null | tail -n1 | awk '{print $1}'
 }
 
-size=$(total-size "${DIRS[@]}")
+size=$(total-size "${existing_dirs[@]}")
 echo "The following ($size) will be removed:"
-for dir in "${DIRS[@]}"; do
+for dir in "${existing_dirs[@]}"; do
   l --depth 2 "$dir"
 done
 echo -n "Are you sure? (y/n): "
 read choice
 case "$choice" in
     y|Y|yes|YES ) ;;
-    * ) echo "Aborting."; return 1;;
+    * ) echo "Aborting."; exit 1;;
 esac
-for dir in "${DIRS[@]}"; do
+for dir in "${existing_dirs[@]}"; do
   rm -rf "$dir"/*(N)
 done
