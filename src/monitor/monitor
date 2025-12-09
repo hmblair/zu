@@ -96,7 +96,7 @@ cmd_monitor() {
     format_usage "Memory Usage:" "$mem_val" "$mem_pct"
 
     # Parse and display all disks
-    echo "$stats" | grep '^disk:' | while IFS='|' read -r disk_info disk_val disk_pct; do
+    while IFS='|' read -r disk_info disk_val disk_pct; do
         local mount="${disk_info#disk:}"
         local label
         if [[ "$mount" == "/" ]]; then
@@ -106,7 +106,7 @@ cmd_monitor() {
             label="Disk (${mount##*/}):"
         fi
         format_usage "$label" "$disk_val" "$disk_pct"
-    done
+    done < <(echo "$stats" | grep '^disk:')
     echo ""
 }
 
