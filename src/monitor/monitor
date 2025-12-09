@@ -13,17 +13,19 @@ source "$SCRIPT_DIR/../common"
 usage() {
     echo "Usage: monitor <host>"
     echo ""
-    echo "Shows CPU, memory, and storage usage for a remote server."
+    echo "Shows system health and activity for a remote server."
     echo ""
-    echo "Arguments:"
-    echo "  host    SSH hostname (e.g., ssh.example.com)"
+    echo "Displays:"
+    echo "  - Uptime, load average, CPU, memory, swap, temperature"
+    echo "  - All mounted disks"
+    echo "  - Process count, logged in users, network I/O"
     echo ""
     echo "Examples:"
     echo "  monitor ssh.hmblair.com"
     echo "  monitor user@server.local"
 }
 
-# Format usage line with color based on percentage
+# Format line with color based on percentage thresholds
 format_usage() {
     local label="$1"
     local value="$2"
@@ -32,13 +34,20 @@ format_usage() {
     local crit="${5:-90}"
 
     local color="$GREEN"
-    if [[ "$pct" != "N/A" ]]; then
+    if [[ "$pct" != "N/A" && -n "$pct" ]]; then
         local num="${pct%.*}"
         [[ $num -ge $crit ]] && color="$RED"
         [[ $num -ge $warn && $num -lt $crit ]] && color="$YELLOW"
     fi
 
     printf " %-21s ${color}%s${NC}\n" "$label" "$value"
+}
+
+# Format line without percentage coloring
+format_stat() {
+    local label="$1"
+    local value="$2"
+    printf " %-21s ${CYAN}%s${NC}\n" "$label" "$value"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +65,13 @@ cmd_monitor() {
     # Get all stats in a single SSH call (value|percentage format)
     local stats
     stats=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" '
+        # Uptime
+        uptime -p 2>/dev/null | sed "s/^up //" || uptime | sed "s/.*up //" | sed "s/,.*$//"
+        echo "---"
+
+        # Load average
+        cat /proc/loadavg 2>/dev/null | awk "{printf \"load:%s %s %s\n\", \$1, \$2, \$3}" || echo "load:N/A"
+
         # CPU usage
         cpu=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk "{print \$2}")
         if [[ -z "$cpu" ]]; then
@@ -69,44 +85,118 @@ cmd_monitor() {
             printf \"mem:%.2f / %.2f GB|%.0f\n\", used, total, pct
         }" || echo "mem:N/A|0"
 
+        # Swap usage
+        free -b 2>/dev/null | awk "/^Swap:/ {
+            if (\$2 > 0) {
+                used=\$3/1073741824; total=\$2/1073741824; pct=\$3/\$2*100
+                printf \"swap:%.2f / %.2f GB|%.0f\n\", used, total, pct
+            } else {
+                print \"swap:disabled|0\"
+            }
+        }" || echo "swap:N/A|0"
+
+        # CPU temperature (try different sensor paths)
+        temp=""
+        for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp1_input; do
+            if [[ -r "$f" ]]; then
+                t=$(cat "$f" 2>/dev/null)
+                if [[ -n "$t" && "$t" -gt 0 ]]; then
+                    temp=$((t / 1000))
+                    break
+                fi
+            fi
+        done
+        [[ -n "$temp" ]] && echo "temp:${temp}°C|$temp" || echo "temp:N/A|0"
+
         # All mounted filesystems (excluding virtual/boot filesystems)
         df -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x vfat 2>/dev/null | awk "NR>1 {
             mount=\$6
             used=\$3/1073741824; total=\$2/1073741824; pct=\$3/\$2*100
             printf \"disk:%s|%.2f / %.2f GB|%.0f\n\", mount, used, total, pct
         }"
+
+        # Running processes
+        ps aux 2>/dev/null | wc -l | awk "{printf \"procs:%d\n\", \$1-1}" || echo "procs:N/A"
+
+        # Logged in users
+        who 2>/dev/null | wc -l | awk "{printf \"users:%d\n\", \$1}" || echo "users:N/A"
+
+        # Network I/O (total bytes since boot)
+        cat /proc/net/dev 2>/dev/null | awk "
+            BEGIN { rx=0; tx=0 }
+            /^ *(eth|en|wl|ens|enp)/ {
+                gsub(/:/, \"\", \$1)
+                rx += \$2
+                tx += \$10
+            }
+            END {
+                if (rx > 1073741824) { rx_val = rx/1073741824; rx_unit = \"GB\" }
+                else if (rx > 1048576) { rx_val = rx/1048576; rx_unit = \"MB\" }
+                else { rx_val = rx/1024; rx_unit = \"KB\" }
+                if (tx > 1073741824) { tx_val = tx/1073741824; tx_unit = \"GB\" }
+                else if (tx > 1048576) { tx_val = tx/1048576; tx_unit = \"MB\" }
+                else { tx_val = tx/1024; tx_unit = \"KB\" }
+                printf \"net:%.1f %s / %.1f %s\n\", rx_val, rx_unit, tx_val, tx_unit
+            }
+        " || echo "net:N/A"
     ' 2>/dev/null)
 
     if [[ -z "$stats" ]]; then
         error "Failed to retrieve stats from $host"
     fi
 
-    echo ""
-    echo "${BOLD}Server: ${CYAN}$host${NC}"
-    echo "─────────────────────────────────────────"
+    # Parse uptime (first line before ---)
+    local uptime_val
+    uptime_val=$(echo "$stats" | head -1)
 
-    # Parse CPU and memory
-    local cpu_val cpu_pct mem_val mem_pct
+    # Parse all other stats
+    local load_val cpu_val cpu_pct mem_val mem_pct swap_val swap_pct temp_val temp_pct
+    local procs_val users_val net_val
+    load_val=$(echo "$stats" | grep '^load:' | cut -d: -f2)
     cpu_val=$(echo "$stats" | grep '^cpu:' | cut -d: -f2 | cut -d'|' -f1)
     cpu_pct=$(echo "$stats" | grep '^cpu:' | cut -d'|' -f2)
     mem_val=$(echo "$stats" | grep '^mem:' | cut -d: -f2 | cut -d'|' -f1)
     mem_pct=$(echo "$stats" | grep '^mem:' | cut -d'|' -f2)
+    swap_val=$(echo "$stats" | grep '^swap:' | cut -d: -f2 | cut -d'|' -f1)
+    swap_pct=$(echo "$stats" | grep '^swap:' | cut -d'|' -f2)
+    temp_val=$(echo "$stats" | grep '^temp:' | cut -d: -f2 | cut -d'|' -f1)
+    temp_pct=$(echo "$stats" | grep '^temp:' | cut -d'|' -f2)
+    procs_val=$(echo "$stats" | grep '^procs:' | cut -d: -f2)
+    users_val=$(echo "$stats" | grep '^users:' | cut -d: -f2)
+    net_val=$(echo "$stats" | grep '^net:' | cut -d: -f2)
 
+    echo ""
+    echo "${BOLD}Server: ${CYAN}$host${NC}"
+    echo "─────────────────────────────────────────"
+
+    # System health
+    format_stat "Uptime:" "$uptime_val"
+    format_stat "Load Average:" "$load_val"
     format_usage "CPU Usage:" "$cpu_val" "$cpu_pct"
-    format_usage "Memory Usage:" "$mem_val" "$mem_pct"
+    format_usage "Memory:" "$mem_val" "$mem_pct"
+    format_usage "Swap:" "$swap_val" "$swap_pct"
+    format_usage "Temperature:" "$temp_val" "$temp_pct" 60 80
 
-    # Parse and display all disks
+    echo ""
+
+    # Disks
     local mount label
     while IFS='|' read -r disk_info disk_val disk_pct; do
         mount="${disk_info#disk:}"
         if [[ "$mount" == "/" ]]; then
             label="Disk (/):"
         else
-            # Use the last component of the mount path as label
             label="Disk (${mount##*/}):"
         fi
         format_usage "$label" "$disk_val" "$disk_pct"
     done < <(echo "$stats" | grep '^disk:')
+
+    echo ""
+
+    # Activity
+    format_stat "Processes:" "$procs_val"
+    format_stat "Users:" "$users_val"
+    format_stat "Network (rx/tx):" "$net_val"
     echo ""
 }
 
