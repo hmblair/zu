@@ -69,8 +69,8 @@ cmd_monitor() {
             printf \"mem:%.2f / %.2f GB|%.0f\n\", used, total, pct
         }" || echo "mem:N/A|0"
 
-        # All mounted filesystems (excluding virtual filesystems)
-        df -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | awk "NR>1 {
+        # All mounted filesystems (excluding virtual/boot filesystems)
+        df -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x vfat 2>/dev/null | awk "NR>1 {
             mount=\$6
             used=\$3/1073741824; total=\$2/1073741824; pct=\$3/\$2*100
             printf \"disk:%s|%.2f / %.2f GB|%.0f\n\", mount, used, total, pct
