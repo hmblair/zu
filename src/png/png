@@ -1,0 +1,133 @@
+#!/usr/bin/env zsh
+
+# png - Convert images and PDFs to PNG format
+# Uses macOS built-in tools (sips, qlmanage) - no dependencies
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+usage() {
+    cat << EOF
+Usage: png <file>...
+
+Convert images and PDFs to PNG format.
+
+Supported formats: jpeg, jpg, gif, tiff, bmp, pdf, heic, webp
+
+Options:
+  -o, --output <dir>   Output directory (default: same as input)
+  -q, --quality <val>  Quality for lossy sources (default: best)
+  -h, --help           Show this help
+
+Examples:
+  png photo.jpg              # Creates photo.png
+  png scan.pdf               # Creates scan.png (first page)
+  png -o ~/Desktop *.heic    # Convert all HEIC to Desktop
+EOF
+}
+
+convert_file() {
+    local input="$1"
+    local output_dir="$2"
+
+    if [[ ! -f "$input" ]]; then
+        warn "File not found: $input"
+        return 1
+    fi
+
+    local basename="${input:t:r}"
+    local ext="${input:e:l}"
+    local output="${output_dir}/${basename}.png"
+
+    # Handle name collision
+    local counter=1
+    while [[ -f "$output" ]]; do
+        output="${output_dir}/${basename}-${counter}.png"
+        ((counter++))
+    done
+
+    case "$ext" in
+        pdf)
+            # Use qlmanage (Quick Look) for PDF - built into macOS
+            local tmpdir=$(mktemp -d)
+            qlmanage -t -s 2000 -o "$tmpdir" "$input" &>/dev/null
+            local preview="$tmpdir/${input:t}.png"
+            if [[ -f "$preview" ]]; then
+                mv "$preview" "$output"
+                rm -rf "$tmpdir"
+            else
+                rm -rf "$tmpdir"
+                warn "Failed to convert: $input"
+                return 1
+            fi
+            ;;
+        jpg|jpeg|gif|tiff|tif|bmp|heic|heif|webp|png)
+            # Use sips for image formats - built into macOS
+            sips -s format png "$input" --out "$output" &>/dev/null
+            if [[ $? -ne 0 ]]; then
+                warn "Failed to convert: $input"
+                return 1
+            fi
+            ;;
+        *)
+            warn "Unsupported format: $ext"
+            return 1
+            ;;
+    esac
+
+    echo "${GREEN}✓${NC} ${input:t} → ${output:t}"
+    return 0
+}
+
+main() {
+    local output_dir=""
+    local files=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -o|--output)
+                output_dir="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                files+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        usage
+        exit 1
+    fi
+
+    local success=0
+    local failed=0
+
+    for file in "${files[@]}"; do
+        local dir="${output_dir:-${file:h}}"
+        [[ "$dir" == "." ]] && dir="$(pwd)"
+        mkdir -p "$dir"
+
+        if convert_file "$file" "$dir"; then
+            ((success++))
+        else
+            ((failed++))
+        fi
+    done
+
+    if [[ ${#files[@]} -gt 1 ]]; then
+        echo ""
+        [[ $success -gt 0 ]] && echo "Converted: $success"
+        [[ $failed -gt 0 ]] && echo "${YELLOW}Failed: $failed${NC}"
+    fi
+}
+
+main "$@"
