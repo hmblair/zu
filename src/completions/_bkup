@@ -9,6 +9,8 @@ _bkup() {
         'copy:Copy a backup as a new one'
         'run:Run a backup manually'
         'test:Test backup connectivity and paths'
+        'archives:List backup archives (snapshots)'
+        'files:List files in an archive'
         'status:Show last run status of all backups'
         'list:List all backup configurations'
         'remove:Remove a backup and its schedule'
@@ -29,8 +31,18 @@ _bkup() {
             ;;
         args)
             case $words[1] in
-                edit|copy|run|test|remove)
+                edit|copy|run|test|remove|archives)
                     if [[ -d "$backup_dir" ]]; then
+                        backups=(${backup_dir}/*.json(:t:r))
+                        _describe -t backups 'backup name' backups
+                    fi
+                    ;;
+                files)
+                    _arguments \
+                        '1:backup name:->backup' \
+                        '2:archive name:' \
+                        '(-p --path)'{-p,--path}'[Filter by path pattern]:pattern:'
+                    if [[ $state == backup ]] && [[ -d "$backup_dir" ]]; then
                         backups=(${backup_dir}/*.json(:t:r))
                         _describe -t backups 'backup name' backups
                     fi
