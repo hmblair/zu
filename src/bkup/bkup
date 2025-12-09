@@ -33,7 +33,7 @@ usage() {
     echo "  test [name]                      Test backup connectivity and paths"
     echo "  archives <name>                  List backup archives (snapshots)"
     echo "  mount <name> [-a arch] [-m path]  Mount archive for browsing (requires macFUSE)"
-    echo "  unmount <name>                   Unmount a mounted archive"
+    echo "  unmount [name]                   Unmount archive (or all if no name)"
     echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
     echo "  remove <name>                    Remove a backup and its schedule"
@@ -1202,8 +1202,19 @@ cmd_mount() {
 cmd_unmount() {
     local NAME="$1"
 
+    # If no name provided, unmount all
     if [[ -z "$NAME" ]]; then
-        error "Usage: bkup unmount <name>"
+        local found=false
+        for mountpoint in /tmp/bkup-*; do
+            [[ -d "$mountpoint" ]] || continue
+            local backup_name="${mountpoint#/tmp/bkup-}"
+            found=true
+            cmd_unmount "$backup_name"
+        done
+        if ! $found; then
+            echo "No mounted backups found"
+        fi
+        return 0
     fi
 
     local MOUNTPOINT="/tmp/bkup-$NAME"
