@@ -26,10 +26,13 @@ typeset -A GITIGNORE_CACHE
 typeset -A SIZE_CACHE
 typeset -A LINECOUNT_CACHE
 
+# Italic for hidden files
+ITALIC="\033[3m"
+
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
     RED="" GREEN="" YELLOW="" BLUE="" CYAN="" WHITE="" GREY="" NC=""
-    YELLOW_B="" BOLD=""
+    YELLOW_B="" BOLD="" ITALIC=""
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,7 +261,11 @@ print_line() {
     fi
     char+="${NC}"
 
-    local out="${char}${colour}${icon} ${line:t}${NC}"
+    # Apply italic to hidden files
+    local style=""
+    [[ "${line:t}" == .* ]] && style="${ITALIC}"
+
+    local out="${char}${colour}${style}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
         local size="${SIZE_CACHE[$line]:-?}"
         out+=" ${GREY}(${size})${NC}"
