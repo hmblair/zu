@@ -1,5 +1,8 @@
 #!/usr/bin/env zsh
 
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/common"
+
 if [ $# -eq 0 ]; then
     echo "Usage: ${0:t} FILES"
     exit 1
@@ -7,8 +10,7 @@ fi
 
 for path in "$@"; do
     if [ ! -e "$path" ]; then
-        echo "Error: '$path' does not exist" >&2
-        exit 1
+        error "'$path' does not exist"
     fi
 done
 

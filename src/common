@@ -46,6 +46,124 @@ warn() {
 ST='\e[9m'
 NST='\e[0m'
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Encryption helpers (requires openssl)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Encrypt data using AES-256-CBC with PBKDF2
+# Usage: zu_encrypt <data> <password>
+zu_encrypt() {
+    local data="$1"
+    local password="$2"
+    printf '%s' "$data" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A
+}
+
+# Decrypt data using AES-256-CBC with PBKDF2
+# Usage: zu_decrypt <encrypted_file> <password>
+# Returns decrypted data on success, empty string on failure
+zu_decrypt() {
+    local file="$1"
+    local password="$2"
+    if [[ ! -f "$file" ]]; then
+        echo "{}"
+        return 0
+    fi
+    local decrypted
+    decrypted=$(cat "$file" | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A 2>/dev/null)
+    if [[ $? -ne 0 ]] || [[ -z "$decrypted" ]]; then
+        return 1
+    fi
+    printf '%s' "$decrypted"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Time and duration parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Parse time string (HH:MM) to minutes since midnight
+# Usage: zu_parse_time <time>
+zu_parse_time() {
+    local time="$1"
+    if ! [[ "$time" =~ ^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$ ]]; then
+        error "Invalid time format: $time (use HH:MM)"
+    fi
+    local hours="${time%%:*}"
+    local mins="${time##*:}"
+    # Remove leading zeros to avoid octal interpretation
+    hours=$((10#$hours))
+    mins=$((10#$mins))
+    echo $((hours * 60 + mins))
+}
+
+# Check if current time is within a schedule (HH:MM-HH:MM)
+# Usage: zu_is_schedule_active <schedule>
+zu_is_schedule_active() {
+    local schedule="$1"
+    local start="${schedule%%-*}"
+    local end="${schedule##*-}"
+
+    local start_mins=$(zu_parse_time "$start")
+    local end_mins=$(zu_parse_time "$end")
+    local now_mins=$(( $(date +%H) * 60 + $(date +%M) ))
+    # Remove leading zeros
+    now_mins=$((10#$now_mins))
+
+    if [[ $start_mins -le $end_mins ]]; then
+        # Normal range (e.g., 09:00-17:00)
+        [[ $now_mins -ge $start_mins && $now_mins -lt $end_mins ]]
+    else
+        # Crosses midnight (e.g., 22:00-06:00)
+        [[ $now_mins -ge $start_mins || $now_mins -lt $end_mins ]]
+    fi
+}
+
+# Parse duration string to seconds
+# Usage: zu_parse_duration <duration>
+# Supports: s (seconds), m (minutes), h (hours), d (days), w (weeks)
+zu_parse_duration() {
+    local duration="$1"
+    local value="${duration%[smhdw]}"
+    local unit="${duration: -1}"
+
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        error "Invalid duration format: $duration"
+    fi
+
+    case "$unit" in
+        s) echo $((value)) ;;
+        m) echo $((value * 60)) ;;
+        h) echo $((value * 3600)) ;;
+        d) echo $((value * 86400)) ;;
+        w) echo $((value * 604800)) ;;
+        *) error "Invalid duration unit: $unit (use s, m, h, d, or w)" ;;
+    esac
+}
+
+# Format seconds as human-readable duration
+# Usage: zu_format_duration <seconds>
+zu_format_duration() {
+    local seconds="$1"
+
+    if [[ $seconds -lt 0 ]]; then
+        echo "expired"
+        return
+    fi
+
+    local days=$((seconds / 86400))
+    local hours=$(((seconds % 86400) / 3600))
+    local minutes=$(((seconds % 3600) / 60))
+    local secs=$((seconds % 60))
+
+    local result=""
+    [[ $days -gt 0 ]] && result+="${days}d "
+    [[ $hours -gt 0 ]] && result+="${hours}h "
+    [[ $minutes -gt 0 ]] && result+="${minutes}m "
+    [[ $secs -gt 0 && $days -eq 0 && $hours -eq 0 ]] && result+="${secs}s"
+
+    echo "${result% }"
+}
+
 # Menu selector function
 
 function menu {

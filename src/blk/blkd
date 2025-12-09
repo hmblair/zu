@@ -4,6 +4,9 @@
 # Runs as root via launchd, manages pf firewall rules
 # Periodically verifies rules are in place and removes expired blocks
 
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,55 +45,18 @@ get_password() {
     tr -d '\n' < "$DAEMON_PASS_FILE" 2>/dev/null
 }
 
+# Wrappers for common functions
 decrypt_data() {
     local password="$1"
-    if [[ ! -f "$DATA_FILE" ]]; then
-        echo "{}"
-        return 0
-    fi
-    cat "$DATA_FILE" | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A 2>/dev/null
+    zu_decrypt "$DATA_FILE" "$password"
 }
 
 encrypt_data() {
-    local data="$1"
-    local password="$2"
-    printf '%s' "$data" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A
+    zu_encrypt "$@"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Schedule Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Parse time string (HH:MM) to minutes since midnight
-parse_time() {
-    local time="$1"
-    local hours="${time%%:*}"
-    local mins="${time##*:}"
-    # Remove leading zeros to avoid octal interpretation
-    hours=$((10#$hours))
-    mins=$((10#$mins))
-    echo $((hours * 60 + mins))
-}
-
-# Check if current time is within a schedule
 is_schedule_active() {
-    local schedule="$1"
-    local start="${schedule%%-*}"
-    local end="${schedule##*-}"
-
-    local start_mins=$(parse_time "$start")
-    local end_mins=$(parse_time "$end")
-    local now_mins=$(( $(date +%H) * 60 + $(date +%M) ))
-    # Remove leading zeros
-    now_mins=$((10#$now_mins))
-
-    if [[ $start_mins -le $end_mins ]]; then
-        # Normal range (e.g., 09:00-17:00)
-        [[ $now_mins -ge $start_mins && $now_mins -lt $end_mins ]]
-    else
-        # Crosses midnight (e.g., 22:00-06:00)
-        [[ $now_mins -ge $start_mins || $now_mins -lt $end_mins ]]
-    fi
+    zu_is_schedule_active "$@"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

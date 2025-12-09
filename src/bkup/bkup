@@ -89,12 +89,25 @@ load_config() {
         error "Backup '$name' not found. Run 'bkup list' to see available backups."
     fi
 
-    REMOTE_USER=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
-    HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
-    HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
-    LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
-    EXCLUDES=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
-    DIRS=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
+    # Load all config values in a single python3 call
+    local config_output
+    config_output=$(python3 -c "
+import json
+c = json.load(open('$config_file'))
+print(c['user'])
+print(c['host'])
+print(c['dest'])
+print(c['log_dir'])
+print('\x00'.join(c.get('excludes', [])))
+print('\x00'.join(c['dirs']))
+")
+    local -a lines=("${(@f)config_output}")
+    REMOTE_USER="${lines[1]}"
+    HOST="${lines[2]}"
+    HOST_DIR="${lines[3]}"
+    LOG_DIR="${lines[4]}"
+    EXCLUDES=("${(@s:\x00:)lines[5]}")
+    DIRS=("${(@s:\x00:)lines[6]}")
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -555,11 +568,12 @@ cmd_status() {
             daemon_status="${GREEN}✓ installed${NC}    "
         fi
 
-        # Get repo size
-        local user=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
-        local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
-        local dest=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
-        local repo="$user@$host:$dest"
+        # Get repo size and config values
+        local config_vals
+        config_vals=$(python3 -c "import json; c=json.load(open('$config_file')); print(c['user']); print(c['host']); print(c['dest']); print(c.get('hour', 2))")
+        local -a cv=("${(@f)config_vals}")
+        local repo="${cv[1]}@${cv[2]}:${cv[3]}"
+        local configured_hour="${cv[4]}"
         local repo_size="-"
         local info_tmpfile=$(mktemp)
         /opt/homebrew/bin/borg info "$repo" >"$info_tmpfile" 2>/dev/null
@@ -570,9 +584,12 @@ cmd_status() {
         rm -f "$info_tmpfile"
 
         if [[ -f "$status_file" ]]; then
-            local run_status=$(python3 -c "import json; print(json.load(open('$status_file'))['status'])")
-            local timestamp=$(python3 -c "import json; print(json.load(open('$status_file'))['timestamp'])")
-            local log=$(python3 -c "import json; print(json.load(open('$status_file'))['log'])")
+            local status_vals
+            status_vals=$(python3 -c "import json; s=json.load(open('$status_file')); print(s['status']); print(s['timestamp']); print(s['log'])")
+            local -a sv=("${(@f)status_vals}")
+            local run_status="${sv[1]}"
+            local timestamp="${sv[2]}"
+            local log="${sv[3]}"
 
             # Calculate relative time
             local diff=$((now - timestamp))
@@ -596,7 +613,6 @@ cmd_status() {
             fi
 
             # Check for schedule drift (timezone change can cause this)
-            local configured_hour=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
             local last_hour=$(date -r "$timestamp" +%H 2>/dev/null)
             if [[ -n "$last_hour" ]]; then
                 last_hour=$((10#$last_hour))
@@ -634,12 +650,24 @@ cmd_list() {
     for config_file in "$BACKUPS_DIR"/*.json(N); do
         [[ ! -f "$config_file" ]] && continue
         local name=$(basename "$config_file" .json)
-        local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
-        local dest=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
-        local hour=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
-        local minute=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
-        local dirs=$(python3 -c "import json; print(', '.join(json.load(open('$config_file'))['dirs']))")
-        local excludes=$(python3 -c "import json; print(', '.join(json.load(open('$config_file')).get('excludes', [])))")
+        local list_vals
+        list_vals=$(python3 -c "
+import json
+c = json.load(open('$config_file'))
+print(c['host'])
+print(c['dest'])
+print(c.get('hour', 2))
+print(c.get('minute', 0))
+print(', '.join(c['dirs']))
+print(', '.join(c.get('excludes', [])))
+")
+        local -a lv=("${(@f)list_vals}")
+        local host="${lv[1]}"
+        local dest="${lv[2]}"
+        local hour="${lv[3]}"
+        local minute="${lv[4]}"
+        local dirs="${lv[5]}"
+        local excludes="${lv[6]}"
 
         printf "  ${CYAN}%-15s${NC} %s:%s  ${YELLOW}@%02d:%02d${NC}\n" "$name" "$host" "$dest" "$hour" "$minute"
         printf "                  ${GREY}%s${NC}\n" "$dirs"
@@ -663,15 +691,29 @@ cmd_edit() {
 
     local config_file="$(config_path "$NAME")"
 
-    # Load current values
-    local REMOTE_USER=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
-    local HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
-    local HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
-    local LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
-    local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
-    local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
-    local DIRS=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
-    local EXCLUDES=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
+    # Load current values in a single python3 call
+    local edit_vals
+    edit_vals=$(python3 -c "
+import json
+c = json.load(open('$config_file'))
+print(c['user'])
+print(c['host'])
+print(c['dest'])
+print(c['log_dir'])
+print(c.get('hour', 2))
+print(c.get('minute', 0))
+print('\x00'.join(c['dirs']))
+print('\x00'.join(c.get('excludes', [])))
+")
+    local -a ev=("${(@f)edit_vals}")
+    local REMOTE_USER="${ev[1]}"
+    local HOST="${ev[2]}"
+    local HOST_DIR="${ev[3]}"
+    local LOG_DIR="${ev[4]}"
+    local HOUR="${ev[5]}"
+    local MINUTE="${ev[6]}"
+    local DIRS=("${(@s:\x00:)ev[7]}")
+    local EXCLUDES=("${(@s:\x00:)ev[8]}")
 
     echo ""
     info "Edit backup '$NAME'"
@@ -834,15 +876,29 @@ cmd_copy() {
 
     local config_file="$(config_path "$SOURCE")"
 
-    # Load current values
-    local REMOTE_USER=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
-    local HOST=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
-    local HOST_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
-    local LOG_DIR=$(python3 -c "import json; print(json.load(open('$config_file'))['log_dir'])")
-    local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
-    local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
-    local DIRS=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
-    local EXCLUDES=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
+    # Load current values in a single python3 call
+    local copy_vals
+    copy_vals=$(python3 -c "
+import json
+c = json.load(open('$config_file'))
+print(c['user'])
+print(c['host'])
+print(c['dest'])
+print(c['log_dir'])
+print(c.get('hour', 2))
+print(c.get('minute', 0))
+print('\x00'.join(c['dirs']))
+print('\x00'.join(c.get('excludes', [])))
+")
+    local -a cv=("${(@f)copy_vals}")
+    local REMOTE_USER="${cv[1]}"
+    local HOST="${cv[2]}"
+    local HOST_DIR="${cv[3]}"
+    local LOG_DIR="${cv[4]}"
+    local HOUR="${cv[5]}"
+    local MINUTE="${cv[6]}"
+    local DIRS=("${(@s:\x00:)cv[7]}")
+    local EXCLUDES=("${(@s:\x00:)cv[8]}")
 
     echo ""
     info "Copy backup '$SOURCE'"
@@ -1289,10 +1345,24 @@ cmd_test() {
     for config_file in "${configs[@]}"; do
         [[ ! -f "$config_file" ]] && continue
         local name=$(basename "$config_file" .json)
-        local user=$(python3 -c "import json; print(json.load(open('$config_file'))['user'])")
-        local host=$(python3 -c "import json; print(json.load(open('$config_file'))['host'])")
-        local dest=$(python3 -c "import json; print(json.load(open('$config_file'))['dest'])")
-        local dirs=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file'))['dirs']))")}")
+
+        # Load config values in a single python3 call
+        local test_vals
+        test_vals=$(python3 -c "
+import json
+c = json.load(open('$config_file'))
+print(c['user'])
+print(c['host'])
+print(c['dest'])
+print('\x00'.join(c['dirs']))
+print('\x00'.join(c.get('excludes', [])))
+")
+        local -a tv=("${(@f)test_vals}")
+        local user="${tv[1]}"
+        local host="${tv[2]}"
+        local dest="${tv[3]}"
+        local dirs=("${(@s:\x00:)tv[4]}")
+        local excludes=("${(@s:\x00:)tv[5]}")
 
         echo "${BOLD}Testing '$name'${NC}"
         echo "─────────────────────────────────────────"
@@ -1423,7 +1493,6 @@ cmd_test() {
         # Dry run
         if $ok; then
             printf "  Dry run... "
-            local excludes=("${(@f)$(python3 -c "import json; print('\n'.join(json.load(open('$config_file')).get('excludes', [])))")}")
             local exclude_args=()
             for exc in "${excludes[@]}"; do
                 [[ -n "$exc" ]] && exclude_args+=(--exclude "$exc")
@@ -1488,8 +1557,11 @@ cmd_reset() {
 
         local config_file="$(config_path "$NAME")"
         local label="$(plist_label "$NAME")"
-        local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
-        local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
+        local reset_vals
+        reset_vals=$(python3 -c "import json; c=json.load(open('$config_file')); print(c.get('hour', 2)); print(c.get('minute', 0))")
+        local -a rv=("${(@f)reset_vals}")
+        local HOUR="${rv[1]}"
+        local MINUTE="${rv[2]}"
 
         info "Resetting schedule for '$NAME'..."
 

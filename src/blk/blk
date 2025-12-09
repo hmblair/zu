@@ -155,24 +155,12 @@ validate_domain() {
     fi
 }
 
-# Encrypt data (outputs single line base64 with -A flag)
-encrypt_data() {
-    local data="$1"
-    local password="$2"
-    printf '%s' "$data" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A
-}
-
-
-# Decrypt data - returns empty string on failure, caller must check
+# Wrapper for zu_decrypt that validates JSON
 decrypt_data() {
     local password="$1"
-    if [[ ! -f "$DATA_FILE" ]]; then
-        echo "{}"
-        return 0
-    fi
     local decrypted
-    decrypted=$(cat "$DATA_FILE" | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A 2>/dev/null)
-    if [[ $? -ne 0 ]] || [[ -z "$decrypted" ]]; then
+    decrypted=$(zu_decrypt "$DATA_FILE" "$password")
+    if [[ $? -ne 0 ]]; then
         return 1
     fi
     # Validate it's valid JSON
@@ -183,63 +171,13 @@ decrypt_data() {
     return 0
 }
 
-# Parse duration string to seconds
-parse_duration() {
-    local duration="$1"
-    local value="${duration%[smhdw]}"
-    local unit="${duration: -1}"
-
-    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-        error "Invalid duration format: $duration"
-    fi
-
-    case "$unit" in
-        s) echo $((value)) ;;
-        m) echo $((value * 60)) ;;
-        h) echo $((value * 3600)) ;;
-        d) echo $((value * 86400)) ;;
-        w) echo $((value * 604800)) ;;
-        *) error "Invalid duration unit: $unit (use s, m, h, d, or w)" ;;
-    esac
-}
-
-# Format seconds as human-readable duration
-format_duration() {
-    local seconds="$1"
-
-    if [[ $seconds -lt 0 ]]; then
-        echo "expired"
-        return
-    fi
-
-    local days=$((seconds / 86400))
-    local hours=$(((seconds % 86400) / 3600))
-    local minutes=$(((seconds % 3600) / 60))
-    local secs=$((seconds % 60))
-
-    local result=""
-    [[ $days -gt 0 ]] && result+="${days}d "
-    [[ $hours -gt 0 ]] && result+="${hours}h "
-    [[ $minutes -gt 0 ]] && result+="${minutes}m "
-    [[ $secs -gt 0 && $days -eq 0 && $hours -eq 0 ]] && result+="${secs}s"
-
-    echo "${result% }"
-}
+# Aliases for common functions (shorter names for this script)
+parse_duration() { zu_parse_duration "$@"; }
+format_duration() { zu_format_duration "$@"; }
 
 # Touch trigger file to signal daemon
 signal_daemon() {
     touch "$TRIGGER_FILE" 2>/dev/null
-}
-
-# Parse time string (HH:MM) to minutes since midnight
-parse_time() {
-    local time="$1"
-    if ! [[ "$time" =~ ^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$ ]]; then
-        error "Invalid time format: $time (use HH:MM)"
-    fi
-    local hours="${time%%:*}"
-    local mins="${time##*:}"
-    echo $((hours * 60 + mins))
 }
 
 # Parse schedule string (HH:MM-HH:MM) and validate
@@ -250,8 +188,8 @@ parse_schedule() {
     fi
     local start="${schedule%%-*}"
     local end="${schedule##*-}"
-    parse_time "$start" > /dev/null  # validates
-    parse_time "$end" > /dev/null    # validates
+    zu_parse_time "$start" > /dev/null  # validates
+    zu_parse_time "$end" > /dev/null    # validates
 
     # Prevent 24-hour blocks (would never allow removal)
     if [[ "$start" == "$end" ]]; then
@@ -261,24 +199,8 @@ parse_schedule() {
     echo "$start-$end"
 }
 
-# Check if current time is within a schedule
-is_schedule_active() {
-    local schedule="$1"
-    local start="${schedule%%-*}"
-    local end="${schedule##*-}"
-
-    local start_mins=$(parse_time "$start")
-    local end_mins=$(parse_time "$end")
-    local now_mins=$(( $(date +%H) * 60 + $(date +%M) ))
-
-    if [[ $start_mins -le $end_mins ]]; then
-        # Normal range (e.g., 09:00-17:00)
-        [[ $now_mins -ge $start_mins && $now_mins -lt $end_mins ]]
-    else
-        # Crosses midnight (e.g., 22:00-06:00)
-        [[ $now_mins -ge $start_mins || $now_mins -lt $end_mins ]]
-    fi
-}
+# Alias for common function
+is_schedule_active() { zu_is_schedule_active "$@"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
@@ -338,7 +260,7 @@ cmd_setup() {
     chmod 600 "$SALT_FILE"
 
     # Initialize empty data file
-    encrypt_data "{}" "$password" > "$DATA_FILE"
+    zu_encrypt "{}" "$password" > "$DATA_FILE"
     chmod 600 "$DATA_FILE"
 
     # Create trigger file
@@ -759,7 +681,7 @@ print(json.dumps(data))
 ")
 
     # Re-encrypt and save
-    local encrypted=$(encrypt_data "$new_data" "$password")
+    local encrypted=$(zu_encrypt "$new_data" "$password")
     printf '%s\n' "$encrypted" > "$DATA_FILE"
 
     # Signal daemon
