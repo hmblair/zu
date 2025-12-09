@@ -152,11 +152,12 @@ sort_files() {
 
     case "$SORT_BY" in
         size)
-            # Sort by size (largest first by default)
+            # Sort by size (largest first by default) - use du for total size including directory contents
             sorted=($(for f in "${input[@]}"; do
                 local size=0
                 if [[ -e "$f" ]]; then
-                    size=$(/usr/bin/stat -f '%z' "$f" 2>/dev/null || /usr/bin/stat -c '%s' "$f" 2>/dev/null || echo 0)
+                    size=$(/usr/bin/du -sk "$f" 2>/dev/null | /usr/bin/cut -f1)
+                    size=${size:-0}
                 fi
                 printf '%s\t%s\n' "$size" "$f"
             done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-))
