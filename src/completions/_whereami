@@ -1,0 +1,22 @@
+#compdef whereami
+
+_whereami() {
+    local -a commands
+    commands=(
+        'setup:Configure the DNS name for this machine'
+        'show:Show configured DNS name'
+        'reset:Remove configuration'
+        'help:Show usage'
+    )
+
+    _arguments -C \
+        '1:command:->command'
+
+    case $state in
+        command)
+            _describe -t commands 'whereami command' commands
+            ;;
+    esac
+}
+
+_whereami "$@"
