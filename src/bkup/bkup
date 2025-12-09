@@ -36,6 +36,7 @@ usage() {
     echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
     echo "  remove <name>                    Remove a backup and its schedule"
+    echo "  reset <name>                     Reload schedule (fixes timezone drift)"
     echo "  uninstall                        Remove passphrase and all backups"
     echo ""
     echo "Add options:"
@@ -596,6 +597,20 @@ cmd_status() {
                 printf "  %-15s " "$display_name"; print -n "$daemon_status"; printf "${RED}%-12s${NC} %-18s %s\n" "✗ failed" "$time_ago" "$repo_size"
                 printf "  ${GREY}%-15s log: %s${NC}\n" "" "$log"
                 has_failures=true
+            fi
+
+            # Check for schedule drift (timezone change can cause this)
+            local configured_hour=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
+            local last_hour=$(date -r "$timestamp" +%H 2>/dev/null)
+            if [[ -n "$last_hour" ]]; then
+                last_hour=$((10#$last_hour))
+                configured_hour=$((10#$configured_hour))
+                local hour_diff=$(( (last_hour - configured_hour + 24) % 24 ))
+                [[ $hour_diff -gt 12 ]] && hour_diff=$((24 - hour_diff))
+                if [[ $hour_diff -gt 1 ]]; then
+                    printf "  ${GREY}%-15s${NC} ${RED}⚠ schedule drifted${NC} (ran at %02d:xx, expected %02d:xx) - run 'bkup reset %s'\n" "" "$last_hour" "$configured_hour" "$name"
+                    has_failures=true
+                fi
             fi
         else
             printf "  %-15s " "$display_name"; print -n "$daemon_status"; printf "${YELLOW}%-12s${NC} %-18s %s\n" "? unknown" "never run" "$repo_size"
@@ -1336,6 +1351,40 @@ cmd_remove() {
     success "Removed backup '$NAME'"
 }
 
+cmd_reset() {
+    local NAME="$1"
+
+    if [[ -z "$NAME" ]]; then
+        error "Usage: bkup reset <name>"
+    fi
+
+    if ! config_exists "$NAME"; then
+        error "Backup '$NAME' not found."
+    fi
+
+    local config_file="$(config_path "$NAME")"
+    local label="$(plist_label "$NAME")"
+    local HOUR=$(python3 -c "import json; print(json.load(open('$config_file')).get('hour', 2))")
+    local MINUTE=$(python3 -c "import json; print(json.load(open('$config_file')).get('minute', 0))")
+
+    info "Resetting schedule for '$NAME'..."
+
+    # Unload existing plist if present
+    if zu_service_exists "$label"; then
+        zu_service_unload "$label"
+    fi
+
+    # Recreate and load plist
+    zu_service_create "$label" "$SCRIPT_PATH" \
+        --args "run" "$NAME" \
+        --type "calendar:${HOUR}:${MINUTE}" \
+        --log "/tmp/bkup-$NAME.log" \
+        --env "HOME=$HOME" "USER=$USER"
+    zu_service_load "$label"
+
+    success "Schedule reset to $(printf '%02d:%02d' $HOUR $MINUTE)"
+}
+
 cmd_uninstall() {
     echo ""
     echo "${YELLOW}This will remove:${NC}"
@@ -1411,6 +1460,9 @@ case "${1:-}" in
         ;;
     remove)
         cmd_remove "$2"
+        ;;
+    reset)
+        cmd_reset "$2"
         ;;
     uninstall)
         cmd_uninstall
