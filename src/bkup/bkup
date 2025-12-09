@@ -49,7 +49,7 @@ usage() {
     echo "  --minute <0-59>           Minute to run backup (default: 0)"
     echo ""
     echo "Files options:"
-    echo "  -p, --path <path>         Filter by path pattern"
+    echo "  -p, --path <filter>       Filter output by substring (case-insensitive)"
     echo ""
     echo "Examples:"
     echo "  bkup setup"
@@ -1125,16 +1125,18 @@ cmd_files() {
     info "Files in '$NAME::$ARCHIVE'"
     echo "─────────────────────────────────────────"
 
-    local borg_args=()
+    local output
     if [[ -n "$PATH_FILTER" ]]; then
-        borg_args+=(--pattern "$PATH_FILTER")
+        output=$(/opt/homebrew/bin/borg list "$REPO::$ARCHIVE" 2>&1 | grep -i "$PATH_FILTER")
+    else
+        output=$(/opt/homebrew/bin/borg list "$REPO::$ARCHIVE" 2>&1)
     fi
 
-    /opt/homebrew/bin/borg list "${borg_args[@]}" "$REPO::$ARCHIVE" 2>/dev/null
-
-    if [[ $? -ne 0 ]]; then
+    if [[ $? -ne 0 ]] && [[ -z "$PATH_FILTER" ]]; then
+        echo "$output" >&2
         error "Failed to list files (archive '$ARCHIVE' may not exist)"
     fi
+    echo "$output"
     echo ""
 }
 
