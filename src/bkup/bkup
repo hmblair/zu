@@ -1049,7 +1049,7 @@ cmd_archives() {
     echo "─────────────────────────────────────────"
 
     local output
-    output=$(/opt/homebrew/bin/borg list --format '{archive:<20} {time:%Y-%m-%d %H:%M}{NL}' "$REPO" 2>&1)
+    output=$(/opt/homebrew/bin/borg list --format '{archive:<20} {time:%H:%M}{NL}' "$REPO" 2>&1)
 
     if [[ $? -ne 0 ]]; then
         echo "$output" >&2
