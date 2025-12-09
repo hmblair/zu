@@ -1,8 +1,0 @@
-#!/usr/bin/env zsh
-
-# Output user@host:path for easy rsync usage
-# Set SSH_HOSTNAME in your server's .zshrc for tunnels/proxies
-
-[[ -n "$SSH_CONNECTION" ]] || { echo "Error: Not in SSH session" >&2; exit 1; }
-host="${SSH_HOSTNAME:-$(hostname -f)}"
-echo "$(whoami)@${host}:$(pwd)"

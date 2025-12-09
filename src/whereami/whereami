@@ -1,0 +1,103 @@
+#!/usr/bin/env zsh
+
+# whereami - Output user@host:path for easy rsync usage
+# Uses configured DNS name instead of hostname (useful for HPCs)
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+CONFIG_FILE="$HOME/.config/whereami/dns"
+
+usage() {
+    cat << EOF
+Usage: whereami [command]
+
+Output user@host:path for easy rsync/scp usage.
+
+Commands:
+  (none)    Print user@host:path
+  setup     Configure the DNS name for this machine
+  show      Show configured DNS name
+  reset     Remove configuration
+
+Examples:
+  whereami                    # Outputs: user@hpc.university.edu:/path/to/cwd
+  whereami setup              # Configure DNS interactively
+  rsync file.txt \$(whereami) # Copy file to current remote directory
+EOF
+}
+
+cmd_setup() {
+    local current=""
+    [[ -f "$CONFIG_FILE" ]] && current=$(<"$CONFIG_FILE")
+
+    echo "Configure DNS name for this machine."
+    echo "This should be the address you use to SSH here."
+    echo ""
+    if [[ -n "$current" ]]; then
+        echo "Current: $current"
+    fi
+    echo -n "DNS name: "
+    read dns
+
+    if [[ -z "$dns" ]]; then
+        error "DNS name cannot be empty."
+    fi
+
+    mkdir -p "${CONFIG_FILE:h}"
+    echo "$dns" > "$CONFIG_FILE"
+    success "Configured: $dns"
+}
+
+cmd_show() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo "DNS: $(<"$CONFIG_FILE")"
+    else
+        echo "Not configured. Run 'whereami setup'."
+    fi
+}
+
+cmd_reset() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        rm -f "$CONFIG_FILE"
+        success "Configuration removed."
+    else
+        warn "Not configured."
+    fi
+}
+
+cmd_whereami() {
+    [[ -n "$SSH_CONNECTION" ]] || { echo "Error: Not in SSH session" >&2; exit 1; }
+
+    local host
+    if [[ -f "$CONFIG_FILE" ]]; then
+        host=$(<"$CONFIG_FILE")
+    elif [[ -n "$SSH_HOSTNAME" ]]; then
+        host="$SSH_HOSTNAME"
+    else
+        host=$(hostname -f)
+    fi
+
+    echo "$(whoami)@${host}:$(pwd)"
+}
+
+case "${1:-}" in
+    setup)
+        cmd_setup
+        ;;
+    show)
+        cmd_show
+        ;;
+    reset)
+        cmd_reset
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    "")
+        cmd_whereami
+        ;;
+    *)
+        error "Unknown command: $1"
+        ;;
+esac
