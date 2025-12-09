@@ -16,7 +16,7 @@ usage() {
     echo "Shows system health and activity for a remote server."
     echo ""
     echo "Displays:"
-    echo "  - Uptime, load average, CPU, memory, swap, temperature"
+    echo "  - Uptime, load average, memory, swap, temperature"
     echo "  - All mounted disks"
     echo "  - Process count, logged in users, network I/O"
     echo ""
@@ -69,15 +69,12 @@ cmd_monitor() {
         uptime -p 2>/dev/null | sed "s/^up //" || uptime | sed "s/.*up //" | sed "s/,.*$//"
         echo "---"
 
-        # Load average
-        cat /proc/loadavg 2>/dev/null | awk "{printf \"load:%s %s %s\n\", \$1, \$2, \$3}" || echo "load:N/A"
-
-        # CPU usage
-        cpu=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk "{print \$2}")
-        if [[ -z "$cpu" ]]; then
-            cpu=$(top -bn1 2>/dev/null | grep "%Cpu" | awk "{print \$2}")
-        fi
-        [[ -z "$cpu" ]] && echo "cpu:N/A|0" || echo "cpu:${cpu}%|$cpu"
+        # Load average (with core count for percentage)
+        cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+        cat /proc/loadavg 2>/dev/null | awk -v cores="$cores" "{
+            pct = (\$1 / cores) * 100
+            printf \"load:%s (1m) %s (5m) %s (15m)|%.0f\n\", \$1, \$2, \$3, pct
+        }" || echo "load:N/A|0"
 
         # Memory usage (used / total in GB)
         free -b 2>/dev/null | awk "/^Mem:/ {
@@ -150,11 +147,10 @@ cmd_monitor() {
     uptime_val=$(echo "$stats" | head -1)
 
     # Parse all other stats
-    local load_val cpu_val cpu_pct mem_val mem_pct swap_val swap_pct temp_val temp_pct
+    local load_val load_pct mem_val mem_pct swap_val swap_pct temp_val temp_pct
     local procs_val users_val net_val
-    load_val=$(echo "$stats" | grep '^load:' | cut -d: -f2)
-    cpu_val=$(echo "$stats" | grep '^cpu:' | cut -d: -f2 | cut -d'|' -f1)
-    cpu_pct=$(echo "$stats" | grep '^cpu:' | cut -d'|' -f2)
+    load_val=$(echo "$stats" | grep '^load:' | cut -d: -f2 | cut -d'|' -f1)
+    load_pct=$(echo "$stats" | grep '^load:' | cut -d'|' -f2)
     mem_val=$(echo "$stats" | grep '^mem:' | cut -d: -f2 | cut -d'|' -f1)
     mem_pct=$(echo "$stats" | grep '^mem:' | cut -d'|' -f2)
     swap_val=$(echo "$stats" | grep '^swap:' | cut -d: -f2 | cut -d'|' -f1)
@@ -171,8 +167,7 @@ cmd_monitor() {
 
     # System health
     format_stat "Uptime:" "$uptime_val"
-    format_stat "Load Average:" "$load_val"
-    format_usage "CPU Usage:" "$cpu_val" "$cpu_pct"
+    format_usage "Load:" "$load_val" "$load_pct"
     format_usage "Memory:" "$mem_val" "$mem_pct"
     format_usage "Swap:" "$swap_val" "$swap_pct"
     format_usage "Temperature:" "$temp_val" "$temp_pct" 60 80
