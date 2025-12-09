@@ -608,7 +608,7 @@ cmd_status() {
                 local hour_diff=$(( (last_hour - configured_hour + 24) % 24 ))
                 [[ $hour_diff -gt 12 ]] && hour_diff=$((24 - hour_diff))
                 if [[ $hour_diff -gt 1 ]]; then
-                    printf "  ${GREY}%-15s${NC} ${RED}⚠ schedule drifted${NC} (ran at %02d:xx, expected %02d:xx) - run 'bkup reset %s'\n" "" "$last_hour" "$configured_hour" "$name"
+                    printf "  ${GREY}%-15s${NC} ${RED}⚠ schedule drifted${NC} (ran at %02d:xx, expected %02d:xx)\n" "" "$last_hour" "$configured_hour"
                     has_failures=true
                 fi
             fi
