@@ -1,19 +1,40 @@
 #!/usr/bin/env zsh
 
-cmd=""
-if command -v pbcopy >/dev/null 2>&1; then
-    cmd="pbcopy"
-elif command -v xclip >/dev/null 2>&1; then
-    cmd="xclip -selection clipboard"
-elif command -v wl-copy >/dev/null 2>&1; then
-    cmd="wl-copy"
+# copy - Copy to clipboard (works locally and over SSH)
+# Uses OSC 52 escape sequence for SSH sessions
+
+copy_osc52() {
+    # OSC 52 escape sequence - works over SSH with compatible terminals
+    # (iTerm2, kitty, alacritty, Windows Terminal, etc.)
+    local data=$(base64 | tr -d '\n')
+    printf '\033]52;c;%s\a' "$data"
+}
+
+copy_local() {
+    if command -v pbcopy >/dev/null 2>&1; then
+        pbcopy
+    elif command -v xclip >/dev/null 2>&1; then
+        xclip -selection clipboard
+    elif command -v wl-copy >/dev/null 2>&1; then
+        wl-copy
+    else
+        return 1
+    fi
+}
+
+# Get input
+if [[ $# -eq 0 ]]; then
+    input=$(cat)
 else
-    echo "No clipboard utility found" >&2
-    exit 1
+    input=$(cat "$@")
 fi
 
-if [[ $# -eq 0 ]]; then
-    eval ${cmd}
-else
-    cat "$@" | eval ${cmd}
+# Try local clipboard first (faster, more reliable)
+if [[ -z "$SSH_CONNECTION" ]]; then
+    if echo -n "$input" | copy_local 2>/dev/null; then
+        exit 0
+    fi
 fi
+
+# Fall back to OSC 52 (works over SSH)
+echo -n "$input" | copy_osc52
