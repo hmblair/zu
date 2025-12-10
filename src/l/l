@@ -25,6 +25,7 @@ typeset -A ICONS
 typeset -A GITIGNORE_CACHE
 typeset -A SIZE_CACHE
 typeset -A LINECOUNT_CACHE
+typeset -A MTIME_CACHE
 
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
@@ -128,8 +129,23 @@ build_linecount_cache() {
     (( ! include_hidden )) && find_args+=(-not -path '*/.*')
 
     while read -r count path; do
-        [[ -n "$path" ]] && LINECOUNT_CACHE[$path]="$count"
-    done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null | /usr/bin/grep -v ' total$')
+        # Skip the "total" line from wc output
+        [[ -n "$path" && "$path" != "total" ]] && LINECOUNT_CACHE[$path]="$count"
+    done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null)
+}
+
+# Build mtime cache for all items under a path
+build_mtime_cache() {
+    local root="$1"
+    local maxdepth="$2"
+    local include_hidden="$3"
+
+    local find_args=(-maxdepth "$maxdepth")
+    (( ! include_hidden )) && find_args+=(-not -path '*/.*')
+
+    while read -r mtime path; do
+        [[ -n "$path" ]] && MTIME_CACHE[$path]="$mtime"
+    done < <(/usr/bin/find "$root" "${find_args[@]}" -exec /usr/bin/stat -f '%m %N' {} + 2>/dev/null)
 }
 
 should_skip() {
@@ -152,10 +168,12 @@ sort_files() {
 
     case "$SORT_BY" in
         size)
-            # Sort by size (largest first by default) - use du for total size including directory contents
+            # Sort by size (largest first by default) - use cache if available
             sorted=($(for f in "${input[@]}"; do
                 local size=0
-                if [[ -e "$f" ]]; then
+                if [[ -n "${SIZE_CACHE[$f]}" ]]; then
+                    size="${SIZE_CACHE[$f]}"
+                elif [[ -e "$f" ]]; then
                     size=$(/usr/bin/du -sk "$f" 2>/dev/null | /usr/bin/cut -f1)
                     size=${size:-0}
                 fi
@@ -163,10 +181,12 @@ sort_files() {
             done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-))
             ;;
         time)
-            # Sort by mtime (newest first by default)
+            # Sort by mtime (newest first by default) - use cache if available
             sorted=($(for f in "${input[@]}"; do
                 local mtime=0
-                if [[ -e "$f" ]]; then
+                if [[ -n "${MTIME_CACHE[$f]}" ]]; then
+                    mtime="${MTIME_CACHE[$f]}"
+                elif [[ -e "$f" ]]; then
                     mtime=$(/usr/bin/stat -f '%m' "$f" 2>/dev/null || /usr/bin/stat -c '%Y' "$f" 2>/dev/null || echo 0)
                 fi
                 printf '%s\t%s\n' "$mtime" "$f"
@@ -183,13 +203,8 @@ sort_files() {
     esac
 
     if (( SORT_REVERSE )); then
-        # Reverse the array
-        local -a reversed=()
-        local i
-        for ((i=${#sorted[@]}; i>0; i--)); do
-            reversed+=("${sorted[$i]}")
-        done
-        sorted=("${reversed[@]}")
+        # Reverse the array using zsh parameter expansion
+        sorted=("${(Oa)sorted[@]}")
     fi
 
     printf '%s\n' "${sorted[@]}"
@@ -476,10 +491,11 @@ for dir in "${DIRECTORIES[@]}"; do
     /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null && in_git=1
 
     # Create temp files for parallel cache building
-    local git_tmp="" size_tmp="" line_tmp=""
+    local git_tmp="" size_tmp="" line_tmp="" mtime_tmp=""
     (( in_git )) && git_tmp=$(/usr/bin/mktemp)
     (( SIZES )) && size_tmp=$(/usr/bin/mktemp)
     (( COUNT_LINES )) && line_tmp=$(/usr/bin/mktemp)
+    [[ "$SORT_BY" == "time" ]] && mtime_tmp=$(/usr/bin/mktemp)
 
     # Run cache builders in parallel, writing to temp files
     if [[ -n "$git_tmp" ]]; then
@@ -500,7 +516,14 @@ for dir in "${DIRECTORIES[@]}"; do
         {
             local find_args=(-maxdepth "$DEPTH" -type f)
             (( ! HIDDEN )) && find_args+=(-not -path '*/.*')
-            /usr/bin/find "$abs_dir" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null | /usr/bin/grep -v ' total$' > "$line_tmp"
+            /usr/bin/find "$abs_dir" "${find_args[@]}" -exec /usr/bin/wc -l {} + 2>/dev/null > "$line_tmp"
+        } &
+    fi
+    if [[ -n "$mtime_tmp" ]]; then
+        {
+            local find_args=(-maxdepth "$DEPTH")
+            (( ! HIDDEN )) && find_args+=(-not -path '*/.*')
+            /usr/bin/find "$abs_dir" "${find_args[@]}" -exec /usr/bin/stat -f '%m %N' {} + 2>/dev/null > "$mtime_tmp"
         } &
     fi
     wait
@@ -520,9 +543,16 @@ for dir in "${DIRECTORIES[@]}"; do
     fi
     if [[ -n "$line_tmp" ]]; then
         while read -r count path; do
-            [[ -n "$path" ]] && LINECOUNT_CACHE[$path]="$count"
+            # Skip the "total" line from wc output
+            [[ -n "$path" && "$path" != "total" ]] && LINECOUNT_CACHE[$path]="$count"
         done < "$line_tmp"
         /bin/rm -f "$line_tmp"
+    fi
+    if [[ -n "$mtime_tmp" ]]; then
+        while read -r mtime path; do
+            [[ -n "$path" ]] && MTIME_CACHE[$path]="$mtime"
+        done < "$mtime_tmp"
+        /bin/rm -f "$mtime_tmp"
     fi
 done
 
