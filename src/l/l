@@ -477,9 +477,9 @@ for dir in "${DIRECTORIES[@]}"; do
 
     # Create temp files for parallel cache building
     local git_tmp="" size_tmp="" line_tmp=""
-    (( in_git )) && git_tmp=$(mktemp)
-    (( SIZES )) && size_tmp=$(mktemp)
-    (( COUNT_LINES )) && line_tmp=$(mktemp)
+    (( in_git )) && git_tmp=$(/usr/bin/mktemp)
+    (( SIZES )) && size_tmp=$(/usr/bin/mktemp)
+    (( COUNT_LINES )) && line_tmp=$(/usr/bin/mktemp)
 
     # Run cache builders in parallel, writing to temp files
     if [[ -n "$git_tmp" ]]; then
