@@ -24,9 +24,9 @@ copy_local() {
 
 # Get input
 if [[ $# -eq 0 ]]; then
-    input=$(cat)
+    input=$(cat 2>&1)
 else
-    input=$(cat "$@")
+    input=$(cat "$@" 2>&1)
 fi
 
 # Try local clipboard first (faster, more reliable)
