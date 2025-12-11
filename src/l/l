@@ -520,7 +520,8 @@ done
 # Print line count summary
 if (( COUNT_LINES )) && (( ${#LINECOUNT_CACHE[@]} > 0 )); then
     total=0
-    for count in "${LINECOUNT_CACHE[@]}"; do
+    for path count in "${(@kv)LINECOUNT_CACHE}"; do
+        is_ignored "$path" && continue
         (( total += count ))
     done
     echo ""
