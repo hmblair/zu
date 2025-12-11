@@ -93,7 +93,7 @@ build_caches() {
     local need_mtime="$7"
 
     # Base find arguments (reused by all cache builders)
-    local -a base_args=(-maxdepth "$depth")
+    local -a base_args=(-maxdepth "$depth" -not -path '*/.git/*')
     (( ! hidden )) && base_args+=(-not -path '*/.*')
 
     # Create temp files only for needed caches
