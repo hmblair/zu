@@ -3,6 +3,13 @@
 # copy - Copy to clipboard (works locally and over SSH)
 # Uses OSC 52 escape sequence for SSH sessions
 
+source "${0:A:h}/common"
+
+input=""
+interrupted=false
+
+trap 'interrupted=true' INT
+
 copy_osc52() {
     # OSC 52 escape sequence - works over SSH with compatible terminals
     # (iTerm2, kitty, alacritty, Windows Terminal, etc.)
@@ -22,19 +29,43 @@ copy_local() {
     fi
 }
 
-# Get input
+# Get input (line by line to allow interruption)
 if [[ $# -eq 0 ]]; then
-    input=$(cat 2>&1)
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -n "$input" ]] && input+=$'\n'
+        input+="$line"
+        $interrupted && break
+    done
 else
     input=$(cat "$@" 2>&1)
+fi
+
+# Echo to stderr so user can see what was copied
+if [[ -n "$input" ]]; then
+    echo "$input" >&2
 fi
 
 # Try local clipboard first (faster, more reliable)
 if [[ -z "$SSH_CONNECTION" ]]; then
     if echo -n "$input" | copy_local 2>/dev/null; then
+        if $interrupted; then
+            warn "Copied (interrupted)" >&2
+        else
+            success "Copied" >&2
+        fi
         exit 0
     fi
 fi
 
 # Fall back to OSC 52 (works over SSH)
-echo -n "$input" | copy_osc52
+if echo -n "$input" | copy_osc52; then
+    if $interrupted; then
+        warn "Copied via OSC 52 (interrupted)" >&2
+    else
+        success "Copied via OSC 52" >&2
+    fi
+    exit 0
+fi
+
+echo "${RED}Failed to copy${NC}" >&2
+exit 1
