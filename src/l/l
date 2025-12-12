@@ -14,7 +14,6 @@ COUNT_LINES=0
 EXPAND_ALL=0
 CLEAR_SCREEN=0
 LIST_MODE=0
-GIT_STATUS=1
 SORT_BY=""       # "", "size", "time", "name"
 SORT_REVERSE=0
 DIRECTORIES=()
@@ -28,6 +27,7 @@ typeset -A SIZE_CACHE
 typeset -A LINECOUNT_CACHE
 typeset -A MTIME_CACHE
 typeset -A GIT_STATUS_CACHE
+typeset -A FILE_TYPE_CACHE
 
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
@@ -85,7 +85,9 @@ is_ignored() {
 }
 
 # Get git status indicator for a path
+# Sets GIT_INDICATOR variable directly (avoids subshell)
 get_git_status_indicator() {
+    GIT_INDICATOR=""
     local path="$1"
     local git_st="${GIT_STATUS_CACHE[$path]}"
 
@@ -96,7 +98,7 @@ get_git_status_indicator() {
 
     # Untracked files
     if [[ "$git_st" == "??" ]]; then
-        echo "${ICONS[git_untracked]:-?}|$RED"
+        GIT_INDICATOR="${RED}${ICONS[git_untracked]:-?}${NC} "
         return
     fi
 
@@ -107,19 +109,19 @@ get_git_status_indicator() {
 
     # Staged changes (index has changes)
     if [[ "$index" != " " && "$index" != "?" ]]; then
-        echo "${ICONS[git_staged]:-+}|$YELLOW"
+        GIT_INDICATOR="${YELLOW}${ICONS[git_staged]:-+}${NC} "
         return
     fi
 
     # Unstaged modifications
     if [[ "$worktree" == "M" ]]; then
-        echo "${ICONS[git_modified]:-M}|$RED"
+        GIT_INDICATOR="${RED}${ICONS[git_modified]:-M}${NC} "
         return
     fi
 
     # Unstaged deletions
     if [[ "$worktree" == "D" ]]; then
-        echo "${ICONS[git_deleted]:-D}|$RED"
+        GIT_INDICATOR="${RED}${ICONS[git_deleted]:-D}${NC} "
         return
     fi
 }
@@ -140,12 +142,13 @@ build_caches() {
     (( ! hidden )) && base_args+=(-not -path '*/.*')
 
     # Create temp files only for needed caches
-    local git_tmp="" size_tmp="" line_tmp="" mtime_tmp="" git_status_tmp=""
+    local git_tmp="" size_tmp="" line_tmp="" mtime_tmp="" git_status_tmp="" ftype_tmp=""
     (( need_git )) && git_tmp=$(/usr/bin/mktemp)
     (( need_size )) && size_tmp=$(/usr/bin/mktemp)
     (( need_lines )) && line_tmp=$(/usr/bin/mktemp)
     (( need_mtime )) && mtime_tmp=$(/usr/bin/mktemp)
     (( need_git_status )) && git_status_tmp=$(/usr/bin/mktemp)
+    ftype_tmp=$(/usr/bin/mktemp)
 
     # Run cache builders in parallel
     [[ -n "$git_tmp" ]] && {
@@ -163,6 +166,8 @@ build_caches() {
     [[ -n "$git_status_tmp" ]] && {
         /usr/bin/git -C "$abs_dir" status --porcelain 2>/dev/null > "$git_status_tmp"
     } &
+    # File type cache: "Type|perms|path"
+    /usr/bin/find "$abs_dir" "${base_args[@]}" -exec /usr/bin/stat -f '%HT|%Sp|%N' {} + 2>/dev/null > "$ftype_tmp" &
     wait
 
     # Load results into caches
@@ -206,6 +211,18 @@ build_caches() {
         done < "$git_status_tmp"
         /bin/rm -f "$git_status_tmp"
     }
+    # Load file type cache: "Type|perms|path" -> single char code
+    while IFS='|' read -r ftype perms fpath; do
+        [[ -z "$fpath" ]] && continue
+        local code=""
+        case "$ftype" in
+            "Symbolic Link") code="l" ;;
+            "Directory") code="d" ;;
+            *) [[ "${perms:3:1}" == "x" ]] && code="x" || code="f" ;;
+        esac
+        FILE_TYPE_CACHE[$fpath]="$code"
+    done < "$ftype_tmp"
+    /bin/rm -f "$ftype_tmp"
 }
 
 should_skip() {
@@ -292,41 +309,30 @@ print_line() {
     local target=""
     local icon="${ICONS[default]}"
     local colour="$WHITE"
+    local ftype="${FILE_TYPE_CACHE[$line]}"
 
-    if [[ -L $line ]]; then
-        target=${line:A}
-        if [[ ! -e $target ]]; then
-            # Broken symlink
-            icon="${ICONS[symlink_broken]:-${ICONS[file]}}"
-            colour=$RED
-        elif [[ -d $target ]]; then
-            icon="${ICONS[symlink_dir]}"
-            colour=$CYAN
-        elif [[ -x $target ]]; then
-            icon="${ICONS[symlink_exec]}"
-            colour=$GREEN
-        elif [[ -f $target ]]; then
-            icon="${ICONS[symlink_file]}"
-            colour=$WHITE
-        fi
-    elif [[ -d $line ]]; then
-        icon="${ICONS[directory]}"
-        colour=$BLUE
-    elif [[ -x $line ]]; then
-        icon="${ICONS[executable]}"
-        colour=$GREEN
-    elif [[ -f $line ]]; then
-        icon="${ICONS[file]}"
-        colour=$WHITE
-    fi
+    case "$ftype" in
+        l)  # Symlink - check target type
+            target=${line:A}
+            case "${FILE_TYPE_CACHE[$target]}" in
+                d) icon="${ICONS[symlink_dir]}"; colour=$CYAN ;;
+                x) icon="${ICONS[symlink_exec]}"; colour=$GREEN ;;
+                f) icon="${ICONS[symlink_file]}"; colour=$WHITE ;;
+                *) icon="${ICONS[symlink_broken]:-${ICONS[file]}}"; colour=$RED ;;
+            esac
+            ;;
+        d) icon="${ICONS[directory]}"; colour=$BLUE ;;
+        x) icon="${ICONS[executable]}"; colour=$GREEN ;;
+        f) icon="${ICONS[file]}"; colour=$WHITE ;;
+    esac
 
     if [[ ${line:A} == ${PWD} ]]; then
         colour=$YELLOW_B
     fi
 
-    # Color ignored items red (gitignore + .git)
-    if is_ignored "$line" || [[ "${line:t}" =~ '^\.git$' ]]; then
-        colour=$RED
+    # Color ignored items grey (gitignore + .git)
+    if (( ${+GITIGNORE_CACHE[$line]} )) || [[ "${line:t}" == ".git" ]]; then
+        colour=$GREY
     fi
 
     local char="${GREY}"
@@ -350,17 +356,9 @@ print_line() {
     local style=""
     [[ "${line:t}" == .* ]] && style="${ITALIC}"
 
-    # Git status indicator
+    # Git status indicator (only call function if file has status)
     local git_indicator=""
-    if (( GIT_STATUS )); then
-        local indicator_info
-        indicator_info=$(get_git_status_indicator "$line")
-        if [[ -n "$indicator_info" ]]; then
-            local indicator_char="${indicator_info%%|*}"
-            local indicator_color="${indicator_info##*|}"
-            git_indicator="${indicator_color}${indicator_char}${NC} "
-        fi
-    fi
+    (( ${+GIT_STATUS_CACHE[$line]} )) && { get_git_status_indicator "$line"; git_indicator="$GIT_INDICATOR"; }
 
     local out="${char}${git_indicator}${colour}${style}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
@@ -569,7 +567,7 @@ for dir in "${DIRECTORIES[@]}"; do
     in_git=0
     /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null && in_git=1
     need_mtime=$([[ "$SORT_BY" == "time" ]] && echo 1 || echo 0)
-    need_git_status=$(( in_git && GIT_STATUS ))
+    need_git_status=$in_git
 
     build_caches "${dir:A}" "$DEPTH" "$HIDDEN" "$in_git" "$SIZES" "$COUNT_LINES" "$need_mtime" "$need_git_status"
 done
