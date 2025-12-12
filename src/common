@@ -47,6 +47,83 @@ ST='\e[9m'
 NST='\e[0m'
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OS detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+ZU_IS_MACOS=0
+[[ "$(uname -s)" == "Darwin" ]] && ZU_IS_MACOS=1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Detect fastest available hash command (xxhash is 5-10x faster than md5)
+if command -v xxhsum &>/dev/null; then
+    ZU_HASH_CMD="xxhsum"
+elif command -v xxh64sum &>/dev/null; then
+    ZU_HASH_CMD="xxh64sum"
+elif [[ $ZU_IS_MACOS -eq 1 ]]; then
+    ZU_HASH_CMD="md5 -r"
+else
+    ZU_HASH_CMD="md5sum"
+fi
+
+# Get file hash
+# Usage: zu_file_hash <file>
+zu_file_hash() {
+    $ZU_HASH_CMD "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# Get file size in bytes (portable)
+# Usage: zu_file_size <file>
+zu_file_size() {
+    if [[ $ZU_IS_MACOS -eq 1 ]]; then
+        stat -f '%z' "$1" 2>/dev/null
+    else
+        stat -c '%s' "$1" 2>/dev/null
+    fi
+}
+
+# Get file modification time (portable)
+# Usage: zu_file_mtime <file>
+zu_file_mtime() {
+    if [[ $ZU_IS_MACOS -eq 1 ]]; then
+        stat -f '%Sm' -t '%Y:%m:%d %H:%M:%S' "$1" 2>/dev/null
+    else
+        stat -c '%y' "$1" 2>/dev/null | sed 's/-/:/g; s/\.[0-9]*//'
+    fi
+}
+
+# Display a progress bar
+# Usage: zu_progress_bar <current> <total>
+zu_progress_bar() {
+    local current="$1"
+    local total="$2"
+    local width=40
+    local pct=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+
+    printf "\r  [%s%s] %d/%d (%d%%)" \
+        "$(printf '#%.0s' $(seq 1 $filled 2>/dev/null))" \
+        "$(printf '.%.0s' $(seq 1 $empty 2>/dev/null))" \
+        "$current" "$total" "$pct"
+}
+
+# Find files with sizes (portable)
+# Usage: zu_find_with_sizes <dir> [separator]
+# Output: size<sep>path per line (default separator is tab)
+zu_find_with_sizes() {
+    local dir="$1"
+    local sep="${2:-	}"  # default tab
+    if [[ $ZU_IS_MACOS -eq 1 ]]; then
+        /usr/bin/find "$dir" -type f -exec stat -f "%z${sep}%N" {} + 2>/dev/null
+    else
+        /usr/bin/find "$dir" -type f -printf "%s${sep}%p\n" 2>/dev/null
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Encryption helpers (requires openssl)
 # ─────────────────────────────────────────────────────────────────────────────
 

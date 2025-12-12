@@ -16,14 +16,10 @@ CONFIG_DIR="$HOME/.config/mediasort"
 CONFIG_FILE="$CONFIG_DIR/config"
 AUDIO_EXTENSIONS=(m4b mp3 m4a flac ogg opus aac wav wma)
 
-# Detect fastest available hash command
-if command -v xxhsum &>/dev/null; then
-    HASH_CMD="xxhsum"
-elif command -v xxh64sum &>/dev/null; then
-    HASH_CMD="xxh64sum"
-else
-    HASH_CMD="md5sum"
-fi
+# Aliases for common functions (shorter names for this script)
+file_hash() { zu_file_hash "$@"; }
+file_size() { zu_file_size "$@"; }
+progress_bar() { zu_progress_bar "$@"; }
 
 # Libraries array: "name:path"
 typeset -a LIBRARIES=()
@@ -120,30 +116,12 @@ Examples:
 EOF
 }
 
-progress_bar() {
-    local current="$1"
-    local total="$2"
-    local width=40
-    local pct=$((current * 100 / total))
-    local filled=$((current * width / total))
-    local empty=$((width - filled))
-
-    printf "\r  [%s%s] %d/%d (%d%%)" \
-        "$(printf '#%.0s' $(seq 1 $filled 2>/dev/null))" \
-        "$(printf '.%.0s' $(seq 1 $empty 2>/dev/null))" \
-        "$current" "$total" "$pct"
-}
-
-file_hash() {
-    $HASH_CMD "$1" 2>/dev/null | cut -d' ' -f1
-}
-
 files_match() {
     local file1="$1"
     local file2="$2"
 
-    local size1=$(stat -c '%s' "$file1" 2>/dev/null)
-    local size2=$(stat -c '%s' "$file2" 2>/dev/null)
+    local size1=$(file_size "$file1")
+    local size2=$(file_size "$file2")
 
     [[ "$size1" == "$size2" ]] && [[ "$(file_hash "$file1")" == "$(file_hash "$file2")" ]]
 }
@@ -460,7 +438,7 @@ build_size_index() {
     info "Building size index..."
 
     local count=0
-    while IFS=: read -r size filepath; do
+    while IFS=$'\t' read -r size filepath; do
         [[ -z "$size" ]] && continue
         if [[ -n "${SIZE_INDEX[$size]}" ]]; then
             SIZE_INDEX[$size]+="|$filepath"
@@ -468,7 +446,7 @@ build_size_index() {
             SIZE_INDEX[$size]="$filepath"
         fi
         ((count++))
-    done < <(find "$DEST_DIR" -type f -printf '%s:%p\n' 2>/dev/null)
+    done < <(zu_find_with_sizes "$DEST_DIR")
 
     info "  Indexed $count files"
 }
@@ -479,7 +457,7 @@ check_duplicate() {
     local file="$1"
     DUPLICATE_PATH=""
 
-    local size=$(stat -c '%s' "$file" 2>/dev/null)
+    local size=$(file_size "$file")
     [[ -z "$size" ]] && return 1
 
     local matches="${SIZE_INDEX[$size]}"
@@ -641,14 +619,14 @@ cmd_import() {
         # Add to size index for subsequent duplicate detection
         if [[ "$dry_run" -eq 0 ]]; then
             local new_dest="$DEST_DIR/$SELECTED_AUTHOR/$SELECTED_BOOK"
-            while IFS=: read -r size filepath; do
+            while IFS=$'\t' read -r size filepath; do
                 [[ -z "$size" ]] && continue
                 if [[ -n "${SIZE_INDEX[$size]}" ]]; then
                     SIZE_INDEX[$size]+="|$filepath"
                 else
                     SIZE_INDEX[$size]="$filepath"
                 fi
-            done < <(find "$new_dest" -type f -printf '%s:%p\n' 2>/dev/null)
+            done < <(zu_find_with_sizes "$new_dest")
         fi
 
         echo ""

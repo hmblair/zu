@@ -19,48 +19,12 @@ PHOTO_EXTENSIONS=(jpg jpeg heic png cr2 cr3 nef arw dng raf)
 VIDEO_EXTENSIONS=(mp4 mov avi mkv)
 ALL_EXTENSIONS=($PHOTO_EXTENSIONS $VIDEO_EXTENSIONS)
 
-# Detect OS for portable commands
-IS_MACOS=0
-[[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=1
-
-# Detect fastest available hash command (xxhash is 5-10x faster than md5)
-if command -v xxhsum &>/dev/null; then
-    HASH_CMD="xxhsum"
-elif command -v xxh64sum &>/dev/null; then
-    HASH_CMD="xxh64sum"
-elif [[ $IS_MACOS -eq 1 ]]; then
-    HASH_CMD="md5 -r"
-else
-    HASH_CMD="md5sum"
-fi
-
-# Portable stat for file size
-file_size() {
-    if [[ $IS_MACOS -eq 1 ]]; then
-        stat -f '%z' "$1" 2>/dev/null
-    else
-        stat -c '%s' "$1" 2>/dev/null
-    fi
-}
-
-# Portable stat for mtime
-file_mtime() {
-    if [[ $IS_MACOS -eq 1 ]]; then
-        stat -f '%Sm' -t '%Y:%m:%d %H:%M:%S' "$1" 2>/dev/null
-    else
-        stat -c '%y' "$1" 2>/dev/null | sed 's/-/:/g; s/\.[0-9]*//'
-    fi
-}
-
-# Portable find with size output (size\tpath per line)
-find_with_sizes() {
-    local dir="$1"
-    if [[ $IS_MACOS -eq 1 ]]; then
-        /usr/bin/find "$dir" -type f -exec stat -f '%z	%N' {} + 2>/dev/null
-    else
-        /usr/bin/find "$dir" -type f -printf '%s\t%p\n' 2>/dev/null
-    fi
-}
+# Aliases for common functions (shorter names for this script)
+file_size() { zu_file_size "$@"; }
+file_mtime() { zu_file_mtime "$@"; }
+file_hash() { zu_file_hash "$@"; }
+progress_bar() { zu_progress_bar "$@"; }
+find_with_sizes() { zu_find_with_sizes "$@"; }
 
 # Libraries array: "name:path" or "name:host:path"
 typeset -a LIBRARIES=()
@@ -167,24 +131,6 @@ Examples:
   photosort --move ~/Downloads        # Move instead of copy
   photosort iphone                    # Import from iPhone
 EOF
-}
-
-progress_bar() {
-    local current="$1"
-    local total="$2"
-    local width=40
-    local pct=$((current * 100 / total))
-    local filled=$((current * width / total))
-    local empty=$((width - filled))
-
-    printf "\r  [%s%s] %d/%d (%d%%)" \
-        "$(printf '#%.0s' $(seq 1 $filled 2>/dev/null))" \
-        "$(printf '.%.0s' $(seq 1 $empty 2>/dev/null))" \
-        "$current" "$total" "$pct"
-}
-
-file_hash() {
-    $HASH_CMD "$1" 2>/dev/null | cut -d' ' -f1
 }
 
 files_match() {
