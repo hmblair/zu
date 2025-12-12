@@ -28,6 +28,7 @@ typeset -A LINECOUNT_CACHE
 typeset -A MTIME_CACHE
 typeset -A GIT_STATUS_CACHE
 typeset -A FILE_TYPE_CACHE
+typeset -a UNTRACKED_DIRS
 
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
@@ -206,6 +207,12 @@ build_caches() {
             if [[ "$git_file" == *" -> "* ]]; then
                 git_file="${git_file##* -> }"
             fi
+            # Track untracked directories (end with /)
+            if [[ "$git_st" == "??" && "$git_file" == */ ]]; then
+                UNTRACKED_DIRS+=("${git_root}/${git_file}")
+            fi
+            # Strip trailing slash from directories
+            git_file="${git_file%/}"
             local full_path="${git_root}/${git_file}"
             GIT_STATUS_CACHE[$full_path]="$git_st"
         done < "$git_status_tmp"
@@ -358,7 +365,18 @@ print_line() {
 
     # Git status indicator (only call function if file has status)
     local git_indicator=""
-    (( ${+GIT_STATUS_CACHE[$line]} )) && { get_git_status_indicator "$line"; git_indicator="$GIT_INDICATOR"; }
+    if (( ${+GIT_STATUS_CACHE[$line]} )); then
+        get_git_status_indicator "$line"
+        git_indicator="$GIT_INDICATOR"
+    elif (( ${#UNTRACKED_DIRS} )); then
+        # Check if inside an untracked directory
+        for udir in "${UNTRACKED_DIRS[@]}"; do
+            if [[ "$line" == ${udir}* ]]; then
+                git_indicator="${RED}${ICONS[git_untracked]:-?}${NC} "
+                break
+            fi
+        done
+    fi
 
     local out="${char}${git_indicator}${colour}${style}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
