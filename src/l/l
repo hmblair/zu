@@ -406,7 +406,7 @@ print_dir() {
     local files
     local skip_expand=0
 
-    if [[ -d $file ]] && [[ $depth -lt $maxdepth ]] && (( ! EXPAND_ALL )) && should_skip "${file:t}" "$file"; then
+    if [[ -d $file ]] && [[ $depth -lt $maxdepth ]] && (( ! EXPAND_ALL )) && (( depth > 0 )) && should_skip "${file:t}" "$file"; then
         skip_expand=1
     fi
 
