@@ -14,6 +14,7 @@ COUNT_LINES=0
 EXPAND_ALL=0
 CLEAR_SCREEN=0
 LIST_MODE=0
+GIT_STATUS=1
 SORT_BY=""       # "", "size", "time", "name"
 SORT_REVERSE=0
 DIRECTORIES=()
@@ -26,6 +27,7 @@ typeset -A GITIGNORE_CACHE
 typeset -A SIZE_CACHE
 typeset -A LINECOUNT_CACHE
 typeset -A MTIME_CACHE
+typeset -A GIT_STATUS_CACHE
 
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
@@ -82,6 +84,46 @@ is_ignored() {
     (( ${+GITIGNORE_CACHE[$path]} ))
 }
 
+# Get git status indicator for a path
+get_git_status_indicator() {
+    local path="$1"
+    local git_st="${GIT_STATUS_CACHE[$path]}"
+
+    [[ -z "$git_st" ]] && return
+
+    local index="${git_st:0:1}"
+    local worktree="${git_st:1:1}"
+
+    # Untracked files
+    if [[ "$git_st" == "??" ]]; then
+        echo "${ICONS[git_untracked]:-?}|$RED"
+        return
+    fi
+
+    # Ignored files
+    if [[ "$git_st" == "!!" ]]; then
+        return
+    fi
+
+    # Staged changes (index has changes)
+    if [[ "$index" != " " && "$index" != "?" ]]; then
+        echo "${ICONS[git_staged]:-+}|$YELLOW"
+        return
+    fi
+
+    # Unstaged modifications
+    if [[ "$worktree" == "M" ]]; then
+        echo "${ICONS[git_modified]:-M}|$RED"
+        return
+    fi
+
+    # Unstaged deletions
+    if [[ "$worktree" == "D" ]]; then
+        echo "${ICONS[git_deleted]:-D}|$RED"
+        return
+    fi
+}
+
 # Build all caches in parallel for a directory
 build_caches() {
     local abs_dir="$1"
@@ -91,17 +133,19 @@ build_caches() {
     local need_size="$5"
     local need_lines="$6"
     local need_mtime="$7"
+    local need_git_status="$8"
 
     # Base find arguments (reused by all cache builders)
     local -a base_args=(-maxdepth "$depth" -not -path '*/.git/*')
     (( ! hidden )) && base_args+=(-not -path '*/.*')
 
     # Create temp files only for needed caches
-    local git_tmp="" size_tmp="" line_tmp="" mtime_tmp=""
+    local git_tmp="" size_tmp="" line_tmp="" mtime_tmp="" git_status_tmp=""
     (( need_git )) && git_tmp=$(/usr/bin/mktemp)
     (( need_size )) && size_tmp=$(/usr/bin/mktemp)
     (( need_lines )) && line_tmp=$(/usr/bin/mktemp)
     (( need_mtime )) && mtime_tmp=$(/usr/bin/mktemp)
+    (( need_git_status )) && git_status_tmp=$(/usr/bin/mktemp)
 
     # Run cache builders in parallel
     [[ -n "$git_tmp" ]] && {
@@ -115,6 +159,9 @@ build_caches() {
     } &
     [[ -n "$mtime_tmp" ]] && {
         /usr/bin/find "$abs_dir" "${base_args[@]}" -exec /usr/bin/stat -f '%m %N' {} + 2>/dev/null > "$mtime_tmp"
+    } &
+    [[ -n "$git_status_tmp" ]] && {
+        /usr/bin/git -C "$abs_dir" status --porcelain 2>/dev/null > "$git_status_tmp"
     } &
     wait
 
@@ -142,6 +189,22 @@ build_caches() {
             [[ -n "$path" ]] && MTIME_CACHE[$path]="$mtime"
         done < "$mtime_tmp"
         /bin/rm -f "$mtime_tmp"
+    }
+    [[ -n "$git_status_tmp" ]] && {
+        local git_root
+        git_root=$(/usr/bin/git -C "$abs_dir" rev-parse --show-toplevel 2>/dev/null)
+        while IFS= read -r git_line; do
+            [[ -z "$git_line" ]] && continue
+            local git_st="${git_line:0:2}"
+            local git_file="${git_line:3}"
+            # Handle renamed files (format: "R  old -> new")
+            if [[ "$git_file" == *" -> "* ]]; then
+                git_file="${git_file##* -> }"
+            fi
+            local full_path="${git_root}/${git_file}"
+            GIT_STATUS_CACHE[$full_path]="$git_st"
+        done < "$git_status_tmp"
+        /bin/rm -f "$git_status_tmp"
     }
 }
 
@@ -287,7 +350,19 @@ print_line() {
     local style=""
     [[ "${line:t}" == .* ]] && style="${ITALIC}"
 
-    local out="${char}${colour}${style}${icon} ${line:t}${NC}"
+    # Git status indicator
+    local git_indicator=""
+    if (( GIT_STATUS )); then
+        local indicator_info
+        indicator_info=$(get_git_status_indicator "$line")
+        if [[ -n "$indicator_info" ]]; then
+            local indicator_char="${indicator_info%%|*}"
+            local indicator_color="${indicator_info##*|}"
+            git_indicator="${indicator_color}${indicator_char}${NC} "
+        fi
+    fi
+
+    local out="${char}${git_indicator}${colour}${style}${icon} ${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
         local size="${SIZE_CACHE[$line]:-?}"
         out+=" ${GREY}(${size})${NC}"
@@ -494,8 +569,9 @@ for dir in "${DIRECTORIES[@]}"; do
     in_git=0
     /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null && in_git=1
     need_mtime=$([[ "$SORT_BY" == "time" ]] && echo 1 || echo 0)
+    need_git_status=$(( in_git && GIT_STATUS ))
 
-    build_caches "${dir:A}" "$DEPTH" "$HIDDEN" "$in_git" "$SIZES" "$COUNT_LINES" "$need_mtime"
+    build_caches "${dir:A}" "$DEPTH" "$HIDDEN" "$in_git" "$SIZES" "$COUNT_LINES" "$need_mtime" "$need_git_status"
 done
 
 # Clear screen if requested
