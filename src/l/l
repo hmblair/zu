@@ -29,6 +29,15 @@ typeset -A MTIME_CACHE
 typeset -A GIT_STATUS_CACHE
 typeset -A FILE_TYPE_CACHE
 typeset -a UNTRACKED_DIRS
+typeset -a TEMP_FILES
+
+# Cleanup temp files on exit/interrupt
+cleanup() {
+    for f in "${TEMP_FILES[@]}"; do
+        [[ -f "$f" ]] && /bin/rm -f "$f"
+    done
+}
+trap cleanup EXIT INT TERM
 
 # Disable colors if not a tty
 if [[ ! -t 1 ]]; then
@@ -145,12 +154,12 @@ build_caches() {
 
     # Create temp files only for needed caches
     local git_tmp="" size_tmp="" line_tmp="" mtime_tmp="" git_status_tmp="" ftype_tmp=""
-    (( need_git )) && git_tmp=$(/usr/bin/mktemp)
-    (( need_size )) && size_tmp=$(/usr/bin/mktemp)
-    (( need_lines )) && line_tmp=$(/usr/bin/mktemp)
-    (( need_mtime )) && mtime_tmp=$(/usr/bin/mktemp)
-    (( need_git_status )) && git_status_tmp=$(/usr/bin/mktemp)
-    ftype_tmp=$(/usr/bin/mktemp)
+    if (( need_git )); then git_tmp=$(/usr/bin/mktemp); TEMP_FILES+=("$git_tmp"); fi
+    if (( need_size )); then size_tmp=$(/usr/bin/mktemp); TEMP_FILES+=("$size_tmp"); fi
+    if (( need_lines )); then line_tmp=$(/usr/bin/mktemp); TEMP_FILES+=("$line_tmp"); fi
+    if (( need_mtime )); then mtime_tmp=$(/usr/bin/mktemp); TEMP_FILES+=("$mtime_tmp"); fi
+    if (( need_git_status )); then git_status_tmp=$(/usr/bin/mktemp); TEMP_FILES+=("$git_status_tmp"); fi
+    ftype_tmp=$(/usr/bin/mktemp); TEMP_FILES+=("$ftype_tmp")
 
     # Run cache builders in parallel
     [[ -n "$git_tmp" ]] && {
@@ -266,7 +275,9 @@ sort_files() {
     case "$SORT_BY" in
         size)
             # Sort by size (largest first by default) - use cache if available
-            sorted=($(for f in "${input[@]}"; do
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && sorted+=("$f")
+            done < <(for f in "${input[@]}"; do
                 local size=0
                 if [[ -n "${SIZE_CACHE[$f]}" ]]; then
                     size="${SIZE_CACHE[$f]}"
@@ -275,23 +286,31 @@ sort_files() {
                     size=${size:-0}
                 fi
                 printf '%s\t%s\n' "$size" "$f"
-            done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-))
+            done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-)
             ;;
         time)
             # Sort by mtime (newest first by default) - use cache if available
-            sorted=($(for f in "${input[@]}"; do
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && sorted+=("$f")
+            done < <(for f in "${input[@]}"; do
                 local mtime=0
                 if [[ -n "${MTIME_CACHE[$f]}" ]]; then
                     mtime="${MTIME_CACHE[$f]}"
                 elif [[ -e "$f" ]]; then
-                    mtime=$(/usr/bin/stat -f '%m' "$f" 2>/dev/null || /usr/bin/stat -c '%Y' "$f" 2>/dev/null || echo 0)
+                    if (( ZU_IS_MACOS )); then
+                        mtime=$(/usr/bin/stat -f '%m' "$f" 2>/dev/null || echo 0)
+                    else
+                        mtime=$(stat -c '%Y' "$f" 2>/dev/null || echo 0)
+                    fi
                 fi
                 printf '%s\t%s\n' "$mtime" "$f"
-            done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-))
+            done | /usr/bin/sort -t$'\t' -k1 -n -r | /usr/bin/cut -f2-)
             ;;
         name)
             # Sort alphabetically
-            sorted=($(printf '%s\n' "${input[@]}" | /usr/bin/sort))
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && sorted+=("$f")
+            done < <(printf '%s\n' "${input[@]}" | /usr/bin/sort)
             ;;
         *)
             # No sorting
@@ -389,7 +408,7 @@ print_line() {
     if (( ${+GIT_STATUS_CACHE[$line]} )); then
         get_git_status_indicator "$line"
         git_indicator="$GIT_INDICATOR"
-    elif (( ${#UNTRACKED_DIRS} )); then
+    elif (( ${#UNTRACKED_DIRS[@]} )); then
         # Check if inside an untracked directory
         for udir in "${UNTRACKED_DIRS[@]}"; do
             if [[ "$line" == ${udir}* ]]; then
@@ -475,8 +494,7 @@ print_list() {
     local maxdepth="$2"
     local hidden="$3"
 
-    local -a find_args=(-maxdepth "$maxdepth")
-    (( ! hidden )) && find_args+=(-not -path '*/.*')
+    local -a find_args=(-maxdepth "$maxdepth" -not -path '*/.git/*')
 
     local -a items=()
     while IFS= read -r item; do
@@ -604,7 +622,7 @@ fi
 # Build caches
 for dir in "${DIRECTORIES[@]}"; do
     in_git=0
-    /usr/bin/git rev-parse --is-inside-work-tree &>/dev/null && in_git=1
+    /usr/bin/git -C "${dir:A}" rev-parse --is-inside-work-tree &>/dev/null && in_git=1
     need_mtime=$([[ "$SORT_BY" == "time" ]] && echo 1 || echo 0)
     need_git_status=$in_git
 
