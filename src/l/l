@@ -650,8 +650,10 @@ for dir in "${DIRECTORIES[@]}"; do
     /usr/bin/git -C "${dir:A}" rev-parse --is-inside-work-tree &>/dev/null && in_git=1
     need_mtime=$([[ "$SORT_BY" == "time" ]] && echo 1 || echo 0)
     need_git_status=$in_git
+    # Always check gitignore - there might be nested repos even if top dir isn't a repo
+    need_git=1
 
-    build_caches "${dir:A}" "$DEPTH" "$HIDDEN" "$in_git" "$SIZES" "$COUNT_LINES" "$need_mtime" "$need_git_status"
+    build_caches "${dir:A}" "$DEPTH" "$HIDDEN" "$need_git" "$SIZES" "$COUNT_LINES" "$need_mtime" "$need_git_status"
 done
 
 # Clear screen if requested
