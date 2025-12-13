@@ -139,8 +139,9 @@ build_caches() {
     local need_git_status="$8"
 
     # Base find arguments (reused by all cache builders)
+    # Note: Don't filter hidden paths here - we need to cache all files that might
+    # be encountered. The hidden filtering happens in print_dir via glob patterns.
     local -a base_args=(-maxdepth "$depth" -not -path '*/.git/*')
-    (( ! hidden )) && base_args+=(-not -path '*/.*')
 
     # Create temp files only for needed caches
     local git_tmp="" size_tmp="" line_tmp="" mtime_tmp="" git_status_tmp="" ftype_tmp=""
@@ -162,13 +163,23 @@ build_caches() {
         /usr/bin/find "$abs_dir" "${base_args[@]}" -type f -exec /usr/bin/wc -l {} + 2>/dev/null > "$line_tmp"
     } &
     [[ -n "$mtime_tmp" ]] && {
-        /usr/bin/find "$abs_dir" "${base_args[@]}" -exec /usr/bin/stat -f '%m %N' {} + 2>/dev/null > "$mtime_tmp"
+        if (( ZU_IS_MACOS )); then
+            /usr/bin/find "$abs_dir" "${base_args[@]}" -exec /usr/bin/stat -f '%m %N' {} + 2>/dev/null > "$mtime_tmp"
+        else
+            /usr/bin/find "$abs_dir" "${base_args[@]}" -exec stat -c '%Y %n' {} + 2>/dev/null > "$mtime_tmp"
+        fi
     } &
     [[ -n "$git_status_tmp" ]] && {
         /usr/bin/git -C "$abs_dir" status --porcelain 2>/dev/null > "$git_status_tmp"
     } &
     # File type cache: "Type|perms|path"
-    /usr/bin/find "$abs_dir" "${base_args[@]}" -exec /usr/bin/stat -f '%HT|%Sp|%N' {} + 2>/dev/null > "$ftype_tmp" &
+    # macOS: stat -f '%HT|%Sp|%N' -> "Directory|drwxr-xr-x|/path"
+    # Linux: stat -c '%F|%A|%n'   -> "directory|drwxr-xr-x|/path"
+    if (( ZU_IS_MACOS )); then
+        /usr/bin/find "$abs_dir" "${base_args[@]}" -exec /usr/bin/stat -f '%HT|%Sp|%N' {} + 2>/dev/null > "$ftype_tmp" &
+    else
+        /usr/bin/find "$abs_dir" "${base_args[@]}" -exec stat -c '%F|%A|%n' {} + 2>/dev/null > "$ftype_tmp" &
+    fi
     wait
 
     # Load results into caches
@@ -219,12 +230,14 @@ build_caches() {
         /bin/rm -f "$git_status_tmp"
     }
     # Load file type cache: "Type|perms|path" -> single char code
+    # macOS: "Symbolic Link", "Directory", "Regular File"
+    # Linux: "symbolic link", "directory", "regular file"
     while IFS='|' read -r ftype perms fpath; do
         [[ -z "$fpath" ]] && continue
         local code=""
-        case "$ftype" in
-            "Symbolic Link") code="l" ;;
-            "Directory") code="d" ;;
+        case "${ftype:l}" in  # :l converts to lowercase
+            symbolic\ link) code="l" ;;
+            directory) code="d" ;;
             *) [[ "${perms:3:1}" == "x" ]] && code="x" || code="f" ;;
         esac
         FILE_TYPE_CACHE[$fpath]="$code"
