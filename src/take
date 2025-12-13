@@ -9,6 +9,7 @@ input=""
 interrupted=false
 
 trap 'interrupted=true' INT
+trap 'echo; exit 130' QUIT
 
 copy_osc52() {
     # OSC 52 escape sequence - works over SSH with compatible terminals
@@ -33,10 +34,18 @@ copy_local() {
 from_stdin=false
 if [[ $# -eq 0 ]]; then
     from_stdin=true
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    while ! $interrupted; do
+        if ! IFS= read -t 1 -r line; then
+            # Check if it was just timeout vs EOF/error
+            if [[ $? -eq 1 ]]; then
+                # EOF - break
+                break
+            fi
+            # Timeout - continue loop to check interrupted flag
+            continue
+        fi
         [[ -n "$input" ]] && input+=$'\n'
         input+="$line"
-        $interrupted && break
     done
 else
     input=$(cat "$@" 2>&1)

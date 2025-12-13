@@ -1,0 +1,120 @@
+#!/usr/bin/env zsh
+
+# paste - Paste from clipboard to file or stdout
+# Uses OSC 52 escape sequence for SSH sessions
+
+source "${0:A:h}/common"
+
+output_file=""
+use_stdout=true
+
+# Parse arguments
+force_overwrite=false
+output_file=""
+use_stdout=true
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -f|--force)
+            force_overwrite=true
+            shift
+            ;;
+        -*)
+            echo "${RED}Unknown option: $1${NC}" >&2
+            exit 1
+            ;;
+        *)
+            if [[ -n "$output_file" ]]; then
+                echo "${RED}Too many arguments${NC}" >&2
+                exit 1
+            fi
+            output_file="$1"
+            use_stdout=false
+            shift
+            ;;
+    esac
+done
+
+paste_osc52() {
+    # OSC 52 query - request clipboard contents
+    printf '\033]52;c;?\a'
+    
+    # Read response with timeout
+    local response=""
+    local char
+    local timeout=5
+    local start_time=$(date +%s)
+    
+    # Look for OSC 52 response: \033]52;c;base64data\a or \033]52;c;base64data\033\\
+    while (( $(date +%s) - start_time < timeout )); do
+        if read -t 1 -k 1 char 2>/dev/null; then
+            response+="$char"
+            # Check if we have a complete response
+            if [[ "$response" =~ $'\033]52;c;([^'$'\a'']*)'$'\a' ]] || [[ "$response" =~ $'\033]52;c;([^'$'\033'']*)'$'\033\\' ]]; then
+                local base64_data="${match[1]}"
+                # Empty clipboard is valid - just return empty string
+                echo -n "$base64_data" | base64 -d 2>/dev/null
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+paste_local() {
+    if command -v pbpaste >/dev/null 2>&1; then
+        pbpaste
+    elif command -v xclip >/dev/null 2>&1; then
+        xclip -selection clipboard -o
+    elif command -v wl-paste >/dev/null 2>&1; then
+        wl-paste
+    else
+        return 1
+    fi
+}
+
+# Try local clipboard first (faster, more reliable)
+content=""
+method=""
+if [[ -z "$SSH_CONNECTION" ]]; then
+    if content=$(paste_local 2>/dev/null); then
+        method="clipboard"
+    else
+        echo "${RED}Failed to paste - no clipboard tool available${NC}" >&2
+        exit 1
+    fi
+else
+    # In SSH session - try local first, then OSC 52
+    if content=$(paste_local 2>/dev/null); then
+        method="clipboard"
+    elif content=$(paste_osc52 2>/dev/null); then
+        method="OSC 52"
+    else
+        echo "${RED}Failed to paste${NC}" >&2
+        exit 1
+    fi
+fi
+
+# Output to file or stdout
+if $use_stdout; then
+    echo -n "$content"
+    echo >&2
+    success "Pasted from $method to stdout" >&2
+else
+    # Check if file exists and ask for confirmation
+    if [[ -f "$output_file" ]] && ! $force_overwrite; then
+        echo -n "File '$output_file' exists. Overwrite? (y/N): " >&2
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            echo "Cancelled" >&2
+            exit 1
+        fi
+    fi
+    
+    if echo -n "$content" > "$output_file" 2>/dev/null; then
+        success "Pasted from $method to $output_file" >&2
+    else
+        echo "${RED}Failed to write to $output_file${NC}" >&2
+        exit 1
+    fi
+fi
