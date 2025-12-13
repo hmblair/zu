@@ -334,7 +334,15 @@ print_line() {
     case "$ftype" in
         l)  # Symlink - check target type
             target=${line:A}
-            case "${FILE_TYPE_CACHE[$target]}" in
+            local target_type="${FILE_TYPE_CACHE[$target]}"
+            # Fallback to direct check if target not in cache
+            if [[ -z "$target_type" ]]; then
+                if [[ -d "$target" ]]; then target_type="d"
+                elif [[ -x "$target" ]]; then target_type="x"
+                elif [[ -e "$target" ]]; then target_type="f"
+                fi
+            fi
+            case "$target_type" in
                 d) icon="${ICONS[symlink_dir]}"; colour=$CYAN ;;
                 x) icon="${ICONS[symlink_exec]}"; colour=$GREEN ;;
                 f) icon="${ICONS[symlink_file]}"; colour=$WHITE ;;
