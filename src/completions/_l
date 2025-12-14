@@ -10,6 +10,7 @@ _l() {
         '--depth[Limit tree depth]:depth:' \
         '--expand-all[Expand all directories (ignore NO_EXPAND list)]' \
         '--list[Flat list output (no tree structure)]' \
+        '--no-icons[Hide file/folder/git icons]' \
         '-S[Sort by size (largest first)]' \
         '-T[Sort by modification time (newest first)]' \
         '-N[Sort by name (alphabetical)]' \
