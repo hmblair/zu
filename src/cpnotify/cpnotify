@@ -1,0 +1,199 @@
+#!/usr/bin/env zsh
+
+# cpnotify - Clipboard notification daemon
+# Plays a sound when clipboard content changes
+
+SCRIPT_DIR="${0:A:h}"
+SCRIPT_PATH="${0:A}"
+source "$SCRIPT_DIR/../common"
+
+[[ $ZU_IS_MACOS -eq 1 ]] || error "cpnotify requires macOS."
+
+PLIST_LABEL="com.zu.cpnotify"
+PID_FILE="$HOME/.cpnotify.pid"
+SOUND="/System/Library/Sounds/Pop.aiff"
+SOUNDS_DIR="/System/Library/Sounds"
+POLL_INTERVAL=0.05  # seconds
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << EOF
+Usage: cpnotify <command>
+
+Plays a sound when you copy something to the clipboard.
+
+Commands:
+  on        Start the notification daemon
+  off       Stop the notification daemon
+  status    Show current status
+  install   Start automatically on login
+  uninstall Remove automatic startup
+
+Options:
+  --sound <path>   Use a custom sound file (default: Tink.aiff)
+
+EOF
+}
+
+get_change_count() {
+    osascript -e 'use framework "AppKit"' \
+              -e 'return (current application'\''s NSPasteboard'\''s generalPasteboard'\''s changeCount) as integer' 2>/dev/null
+}
+
+is_running() {
+    [[ -f "$PID_FILE" ]] || return 1
+    local pid=$(cat "$PID_FILE")
+    ps -p "$pid" >/dev/null 2>&1
+}
+
+run_daemon() {
+    local sound="$1"
+    local last_count=$(get_change_count)
+
+    while true; do
+        sleep "$POLL_INTERVAL"
+        local count=$(get_change_count)
+        if [[ "$count" != "$last_count" ]]; then
+            afplay "$sound" &
+            last_count="$count"
+        fi
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cpnotify_on() {
+    local sound="$SOUND"
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --sound)
+                sound="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if [[ ! -f "$sound" ]]; then
+        error "Sound file not found: $sound"
+    fi
+
+    if is_running; then
+        warn "Already running."
+        return 0
+    fi
+
+    # Run daemon in background
+    run_daemon "$sound" &
+    disown
+    echo $! > "$PID_FILE"
+    success "Clipboard notifications enabled."
+}
+
+cpnotify_off() {
+    if ! is_running; then
+        warn "Not running."
+        rm -f "$PID_FILE"
+        return 0
+    fi
+
+    kill "$(cat "$PID_FILE")" 2>/dev/null
+    rm -f "$PID_FILE"
+    success "Clipboard notifications disabled."
+}
+
+cpnotify_status() {
+    if is_running; then
+        echo "cpnotify is ${GREEN}on${NC} (PID: $(cat "$PID_FILE"))"
+    else
+        echo "cpnotify is ${RED}off${NC}"
+        rm -f "$PID_FILE"
+    fi
+
+    if zu_service_exists "$PLIST_LABEL"; then
+        local plist_file="$(zu_service_path "$PLIST_LABEL")"
+        if ! /usr/bin/grep -q "<string>$SCRIPT_PATH</string>" "$plist_file"; then
+            echo "Auto-start: ${RED}broken${NC} (wrong path - run 'cpnotify uninstall && cpnotify install')"
+        else
+            echo "Auto-start: ${GREEN}enabled${NC}"
+        fi
+    else
+        echo "Auto-start: ${RED}disabled${NC}"
+    fi
+}
+
+cpnotify_install() {
+    if zu_service_exists "$PLIST_LABEL"; then
+        warn "Already installed."
+        return 0
+    fi
+
+    # Get available sounds (Pop first as default)
+    local -a sounds=("Pop.aiff")
+    for f in "$SOUNDS_DIR"/*.aiff; do
+        local name="${f:t}"
+        [[ "$name" != "Pop.aiff" ]] && sounds+=("$name")
+    done
+
+    echo "Select notification sound:"
+    menu "${sounds[@]}"
+    local selected="${sounds[$?+1]}"
+    local sound_path="$SOUNDS_DIR/$selected"
+
+    zu_service_create "$PLIST_LABEL" "$SCRIPT_PATH" --args "on" "--sound" "$sound_path" --type "keep_alive"
+    zu_service_load "$PLIST_LABEL"
+    cpnotify_on --sound "$sound_path"
+    success "Installed with ${selected%.aiff} sound."
+}
+
+cpnotify_uninstall() {
+    if ! zu_service_exists "$PLIST_LABEL"; then
+        warn "Not installed."
+        return 0
+    fi
+
+    zu_service_remove "$PLIST_LABEL"
+    success "Uninstalled - cpnotify will no longer start on login."
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    case "$1" in
+        on)
+            shift
+            cpnotify_on "$@"
+            ;;
+        off)
+            cpnotify_off
+            ;;
+        status|"")
+            cpnotify_status
+            ;;
+        install)
+            cpnotify_install
+            ;;
+        uninstall)
+            cpnotify_uninstall
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            error "Unknown command: $1"
+            ;;
+    esac
+}
+
+main "$@"
