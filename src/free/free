@@ -220,21 +220,21 @@ case "$1" in
         usage
         ;;
     -n*)
-        # Parse -n flag
-        count=0
-        while getopts "n:" opt; do
-            case $opt in
-                n) count=$OPTARG ;;
-            esac
-        done
+        # Extract count from -nNUM format or -n NUM format
+        if [[ "$1" == "-n" ]]; then
+            count="$2"
+        else
+            count="${1#-n}"
+        fi
+
+        if [[ ! "$count" =~ ^[0-9]+$ ]] || [[ "$count" -le 0 ]]; then
+            error "Option -n requires a positive number"
+        fi
 
         # Show free space
         df -H / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
 
-        # Show largest files if -n was provided
-        if [[ $count -gt 0 ]]; then
-            cmd_show_files $count
-        fi
+        cmd_show_files $count
         ;;
     "")
         # No args - just show free space
