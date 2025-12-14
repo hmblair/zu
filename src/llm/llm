@@ -182,7 +182,7 @@ print(json.dumps({
 
     curl -sN "http://localhost:$SERVER_PORT/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d "$payload" | python3 -c "
+        -d "$payload" | python3 -u -c "
 import sys
 import json
 
@@ -233,7 +233,7 @@ print(json.dumps({
 
     curl -sN "http://localhost:$SERVER_PORT/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d "$payload" | python3 -c "
+        -d "$payload" | python3 -u -c "
 import sys
 import json
 from rich.console import Console
@@ -267,7 +267,7 @@ class CustomStyle(Style):
 console = Console()
 buffer = ''
 
-with Live(console=console, refresh_per_second=15, vertical_overflow='visible', transient=True) as live:
+with Live(console=console, refresh_per_second=90, vertical_overflow='visible', transient=True) as live:
     for line in sys.stdin:
         line = line.strip()
         if line.startswith('data: '):
@@ -296,7 +296,7 @@ conversation_loop() {
     local theme_file="$3"
     local format="$4"
 
-    python3 -c "
+    python3 -u -c "
 import sys
 import json
 import urllib.request
@@ -347,7 +347,7 @@ def query(msgs):
     buffer = ''
     with urllib.request.urlopen(req) as resp:
         if use_format:
-            with Live(console=console, refresh_per_second=15, vertical_overflow='visible', transient=True) as live:
+            with Live(console=console, refresh_per_second=90, vertical_overflow='visible', transient=True) as live:
                 for line in resp:
                     line = line.decode().strip()
                     if line.startswith('data: '):
