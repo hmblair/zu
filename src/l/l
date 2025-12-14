@@ -14,6 +14,7 @@ COUNT_LINES=0
 EXPAND_ALL=0
 CLEAR_SCREEN=0
 LIST_MODE=0
+NO_ICONS=0
 SORT_BY=""       # "", "size", "time", "name"
 SORT_REVERSE=0
 DIRECTORIES=()
@@ -61,6 +62,7 @@ usage() {
     echo "  --depth INT     Limit tree depth"
     echo "  --expand-all    Expand all directories (ignore NO_EXPAND list)"
     echo "  --list          Flat list output (no tree structure)"
+    echo "  --no-icons      Hide file/folder/git icons"
     echo ""
     echo "Sorting:"
     echo "  -S              Sort by size (largest first)"
@@ -99,6 +101,8 @@ is_ignored() {
 get_git_status_indicator() {
     GIT_INDICATOR=""
     local path="$1"
+    (( NO_ICONS )) && return
+
     local git_st="${GIT_STATUS_CACHE[$path]}"
 
     [[ -z "$git_st" ]] && return
@@ -371,32 +375,58 @@ print_line() {
 
     local ix
     local target=""
-    local icon="${ICONS[default]}"
+    local icon=""
     local colour="$WHITE"
     local ftype="${FILE_TYPE_CACHE[$line]}"
 
-    case "$ftype" in
-        l)  # Symlink - check target type
-            target=${line:A}
-            local target_type="${FILE_TYPE_CACHE[$target]}"
-            # Fallback to direct check if target not in cache
-            if [[ -z "$target_type" ]]; then
-                if [[ -d "$target" ]]; then target_type="d"
-                elif [[ -x "$target" ]]; then target_type="x"
-                elif [[ -e "$target" ]]; then target_type="f"
+    if (( ! NO_ICONS )); then
+        icon="${ICONS[default]}"
+        case "$ftype" in
+            l)  # Symlink - check target type
+                target=${line:A}
+                local target_type="${FILE_TYPE_CACHE[$target]}"
+                # Fallback to direct check if target not in cache
+                if [[ -z "$target_type" ]]; then
+                    if [[ -d "$target" ]]; then target_type="d"
+                    elif [[ -x "$target" ]]; then target_type="x"
+                    elif [[ -e "$target" ]]; then target_type="f"
+                    fi
                 fi
-            fi
-            case "$target_type" in
-                d) icon="${ICONS[symlink_dir]}"; colour=$CYAN ;;
-                x) icon="${ICONS[symlink_exec]}"; colour=$GREEN ;;
-                f) icon="${ICONS[symlink_file]}"; colour=$WHITE ;;
-                *) icon="${ICONS[symlink_broken]:-${ICONS[file]}}"; colour=$RED ;;
-            esac
-            ;;
-        d) icon="${ICONS[directory]}"; colour=$BLUE ;;
-        x) icon="${ICONS[executable]}"; colour=$GREEN ;;
-        f) icon="${ICONS[file]}"; colour=$WHITE ;;
-    esac
+                case "$target_type" in
+                    d) icon="${ICONS[symlink_dir]}"; colour=$CYAN ;;
+                    x) icon="${ICONS[symlink_exec]}"; colour=$GREEN ;;
+                    f) icon="${ICONS[symlink_file]}"; colour=$WHITE ;;
+                    *) icon="${ICONS[symlink_broken]:-${ICONS[file]}}"; colour=$RED ;;
+                esac
+                ;;
+            d) icon="${ICONS[directory]}"; colour=$BLUE ;;
+            x) icon="${ICONS[executable]}"; colour=$GREEN ;;
+            f) icon="${ICONS[file]}"; colour=$WHITE ;;
+        esac
+    else
+        # When no icons, still determine file type for color
+        case "$ftype" in
+            l)
+                target=${line:A}
+                local target_type="${FILE_TYPE_CACHE[$target]}"
+                if [[ -z "$target_type" ]]; then
+                    if [[ -d "$target" ]]; then target_type="d"
+                    elif [[ -x "$target" ]]; then target_type="x"
+                    elif [[ -e "$target" ]]; then target_type="f"
+                    fi
+                fi
+                case "$target_type" in
+                    d) colour=$CYAN ;;
+                    x) colour=$GREEN ;;
+                    f) colour=$WHITE ;;
+                    *) colour=$RED ;;
+                esac
+                ;;
+            d) colour=$BLUE ;;
+            x) colour=$GREEN ;;
+            f) colour=$WHITE ;;
+        esac
+    fi
 
     if [[ ${line:A} == ${PWD} ]]; then
         colour=$YELLOW_B
@@ -443,7 +473,11 @@ print_line() {
         done
     fi
 
-    local out="${char}${git_indicator}${colour}${style}${icon} ${line:t}${NC}"
+    local out="${char}${git_indicator}${colour}${style}"
+    if (( ! NO_ICONS )); then
+        out+="${icon} "
+    fi
+    out+="${line:t}${NC}"
     if [[ $SIZES -gt 0 ]]; then
         local size="${SIZE_CACHE[$line]:-?}"
         out+=" ${GREY}(${size})${NC}"
@@ -607,6 +641,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --list)
             LIST_MODE=1
+            shift
+            ;;
+        --no-icons)
+            NO_ICONS=1
             shift
             ;;
         -S)
