@@ -1,13 +1,30 @@
 #compdef llm
 
 _llm() {
-    _arguments \
+    local curcontext="$curcontext" state
+
+    _arguments -C \
         '(-m --model)'{-m,--model}'[HuggingFace model]:model:' \
-        '(-c --context)'{-c,--context}'[Context size]:size:' \
-        '(-q --quick)'{-q,--quick}'[Single response, no chat mode]' \
+        '(-s --system)'{-s,--system}'[Use named system prompt]:prompt:' \
+        '(-c --conversation)'{-c,--conversation}'[Enable multi-turn conversation]' \
+        '(-r --raw)'{-r,--raw}'[Disable markdown formatting]' \
         '(-v --verbose)'{-v,--verbose}'[Show llama-cli output]' \
         '(-h --help)'{-h,--help}'[Show help]' \
+        '1:command:->cmd' \
         '*:prompt:'
+
+    case $state in
+        cmd)
+            local -a commands
+            commands=(
+                'prompts:Manage system prompts'
+                'serve:Start server (keeps model in memory)'
+                'stop:Stop server'
+                'status:Show server and prompt status'
+            )
+            _describe -t commands 'command' commands
+            ;;
+    esac
 }
 
 _llm "$@"
