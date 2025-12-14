@@ -382,6 +382,11 @@ def query(msgs):
             print()
     return buffer
 
+# ANSI colors
+YELLOW = '\033[33m'
+GREY = '\033[90m'
+NC = '\033[0m'
+
 # Main conversation loop
 while True:
     response = query(messages)
@@ -391,10 +396,12 @@ while True:
     # Get next input
     try:
         print()
-        user_input = input('> ')
+        print(f'{GREY}───────────────────────────────────────{NC}')
+        user_input = input(f'{YELLOW}> {NC}')
         if not user_input.strip():
             break
         messages.append({'role': 'user', 'content': user_input})
+        print()
     except (EOFError, KeyboardInterrupt):
         print()
         break
