@@ -310,7 +310,9 @@ use_format = '$format' == 'true'
 messages = []
 if system_prompt:
     messages.append({'role': 'system', 'content': system_prompt})
-messages.append({'role': 'user', 'content': '''$initial_prompt'''})
+initial = '''$initial_prompt'''
+if initial:
+    messages.append({'role': 'user', 'content': initial})
 
 # Setup for formatted output
 if use_format:
@@ -388,10 +390,16 @@ GREY = '\033[90m'
 NC = '\033[0m'
 
 # Main conversation loop
+first = True
 while True:
-    response = query(messages)
-    if response:
-        messages.append({'role': 'assistant', 'content': response})
+    # Skip first query if no initial prompt
+    if first and not initial:
+        first = False
+    else:
+        response = query(messages)
+        if response:
+            messages.append({'role': 'assistant', 'content': response})
+        first = False
 
     # Get next input
     try:
@@ -694,6 +702,9 @@ run_llm() {
         PROMPT="$*"
     elif [[ ! -t 0 ]]; then
         PROMPT=$(cat)
+    elif $CONVERSATION; then
+        # Allow empty prompt in conversation mode
+        PROMPT=""
     else
         echo "Error: No prompt provided" >&2
         echo "Usage: llm \"your prompt\" or echo \"prompt\" | llm" >&2
