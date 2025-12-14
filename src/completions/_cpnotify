@@ -1,0 +1,33 @@
+#compdef cpnotify
+
+_cpnotify() {
+    local -a commands
+    commands=(
+        'on:Start the notification daemon'
+        'off:Stop the notification daemon'
+        'status:Show current status'
+        'install:Start automatically on login'
+        'uninstall:Remove automatic startup'
+        'help:Show usage'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe -t commands 'cpnotify command' commands
+            ;;
+        args)
+            case $words[1] in
+                on)
+                    _arguments \
+                        '--sound[Sound file to play]:sound file:_files -g "*.aiff"'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_cpnotify "$@"
