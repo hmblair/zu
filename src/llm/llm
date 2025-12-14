@@ -7,11 +7,13 @@ source "$SCRIPT_DIR/../common"
 # Configuration
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llm"
 PROMPTS_FILE="$CONFIG_DIR/prompts"
-SELECTED_FILE="$CONFIG_DIR/selected"
+SELECTED_PROMPT_FILE="$CONFIG_DIR/selected_prompt"
+SELECTED_MODEL_FILE="$CONFIG_DIR/selected_model"
 THEME_FILE="$SCRIPT_DIR/theme.json"
 PID_FILE="$CONFIG_DIR/server.pid"
+CACHE_DIR="$HOME/Library/Caches/llama.cpp"
 SERVER_PORT=8787
-MODEL="bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
+DEFAULT_MODEL="bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
 CONTEXT_SIZE=4096
 VERBOSE=false
 CONVERSATION=false
@@ -20,6 +22,25 @@ FORMAT=true
 # Ensure config directory exists
 mkdir -p "$CONFIG_DIR"
 
+# Load selected model (validate it exists in cache)
+model_in_cache() {
+    local model="$1"
+    # Convert model ID to manifest filename: owner/repo:quant -> manifest=owner=repo=quant.json
+    local manifest="${model//\//=}"  # / -> =
+    manifest="${manifest//:/=}"       # : -> =
+    [[ -f "$CACHE_DIR/manifest=${manifest}.json" ]]
+}
+
+if [[ -f "$SELECTED_MODEL_FILE" ]]; then
+    MODEL=$(<"$SELECTED_MODEL_FILE")
+    if ! model_in_cache "$MODEL"; then
+        MODEL="$DEFAULT_MODEL"
+        rm -f "$SELECTED_MODEL_FILE"
+    fi
+else
+    MODEL="$DEFAULT_MODEL"
+fi
+
 # Initialize default prompts if none exist
 if [[ ! -f "$PROMPTS_FILE" ]]; then
     cat > "$PROMPTS_FILE" <<'EOF'
@@ -27,14 +48,14 @@ concise	Be concise and direct. Give short answers without unnecessary explanatio
 detailed	Provide thorough, detailed explanations with examples.
 code	You are a coding assistant. Provide clean, working code with brief explanations.
 EOF
-    echo "concise" > "$SELECTED_FILE"
+    echo "concise" > "$SELECTED_PROMPT_FILE"
 fi
 
 # Get current system prompt
 get_system_prompt() {
     local selected
-    if [[ -f "$SELECTED_FILE" ]]; then
-        selected=$(<"$SELECTED_FILE")
+    if [[ -f "$SELECTED_PROMPT_FILE" ]]; then
+        selected=$(<"$SELECTED_PROMPT_FILE")
         grep "^$selected	" "$PROMPTS_FILE" | cut -f2-
     fi
 }
@@ -94,14 +115,40 @@ cmd_stop() {
 
 cmd_status() {
     if server_running; then
-        echo "Server: ${GREEN}running${NC} (PID: $(cat "$PID_FILE"), port: $SERVER_PORT)"
+        local pid=$(cat "$PID_FILE")
+        echo "Server: ${GREEN}running${NC} (PID: $pid, port: $SERVER_PORT)"
+
+        # Get model from server
+        local model=$(curl -s "http://localhost:$SERVER_PORT/v1/models" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('data', [{}])[0].get('id', 'unknown'))
+except:
+    print('unknown')
+" 2>/dev/null)
+        echo "Model:  ${CYAN}${model}${NC}"
+
+        # Get memory usage (RSS in human-readable format)
+        local mem_kb=$(ps -p "$pid" -o rss= 2>/dev/null | tr -d ' ')
+        if [[ -n "$mem_kb" ]]; then
+            local mem_mb=$((mem_kb / 1024))
+            if [[ $mem_mb -ge 1024 ]]; then
+                local mem_gb_int=$((mem_mb / 1024))
+                local mem_gb_frac=$(((mem_mb % 1024) * 10 / 1024))
+                echo "Memory: ${CYAN}${mem_gb_int}.${mem_gb_frac}G${NC}"
+            else
+                echo "Memory: ${CYAN}${mem_mb}M${NC}"
+            fi
+        fi
     else
         echo "Server: ${RED}stopped${NC}"
+        echo "Model:  ${CYAN}${MODEL}${NC}"
         rm -f "$PID_FILE"
     fi
 
     local selected=""
-    [[ -f "$SELECTED_FILE" ]] && selected=$(<"$SELECTED_FILE")
+    [[ -f "$SELECTED_PROMPT_FILE" ]] && selected=$(<"$SELECTED_PROMPT_FILE")
     echo "Prompt: ${CYAN}${selected:-none}${NC}"
 }
 
@@ -357,7 +404,7 @@ while True:
 # Interactive prompt selection menu
 cmd_prompts() {
     local selected=""
-    [[ -f "$SELECTED_FILE" ]] && selected=$(<"$SELECTED_FILE")
+    [[ -f "$SELECTED_PROMPT_FILE" ]] && selected=$(<"$SELECTED_PROMPT_FILE")
 
     echo ""
     info "System Prompts"
@@ -396,7 +443,7 @@ cmd_prompts() {
         if [[ $choice -lt $num_prompts ]]; then
             # Select this prompt and exit (zsh arrays are 1-indexed)
             selected="${prompt_names[$((choice + 1))]}"
-            echo "$selected" > "$SELECTED_FILE"
+            echo "$selected" > "$SELECTED_PROMPT_FILE"
             break
         elif [[ $choice -eq $num_prompts ]]; then
             # Add new prompt
@@ -414,7 +461,7 @@ cmd_prompts() {
             printf '%s\t%s\n' "$new_name" "$new_prompt" >> "$PROMPTS_FILE"
             # Auto-select new prompt and exit
             selected="$new_name"
-            echo "$selected" > "$SELECTED_FILE"
+            echo "$selected" > "$SELECTED_PROMPT_FILE"
             break
         elif [[ $choice -eq $((num_prompts + 1)) ]]; then
             # Remove prompt submenu
@@ -437,7 +484,7 @@ cmd_prompts() {
                 # If we removed the selected prompt, clear selection
                 if [[ "$rm_name" == "$selected" ]]; then
                     selected=""
-                    rm -f "$SELECTED_FILE"
+                    rm -f "$SELECTED_PROMPT_FILE"
                 fi
             fi
         else
@@ -454,6 +501,116 @@ cmd_prompts() {
     fi
 }
 
+# Apply model change - restart server if running
+apply_model_change() {
+    echo "$MODEL" > "$SELECTED_MODEL_FILE"
+
+    if server_running; then
+        info "Restarting server with new model..."
+        cmd_stop
+        cmd_serve
+    fi
+}
+
+# Interactive model selection menu
+cmd_models() {
+    local prev_model="$MODEL"
+    local changed=false
+
+    echo ""
+    info "Models"
+    echo "─────────────────────────────────────────"
+
+    while true; do
+        local -a menu_opts=()
+        local -a model_ids=()
+
+        # Parse manifest files to get model IDs
+        for manifest in "$CACHE_DIR"/manifest=*.json; do
+            [[ ! -f "$manifest" ]] && continue
+            # Extract model ID from manifest filename: manifest=owner=repo=quant.json -> owner/repo:quant
+            local basename="${manifest:t:r}"  # remove path and .json
+            basename="${basename#manifest=}"   # remove manifest= prefix
+            local owner="${basename%%=*}"
+            basename="${basename#*=}"
+            local repo="${basename%%=*}"
+            local quant="${basename#*=}"
+            local model_id="$owner/$repo:$quant"
+            model_ids+=("$model_id")
+            if [[ "$model_id" == "$MODEL" ]]; then
+                menu_opts+=("${GREEN}●${NC} $model_id")
+            else
+                menu_opts+=("  $model_id")
+            fi
+        done
+
+        menu_opts+=("${GREEN}+${NC} Add new model")
+        menu_opts+=("${CYAN}✓${NC} Done")
+
+        menu "${menu_opts[@]}"
+        local choice=$?
+
+        local num_models=${#model_ids[@]}
+
+        if [[ $choice -lt $num_models ]]; then
+            # Select this model
+            MODEL="${model_ids[$((choice + 1))]}"
+            if [[ "$MODEL" != "$prev_model" ]]; then
+                apply_model_change
+                changed=true
+            fi
+            break
+        elif [[ $choice -eq $num_models ]]; then
+            # Add new model - download it now
+            echo ""
+            local new_model=""
+            vared -p "  Model (owner/repo:quant): " new_model
+            [[ -z "$new_model" ]] && continue
+
+            # Try to download/validate the model
+            info "Downloading model..."
+            if ! llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null 2>&1; then
+                echo "  ${RED}Failed to download model${NC}"
+                continue
+            fi
+
+            MODEL="$new_model"
+            apply_model_change
+            changed=true
+            break
+        else
+            # Done
+            break
+        fi
+    done
+
+    echo ""
+    if $changed; then
+        success "Using model: $MODEL"
+    fi
+}
+
+# Config menu
+cmd_config() {
+    echo ""
+    info "Configuration"
+    echo "─────────────────────────────────────────"
+
+    local -a menu_opts=(
+        "  Prompts"
+        "  Models"
+        "${CYAN}✓${NC} Done"
+    )
+
+    menu "${menu_opts[@]}"
+    local choice=$?
+
+    case $choice in
+        0) cmd_prompts ;;
+        1) cmd_models ;;
+    esac
+}
+
 usage() {
     cat <<EOF
 Usage: llm [options] [prompt]
@@ -461,7 +618,7 @@ Usage: llm [options] [prompt]
        llm <command>
 
 Commands:
-    prompts              Interactive prompt manager
+    config               Configure prompts and models
     serve                Start server (keeps model in memory)
     stop                 Stop server
     status               Show server and prompt status
@@ -561,14 +718,8 @@ run_llm() {
         [[ -n "$SYSTEM_PROMPT" ]] && ARGS+=(--system-prompt "$SYSTEM_PROMPT")
         $CONVERSATION || ARGS+=(--single-turn --no-perf)
 
-        # Run llama-cli
-        if $FORMAT; then
-            if $VERBOSE; then
-                llama-cli "${ARGS[@]}" | glow -s "$SCRIPT_DIR/llm-glow-style.json" -
-            else
-                llama-cli "${ARGS[@]}" 2>/dev/null | glow -s "$SCRIPT_DIR/llm-glow-style.json" -
-            fi
-        elif $VERBOSE; then
+        # Run llama-cli (formatting only available with server mode)
+        if $VERBOSE; then
             exec llama-cli "${ARGS[@]}"
         else
             exec llama-cli "${ARGS[@]}" 2>/dev/null
@@ -578,8 +729,8 @@ run_llm() {
 
 # Main
 case "${1:-}" in
-    prompts)
-        cmd_prompts
+    config)
+        cmd_config
         ;;
     serve)
         cmd_serve

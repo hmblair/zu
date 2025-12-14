@@ -17,7 +17,7 @@ _llm() {
         cmd)
             local -a commands
             commands=(
-                'prompts:Manage system prompts'
+                'config:Configure prompts and models'
                 'serve:Start server (keeps model in memory)'
                 'stop:Stop server'
                 'status:Show server and prompt status'
