@@ -41,20 +41,22 @@ EOF
 is_running() {
     [[ -f "$PID_FILE" ]] || return 1
     local pid=$(cat "$PID_FILE")
-    ps -p "$pid" >/dev/null 2>&1
+    # Check if the PID is actually osascript (not a reused PID)
+    ps -p "$pid" -o comm= 2>/dev/null | grep -q osascript
 }
 
 run_daemon() {
     local sound="$1"
 
     # Run entirely in osascript - no shell round-trip for sound playback
-    osascript -l JavaScript -e "
+    # exec replaces subshell so PID file points to osascript directly
+    exec osascript -l JavaScript -e "
         ObjC.import('AppKit');
         const pb = $.NSPasteboard.generalPasteboard;
         const sound = $.NSSound.alloc.initWithContentsOfFileByReference('$sound', true);
         let lastCount = pb.changeCount;
         let lastPlayTime = 0;
-        const debounce = 0.3;  // seconds
+        const debounce = 0.2;  // seconds
 
         while (true) {
             $.NSThread.sleepForTimeInterval($POLL_INTERVAL);
