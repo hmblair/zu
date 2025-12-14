@@ -191,7 +191,7 @@ case "$1" in
     status)
         cmd_status
         ;;
-    *)
+    -n*)
         # Parse -n flag
         count=0
         while getopts "n:" opt; do
@@ -207,5 +207,12 @@ case "$1" in
         if [[ $count -gt 0 ]]; then
             cmd_show_files $count
         fi
+        ;;
+    "")
+        # No args - just show free space
+        df -H / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
+        ;;
+    *)
+        error "Unknown command: $1"
         ;;
 esac
