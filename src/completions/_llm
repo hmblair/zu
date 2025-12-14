@@ -1,0 +1,13 @@
+#compdef llm
+
+_llm() {
+    _arguments \
+        '(-m --model)'{-m,--model}'[HuggingFace model]:model:' \
+        '(-c --context)'{-c,--context}'[Context size]:size:' \
+        '(-q --quick)'{-q,--quick}'[Single response, no chat mode]' \
+        '(-v --verbose)'{-v,--verbose}'[Show llama-cli output]' \
+        '(-h --help)'{-h,--help}'[Show help]' \
+        '*:prompt:'
+}
+
+_llm "$@"
