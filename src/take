@@ -30,23 +30,30 @@ copy_local() {
     fi
 }
 
-# Get input (line by line to allow interruption)
+# Get input
 from_stdin=false
 if [[ $# -eq 0 ]]; then
     from_stdin=true
-    while ! $interrupted; do
-        if ! IFS= read -t 1 -r line; then
-            # Check if it was just timeout vs EOF/error
-            if [[ $? -eq 1 ]]; then
-                # EOF - break
-                break
+    # Check if stdin is a TTY (interactive) or pipe/file
+    if [[ -t 0 ]]; then
+        # Interactive - read line by line with timeout to allow interruption
+        while ! $interrupted; do
+            if ! IFS= read -t 1 -r line; then
+                # Check if it was just timeout vs EOF/error
+                if [[ $? -eq 1 ]]; then
+                    # EOF - break
+                    break
+                fi
+                # Timeout - continue loop to check interrupted flag
+                continue
             fi
-            # Timeout - continue loop to check interrupted flag
-            continue
-        fi
-        [[ -n "$input" ]] && input+=$'\n'
-        input+="$line"
-    done
+            [[ -n "$input" ]] && input+=$'\n'
+            input+="$line"
+        done
+    else
+        # Piped/file input - read all at once
+        input=$(cat)
+    fi
 else
     input=$(cat "$@" 2>&1)
 fi
