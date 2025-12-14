@@ -405,7 +405,7 @@ while True:
     try:
         print()
         print(f'{GREY}───────────────────────────────────────{NC}')
-        user_input = input(f'{YELLOW}> {NC}')
+        user_input = input(f'{YELLOW}❯ {NC}')
         if not user_input.strip():
             break
         messages.append({'role': 'user', 'content': user_input})
