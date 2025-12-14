@@ -38,11 +38,6 @@ Options:
 EOF
 }
 
-get_change_count() {
-    osascript -e 'use framework "AppKit"' \
-              -e 'return (current application'\''s NSPasteboard'\''s generalPasteboard'\''s changeCount) as integer' 2>/dev/null
-}
-
 is_running() {
     [[ -f "$PID_FILE" ]] || return 1
     local pid=$(cat "$PID_FILE")
@@ -51,16 +46,28 @@ is_running() {
 
 run_daemon() {
     local sound="$1"
-    local last_count=$(get_change_count)
 
-    while true; do
-        sleep "$POLL_INTERVAL"
-        local count=$(get_change_count)
-        if [[ "$count" != "$last_count" ]]; then
-            afplay "$sound" &
-            last_count="$count"
-        fi
-    done
+    # Run entirely in osascript - no shell round-trip for sound playback
+    osascript -l JavaScript -e "
+        ObjC.import('AppKit');
+        const pb = $.NSPasteboard.generalPasteboard;
+        const sound = $.NSSound.alloc.initWithContentsOfFileByReference('$sound', true);
+        let lastCount = pb.changeCount;
+        let lastPlayTime = 0;
+        const debounce = 0.3;  // seconds
+
+        while (true) {
+            $.NSThread.sleepForTimeInterval($POLL_INTERVAL);
+            const count = pb.changeCount;
+            const now = $.NSDate.date.timeIntervalSince1970;
+            if (count !== lastCount && (now - lastPlayTime) > debounce) {
+                sound.stop;
+                sound.play;
+                lastPlayTime = now;
+            }
+            lastCount = count;
+        }
+    " 2>/dev/null
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,6 +158,10 @@ cpnotify_install() {
 
     zu_service_create "$PLIST_LABEL" "$SCRIPT_PATH" --args "on" "--sound" "$sound_path" --type "keep_alive"
     zu_service_load "$PLIST_LABEL"
+    if is_running; then
+        kill "$(cat "$PID_FILE")" 2>/dev/null
+        rm -f "$PID_FILE"
+    fi
     cpnotify_on --sound "$sound_path"
     success "Installed with ${selected%.aiff} sound."
 }
