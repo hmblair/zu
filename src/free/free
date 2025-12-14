@@ -149,6 +149,31 @@ cmd_status() {
     fi
 }
 
+# Command: help
+usage() {
+    cat <<EOF
+Usage: free [command] [-n COUNT]
+
+Show disk space and find large files.
+
+Commands:
+    setup       Install daemon for hourly cache updates
+    uninstall   Remove daemon
+    update      Manually update the cache
+    status      Show daemon and cache status
+    reload      Reload daemon configuration
+    help        Show this help
+
+Options:
+    -n COUNT    Show top COUNT largest files from cache
+
+Examples:
+    free              Show free disk space
+    free -n 10        Show free space and top 10 largest files
+    free status       Check cache status
+EOF
+}
+
 # Command: show largest files from cache
 cmd_show_files() {
     local count=$1
@@ -190,6 +215,9 @@ case "$1" in
         ;;
     status)
         cmd_status
+        ;;
+    -h|--help|help)
+        usage
         ;;
     -n*)
         # Parse -n flag

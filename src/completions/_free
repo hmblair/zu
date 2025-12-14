@@ -3,15 +3,17 @@
 _free() {
     local -a commands
     commands=(
-        'setup:One-time setup'
-        'uninstall:Remove daemon and config'
-        'reload:Restart the daemon'
-        'update:Update the cache'
+        'setup:Install daemon for hourly cache updates'
+        'uninstall:Remove daemon'
+        'reload:Reload daemon configuration'
+        'update:Manually update the cache'
         'status:Show daemon and cache status'
+        'help:Show help'
     )
 
     _arguments -C \
-        '-n[Show n largest files]:count' \
+        '-n[Show top n largest files]:count' \
+        '(-h --help)'{-h,--help}'[Show help]' \
         '1:command:->command'
 
     case $state in
