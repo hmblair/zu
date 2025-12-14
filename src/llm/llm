@@ -267,7 +267,7 @@ class CustomStyle(Style):
 console = Console()
 buffer = ''
 
-with Live(console=console, refresh_per_second=90, vertical_overflow='visible', transient=True) as live:
+with Live(console=console, auto_refresh=False, transient=False) as live:
     for line in sys.stdin:
         line = line.strip()
         if line.startswith('data: '):
@@ -279,13 +279,9 @@ with Live(console=console, refresh_per_second=90, vertical_overflow='visible', t
                 content = obj.get('choices', [{}])[0].get('delta', {}).get('content', '')
                 if content:
                     buffer += content
-                    live.update(Markdown(buffer, code_theme=CustomStyle))
+                    live.update(Markdown(buffer, code_theme=CustomStyle), refresh=True)
             except:
                 pass
-
-# Final render outside Live context (so it stays on screen)
-if buffer:
-    console.print(Markdown(buffer, code_theme=CustomStyle))
 "
 }
 
@@ -349,7 +345,7 @@ def query(msgs):
     buffer = ''
     with urllib.request.urlopen(req) as resp:
         if use_format:
-            with Live(console=console, refresh_per_second=90, vertical_overflow='visible', transient=True) as live:
+            with Live(console=console, auto_refresh=False, transient=False) as live:
                 for line in resp:
                     line = line.decode().strip()
                     if line.startswith('data: '):
@@ -361,11 +357,9 @@ def query(msgs):
                             content = obj.get('choices', [{}])[0].get('delta', {}).get('content', '')
                             if content:
                                 buffer += content
-                                live.update(Markdown(buffer, code_theme=CustomStyle))
+                                live.update(Markdown(buffer, code_theme=CustomStyle), refresh=True)
                         except:
                             pass
-            if buffer:
-                console.print(Markdown(buffer, code_theme=CustomStyle))
         else:
             for line in resp:
                 line = line.decode().strip()
