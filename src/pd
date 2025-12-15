@@ -1,6 +1,7 @@
 #!/usr/bin/env zsh
 
-source "$(dirname "$0")/common"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/common"
 
 if [[ $# -eq 0 ]]; then
     # No arguments: print full path of current directory
