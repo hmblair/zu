@@ -22,6 +22,7 @@ usage() {
     echo "  remove [path]         Remove a path from a group"
     echo "  clean                 Remove nonexistent paths from groups"
     echo "  list                  Show all paths in current PATH"
+    echo "  find <name>           Find all PATH entries with executable"
     echo "  dir                   Show path config directory"
     echo ""
     echo "Add to .zshrc:"
@@ -216,6 +217,29 @@ cmd_dir() {
     echo "$PATH_DIR"
 }
 
+cmd_find() {
+    if [[ $# -eq 0 ]]; then
+        error "Usage: path find <executable>"
+    fi
+
+    local name="$1"
+    local results=()
+
+    while read -r dir; do
+        local full="$dir/$name"
+        if [[ -x "$full" ]]; then
+            results+=("$full")
+        fi
+    done < <(path_to_file)
+
+    if [[ ${#results[@]} -eq 0 ]]; then
+        echo "${RED}Error:${NC} $name not found" >&2
+        return 1
+    fi
+
+    printf '%s\n' "${results[@]}"
+}
+
 cmd_clean() {
     /bin/mkdir -p "$PATH_DIR"
 
@@ -280,6 +304,10 @@ case "${1:-}" in
         ;;
     list)
         cmd_list
+        ;;
+    find)
+        shift
+        cmd_find "$@"
         ;;
     dir)
         cmd_dir
