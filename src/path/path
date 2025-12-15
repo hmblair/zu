@@ -90,13 +90,32 @@ cmd_add() {
         fi
 
         echo "Select a group for '$resolved':"
-        local groups=("$PATH_DIR"/*)
-        if [[ ${#groups[@]} -eq 0 ]] || [[ ! -e "${groups[1]}" ]]; then
-            error "No path groups found. Create a group file in $PATH_DIR first."
-        fi
-        menu "${groups[@]:t}"
-        local group="${groups[$(($? + 1))]}"
+        local groups=("$PATH_DIR"/*(N))
+        local group_names=()
+        for g in "${groups[@]}"; do
+            [[ -f "$g" ]] && group_names+=("${g:t}")
+        done
+        group_names+=("Create new group")
+
+        menu "${group_names[@]}"
+        local idx=$(($? + 1))
         echo ""
+
+        local group
+        if [[ $idx -eq ${#group_names[@]} ]]; then
+            # Create new group
+            printf "Group name: "
+            read -r new_name
+            if [[ -z "$new_name" ]]; then
+                echo "${RED}Error:${NC} Group name cannot be empty"
+                continue
+            fi
+            group="$PATH_DIR/$new_name"
+            touch "$group"
+            echo "${GREEN}Created group '$new_name'${NC}"
+        else
+            group="${groups[$idx]}"
+        fi
 
         if /usr/bin/grep -Fxq "$resolved" "$group" 2>/dev/null; then
             echo "${YELLOW}Warning:${NC} $resolved is already in ${group:t}"
