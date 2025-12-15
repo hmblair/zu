@@ -1,0 +1,24 @@
+#!/usr/bin/env zsh
+
+source "$(dirname "$0")/common"
+
+if [[ $# -eq 0 ]]; then
+    # No arguments: print full path of current directory
+    pwd
+else
+    # Arguments provided: print full path of each file
+    for file in "$@"; do
+        if [[ ! -e "$file" ]]; then
+            error "File not found: $file"
+        fi
+        # Get absolute path
+        if [[ -d "$file" ]]; then
+            # If it's a directory, use cd to get full path
+            (cd "$file" && pwd)
+        else
+            # If it's a file, get directory and combine with filename
+            local dir="$(cd "$(dirname "$file")" && pwd)"
+            echo "${dir}/$(basename "$file")"
+        fi
+    done
+fi
