@@ -1,0 +1,9 @@
+#compdef pd
+
+_pd() {
+    _arguments -s \
+        '(-h --help)'{-h,--help}'[Show help message]' \
+        '*:file:_files'
+}
+
+_pd "$@"
