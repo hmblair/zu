@@ -3,6 +3,12 @@
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/common"
 
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo "Usage: ${0:t} [FILES]"
+    echo "Print full paths of files, or current directory if no files given"
+    exit 0
+fi
+
 if [[ $# -eq 0 ]]; then
     # No arguments: print full path of current directory
     pwd
