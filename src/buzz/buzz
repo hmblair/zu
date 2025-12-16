@@ -31,10 +31,16 @@ EOF
 }
 
 is_running() {
-    [[ -f "$PID_FILE" ]] || return 1
-    local pid=$(cat "$PID_FILE")
-    # Check if the PID is actually caffeinate (not a reused PID)
-    ps -p "$pid" -o comm= 2>/dev/null | grep -q caffeinate
+    # Check PID file first (manual start)
+    if [[ -f "$PID_FILE" ]]; then
+        local pid=$(cat "$PID_FILE")
+        if ps -p "$pid" -o comm= 2>/dev/null | grep -q caffeinate; then
+            return 0
+        fi
+        rm -f "$PID_FILE"  # Clean up stale PID file
+    fi
+    # Check for launchd-managed caffeinate
+    pgrep -qf "caffeinate -di" 2>/dev/null
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,6 +57,14 @@ buzz_on() {
         return 0
     fi
 
+    # If installed via launchd, load the service
+    if zu_service_exists "$PLIST_LABEL"; then
+        launchctl load "$(zu_service_path "$PLIST_LABEL")" 2>/dev/null
+        success "Buzz on - computer will stay awake."
+        return 0
+    fi
+
+    # Manual start
     nohup caffeinate -di >/dev/null 2>&1 &
     disown
     echo $! > "$PID_FILE"
@@ -64,6 +78,14 @@ buzz_off() {
         return 0
     fi
 
+    # If installed via launchd, unload the service (but keep it installed)
+    if zu_service_exists "$PLIST_LABEL"; then
+        launchctl unload "$(zu_service_path "$PLIST_LABEL")" 2>/dev/null
+        success "Buzz off - computer can sleep again."
+        return 0
+    fi
+
+    # Manual stop
     kill "$(cat "$PID_FILE")" 2>/dev/null
     rm -f "$PID_FILE"
     success "Buzz off - computer can sleep again."
@@ -71,19 +93,14 @@ buzz_off() {
 
 buzz_status() {
     if is_running; then
-        echo "Buzz is ${GREEN}on${NC} (PID: $(cat "$PID_FILE"))"
+        local pid=$(pgrep -f "caffeinate -di" 2>/dev/null | head -1)
+        echo "Buzz is ${GREEN}on${NC} (PID: $pid)"
     else
         echo "Buzz is ${RED}off${NC}"
-        rm -f "$PID_FILE"  # Clean up stale PID file
     fi
 
     if zu_service_exists "$PLIST_LABEL"; then
-        local plist_file="$(zu_service_path "$PLIST_LABEL")"
-        if ! /usr/bin/grep -q "<string>$SCRIPT_PATH</string>" "$plist_file"; then
-            echo "Auto-start: ${RED}broken${NC} (wrong path - run 'buzz uninstall && buzz install')"
-        else
-            echo "Auto-start: ${GREEN}enabled${NC}"
-        fi
+        echo "Auto-start: ${GREEN}enabled${NC}"
     else
         echo "Auto-start: ${RED}disabled${NC}"
     fi
@@ -95,8 +112,16 @@ buzz_install() {
         return 0
     fi
 
-    zu_service_create "$PLIST_LABEL" "$SCRIPT_PATH" --args "on"
+    # Run caffeinate directly with KeepAlive so launchd manages it
+    zu_service_create "$PLIST_LABEL" "/usr/bin/caffeinate" --args "-di" --type "keep_alive"
     zu_service_load "$PLIST_LABEL"
+
+    # Kill any manually-started caffeinate
+    if [[ -f "$PID_FILE" ]]; then
+        kill "$(cat "$PID_FILE")" 2>/dev/null
+        rm -f "$PID_FILE"
+    fi
+
     success "Installed - buzz will start on login."
 }
 
