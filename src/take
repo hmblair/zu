@@ -55,7 +55,11 @@ if [[ $# -eq 0 ]]; then
         input=$(cat)
     fi
 else
-    input=$(cat "$@" 2>&1)
+    for file in "$@"; do
+        [[ ! -e "$file" ]] && error "File not found: $file"
+        [[ -d "$file" ]] && error "Is a directory: $file"
+    done
+    input=$(cat "$@")
 fi
 
 # Echo to stderr so user can see what was copied (only when piping)
