@@ -379,6 +379,15 @@ print_line() {
     local colour="$WHITE"
     local ftype="${FILE_TYPE_CACHE[$line]}"
 
+    # Fallback if not in cache (e.g., stat failed due to permissions)
+    if [[ -z "$ftype" ]]; then
+        if [[ -L "$line" ]]; then ftype="l"
+        elif [[ -d "$line" ]]; then ftype="d"
+        elif [[ -x "$line" ]]; then ftype="x"
+        elif [[ -e "$line" ]]; then ftype="f"
+        fi
+    fi
+
     if (( ! NO_ICONS )); then
         icon="${ICONS[default]}"
         case "$ftype" in
