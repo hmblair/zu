@@ -71,7 +71,10 @@ cmd_reset() {
 }
 
 cmd_whereami() {
-    [[ -n "$SSH_CONNECTION" ]] || error "Not in SSH session"
+    if [[ -z "$SSH_CONNECTION" ]]; then
+        pwd
+        return
+    fi
 
     local host
     if [[ -f "$CONFIG_FILE" ]]; then
