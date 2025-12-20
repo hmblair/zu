@@ -408,7 +408,15 @@ print_line() {
                     *) icon="${ICONS[symlink_broken]:-${ICONS[file]}}"; colour=$RED ;;
                 esac
                 ;;
-            d) icon="${ICONS[directory]}"; colour=$BLUE ;;
+            d)
+                # Use current_dir icon if this is the current directory
+                if [[ ${line:A} == ${PWD} ]]; then
+                    icon="${ICONS[current_dir]:-${ICONS[directory]}}"
+                else
+                    icon="${ICONS[directory]}"
+                fi
+                colour=$BLUE
+                ;;
             x) icon="${ICONS[executable]}"; colour=$GREEN ;;
             f) icon="${ICONS[file]}"; colour=$WHITE ;;
         esac
