@@ -37,7 +37,7 @@ usage() {
     echo "  status                           Show last run status of all backups"
     echo "  list                             List all backup configurations"
     echo "  remove <name>                    Remove a backup and its schedule"
-    echo "  reset <name...>                  Reload schedule (fixes timezone drift)"
+    echo "  reset [name...]                  Reload schedule (all if no name given)"
     echo "  uninstall                        Remove passphrase and all backups"
     echo ""
     echo "Add options:"
@@ -1538,11 +1538,19 @@ cmd_remove() {
 }
 
 cmd_reset() {
-    if [[ $# -eq 0 ]]; then
-        error "Usage: bkup reset <name> [name...]"
+    local names=("$@")
+
+    # If no names provided, reset all backups
+    if [[ ${#names[@]} -eq 0 ]]; then
+        if [[ ! -d "$BACKUPS_DIR" ]] || [[ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]]; then
+            error "No backups configured"
+        fi
+        for config_file in "$BACKUPS_DIR"/*.json(N); do
+            names+=($(basename "$config_file" .json))
+        done
     fi
 
-    for NAME in "$@"; do
+    for NAME in "${names[@]}"; do
         if ! config_exists "$NAME"; then
             echo "${RED}Backup '$NAME' not found, skipping${NC}"
             continue
