@@ -1094,15 +1094,40 @@ int main(int argc, char **argv) {
 
     /* Get source directory (for icons.toml) */
     /* Binary is in bin/, icons.toml is in src/l/ */
-    char *exe_path = argv[0];
-    char *slash = strrchr(exe_path, '/');
+    char exe_abs[PATH_MAX];
+    if (strchr(argv[0], '/')) {
+        /* Has path component - resolve it */
+        if (realpath(argv[0], exe_abs) == NULL) {
+            strcpy(exe_abs, argv[0]);
+        }
+    } else {
+        /* No path - search PATH */
+        char *path_env = getenv("PATH");
+        int found = 0;
+        if (path_env) {
+            char *path_copy = xstrdup(path_env);
+            char *dir = strtok(path_copy, ":");
+            while (dir) {
+                char try_path[PATH_MAX];
+                snprintf(try_path, sizeof(try_path), "%s/%s", dir, argv[0]);
+                if (access(try_path, X_OK) == 0) {
+                    realpath(try_path, exe_abs);
+                    found = 1;
+                    break;
+                }
+                dir = strtok(NULL, ":");
+            }
+            free(path_copy);
+        }
+        if (!found) {
+            strcpy(exe_abs, argv[0]);
+        }
+    }
+
+    char *slash = strrchr(exe_abs, '/');
     if (slash) {
-        size_t len = slash - exe_path;
-        char bin_dir[PATH_MAX];
-        if (len >= sizeof(bin_dir)) len = sizeof(bin_dir) - 1;
-        memcpy(bin_dir, exe_path, len);
-        bin_dir[len] = '\0';
-        snprintf(g_script_dir, sizeof(g_script_dir), "%s/../src/l", bin_dir);
+        *slash = '\0';  /* Now exe_abs is the bin directory */
+        snprintf(g_script_dir, sizeof(g_script_dir), "%s/../src/l", exe_abs);
     } else {
         strcpy(g_script_dir, "../src/l");
     }
