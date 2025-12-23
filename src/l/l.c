@@ -1092,16 +1092,19 @@ int main(int argc, char **argv) {
         g_home[sizeof(g_home) - 1] = '\0';
     }
 
-    /* Get script directory (for icons.toml) */
+    /* Get source directory (for icons.toml) */
+    /* Binary is in bin/, icons.toml is in src/l/ */
     char *exe_path = argv[0];
     char *slash = strrchr(exe_path, '/');
     if (slash) {
         size_t len = slash - exe_path;
-        if (len >= sizeof(g_script_dir)) len = sizeof(g_script_dir) - 1;
-        memcpy(g_script_dir, exe_path, len);
-        g_script_dir[len] = '\0';
+        char bin_dir[PATH_MAX];
+        if (len >= sizeof(bin_dir)) len = sizeof(bin_dir) - 1;
+        memcpy(bin_dir, exe_path, len);
+        bin_dir[len] = '\0';
+        snprintf(g_script_dir, sizeof(g_script_dir), "%s/../src/l", bin_dir);
     } else {
-        strcpy(g_script_dir, ".");
+        strcpy(g_script_dir, "../src/l");
     }
 
     /* Initialize config with defaults */
