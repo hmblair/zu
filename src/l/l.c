@@ -229,6 +229,45 @@ static void abbreviate_home(const char *path, char *buf, size_t len) {
     }
 }
 
+/* Resolve executable path to find source directory */
+static void resolve_source_dir(const char *argv0, char *src_dir, size_t len) {
+    char exe_abs[PATH_MAX];
+    int found = 0;
+
+    if (strchr(argv0, '/')) {
+        /* Has path component - resolve it */
+        if (realpath(argv0, exe_abs) != NULL) found = 1;
+    } else {
+        /* No path - search PATH */
+        char *path_env = getenv("PATH");
+        if (path_env) {
+            char *path_copy = xstrdup(path_env);
+            char *dir = strtok(path_copy, ":");
+            while (dir) {
+                char try_path[PATH_MAX];
+                snprintf(try_path, sizeof(try_path), "%s/%s", dir, argv0);
+                if (access(try_path, X_OK) == 0 && realpath(try_path, exe_abs) != NULL) {
+                    found = 1;
+                    break;
+                }
+                dir = strtok(NULL, ":");
+            }
+            free(path_copy);
+        }
+    }
+
+    if (found) {
+        char *slash = strrchr(exe_abs, '/');
+        if (slash) {
+            *slash = '\0';
+            snprintf(src_dir, len, "%s/../src/l", exe_abs);
+            return;
+        }
+    }
+    strncpy(src_dir, "../src/l", len - 1);
+    src_dir[len - 1] = '\0';
+}
+
 /* Format size in human-readable form */
 static void format_size(off_t bytes, char *buf, size_t len) {
     const char *units[] = {"B", "K", "M", "G", "T", "P"};
@@ -514,6 +553,8 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd) {
     switch (type) {
         case FTYPE_DIR:
             return is_cwd ? icons->current_dir : icons->directory;
+        case FTYPE_FILE:
+            return icons->file;
         case FTYPE_EXEC:
             return icons->executable;
         case FTYPE_SYMLINK:
@@ -524,8 +565,9 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd) {
             return icons->symlink_exec[0] ? icons->symlink_exec : icons->symlink;
         case FTYPE_SYMLINK_BROKEN:
             return icons->symlink_broken[0] ? icons->symlink_broken : icons->symlink;
+        case FTYPE_UNKNOWN:
         default:
-            return icons->file;
+            return icons->default_icon;
     }
 }
 
@@ -1093,44 +1135,7 @@ int main(int argc, char **argv) {
     }
 
     /* Get source directory (for icons.toml) */
-    /* Binary is in bin/, icons.toml is in src/l/ */
-    char exe_abs[PATH_MAX];
-    if (strchr(argv[0], '/')) {
-        /* Has path component - resolve it */
-        if (realpath(argv[0], exe_abs) == NULL) {
-            strcpy(exe_abs, argv[0]);
-        }
-    } else {
-        /* No path - search PATH */
-        char *path_env = getenv("PATH");
-        int found = 0;
-        if (path_env) {
-            char *path_copy = xstrdup(path_env);
-            char *dir = strtok(path_copy, ":");
-            while (dir) {
-                char try_path[PATH_MAX];
-                snprintf(try_path, sizeof(try_path), "%s/%s", dir, argv[0]);
-                if (access(try_path, X_OK) == 0) {
-                    realpath(try_path, exe_abs);
-                    found = 1;
-                    break;
-                }
-                dir = strtok(NULL, ":");
-            }
-            free(path_copy);
-        }
-        if (!found) {
-            strcpy(exe_abs, argv[0]);
-        }
-    }
-
-    char *slash = strrchr(exe_abs, '/');
-    if (slash) {
-        *slash = '\0';  /* Now exe_abs is the bin directory */
-        snprintf(g_script_dir, sizeof(g_script_dir), "%s/../src/l", exe_abs);
-    } else {
-        strcpy(g_script_dir, "../src/l");
-    }
+    resolve_source_dir(argv[0], g_script_dir, sizeof(g_script_dir));
 
     /* Initialize config with defaults */
     Config cfg = {
