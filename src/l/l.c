@@ -49,6 +49,8 @@
 
 #define MAX_DEPTH 50
 #define MAX_ICON_LEN 16
+#define MAX_EXT_LEN 16
+#define MAX_EXT_ICONS 256
 #define HASH_SIZE 4096
 #define INITIAL_FILE_CAPACITY 64
 
@@ -109,6 +111,11 @@ typedef struct {
 } Config;
 
 typedef struct {
+    char ext[MAX_EXT_LEN];
+    char icon[MAX_ICON_LEN];
+} ExtIcon;
+
+typedef struct {
     char default_icon[MAX_ICON_LEN];
     char symlink[MAX_ICON_LEN];
     char symlink_dir[MAX_ICON_LEN];
@@ -123,6 +130,8 @@ typedef struct {
     char git_untracked[MAX_ICON_LEN];
     char git_staged[MAX_ICON_LEN];
     char git_deleted[MAX_ICON_LEN];
+    ExtIcon ext_icons[MAX_EXT_ICONS];
+    int ext_count;
 } Icons;
 
 typedef struct {
@@ -475,6 +484,7 @@ static void icons_init_defaults(Icons *icons) {
     strcpy(icons->git_untracked, "󰛑");
     strcpy(icons->git_staged, "");
     strcpy(icons->git_deleted, "");
+    icons->ext_count = 0;
 }
 
 static int parse_toml_line(const char *line, char *key, size_t key_len,
@@ -527,36 +537,72 @@ static void icons_load(Icons *icons, const char *script_dir) {
 
     char line[256];
     char key[64], value[MAX_ICON_LEN];
+    int in_extensions = 0;
 
     while (fgets(line, sizeof(line), f)) {
+        /* Check for section header */
+        const char *p = line;
+        while (*p && isspace(*p)) p++;
+        if (*p == '[') {
+            in_extensions = (strncmp(p, "[extensions]", 12) == 0);
+            continue;
+        }
+
         if (!parse_toml_line(line, key, sizeof(key), value, sizeof(value)))
             continue;
 
-        if (strcmp(key, "default") == 0) strcpy(icons->default_icon, value);
-        else if (strcmp(key, "directory") == 0) strcpy(icons->directory, value);
-        else if (strcmp(key, "current_dir") == 0) strcpy(icons->current_dir, value);
-        else if (strcmp(key, "file") == 0) strcpy(icons->file, value);
-        else if (strcmp(key, "executable") == 0) strcpy(icons->executable, value);
-        else if (strcmp(key, "symlink") == 0) strcpy(icons->symlink, value);
-        else if (strcmp(key, "symlink_dir") == 0) strcpy(icons->symlink_dir, value);
-        else if (strcmp(key, "symlink_exec") == 0) strcpy(icons->symlink_exec, value);
-        else if (strcmp(key, "symlink_file") == 0) strcpy(icons->symlink_file, value);
-        else if (strcmp(key, "symlink_broken") == 0) strcpy(icons->symlink_broken, value);
-        else if (strcmp(key, "git_modified") == 0) strcpy(icons->git_modified, value);
-        else if (strcmp(key, "git_untracked") == 0) strcpy(icons->git_untracked, value);
-        else if (strcmp(key, "git_staged") == 0) strcpy(icons->git_staged, value);
-        else if (strcmp(key, "git_deleted") == 0) strcpy(icons->git_deleted, value);
+        if (in_extensions) {
+            /* Add extension icon */
+            if (icons->ext_count < MAX_EXT_ICONS) {
+                strncpy(icons->ext_icons[icons->ext_count].ext, key, MAX_EXT_LEN - 1);
+                icons->ext_icons[icons->ext_count].ext[MAX_EXT_LEN - 1] = '\0';
+                strncpy(icons->ext_icons[icons->ext_count].icon, value, MAX_ICON_LEN - 1);
+                icons->ext_icons[icons->ext_count].icon[MAX_ICON_LEN - 1] = '\0';
+                icons->ext_count++;
+            }
+        } else {
+            if (strcmp(key, "default") == 0) strcpy(icons->default_icon, value);
+            else if (strcmp(key, "directory") == 0) strcpy(icons->directory, value);
+            else if (strcmp(key, "current_dir") == 0) strcpy(icons->current_dir, value);
+            else if (strcmp(key, "file") == 0) strcpy(icons->file, value);
+            else if (strcmp(key, "executable") == 0) strcpy(icons->executable, value);
+            else if (strcmp(key, "symlink") == 0) strcpy(icons->symlink, value);
+            else if (strcmp(key, "symlink_dir") == 0) strcpy(icons->symlink_dir, value);
+            else if (strcmp(key, "symlink_exec") == 0) strcpy(icons->symlink_exec, value);
+            else if (strcmp(key, "symlink_file") == 0) strcpy(icons->symlink_file, value);
+            else if (strcmp(key, "symlink_broken") == 0) strcpy(icons->symlink_broken, value);
+            else if (strcmp(key, "git_modified") == 0) strcpy(icons->git_modified, value);
+            else if (strcmp(key, "git_untracked") == 0) strcpy(icons->git_untracked, value);
+            else if (strcmp(key, "git_staged") == 0) strcpy(icons->git_staged, value);
+            else if (strcmp(key, "git_deleted") == 0) strcpy(icons->git_deleted, value);
+        }
     }
 
     fclose(f);
 }
 
-static const char *get_icon(const Icons *icons, FileType type, int is_cwd) {
+static const char *get_ext_icon(const Icons *icons, const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot || dot == name) return NULL;
+
+    const char *ext = dot + 1;
+    for (int i = 0; i < icons->ext_count; i++) {
+        if (strcmp(ext, icons->ext_icons[i].ext) == 0) {
+            return icons->ext_icons[i].icon;
+        }
+    }
+    return NULL;
+}
+
+static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
+                            const char *name) {
     switch (type) {
         case FTYPE_DIR:
             return is_cwd ? icons->current_dir : icons->directory;
-        case FTYPE_FILE:
-            return icons->file;
+        case FTYPE_FILE: {
+            const char *ext_icon = get_ext_icon(icons, name);
+            return ext_icon ? ext_icon : icons->file;
+        }
         case FTYPE_EXEC:
             return icons->executable;
         case FTYPE_SYMLINK:
@@ -887,7 +933,7 @@ static void print_entry(const char *path, const char *name, FileType type,
 
     /* Icon */
     if (!cfg->no_icons) {
-        printf("%s%s%s ", color, get_icon(icons, type, is_cwd), COLOR_RESET);
+        printf("%s%s%s ", color, get_icon(icons, type, is_cwd, name), COLOR_RESET);
     }
 
     /* Filename (full path in list mode) */
