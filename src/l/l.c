@@ -170,25 +170,27 @@ static char g_script_dir[PATH_MAX];  /* Directory containing this executable */
  * ============================================================================ */
 
 static void die(const char *msg) {
-    fprintf(stderr, "l: %s\n", msg);
+    int tty = isatty(STDERR_FILENO);
+    fprintf(stderr, "%sError:%s %s\n",
+            tty ? COLOR_RED : "", tty ? COLOR_RESET : "", msg);
     exit(1);
 }
 
 static char *xstrdup(const char *s) {
     char *dup = strdup(s);
-    if (!dup) die("out of memory");
+    if (!dup) die("Out of memory");
     return dup;
 }
 
 static void *xmalloc(size_t size) {
     void *p = malloc(size);
-    if (!p) die("out of memory");
+    if (!p) die("Out of memory");
     return p;
 }
 
 static void *xrealloc(void *ptr, size_t size) {
     void *p = realloc(ptr, size);
-    if (!p) die("out of memory");
+    if (!p) die("Out of memory");
     return p;
 }
 
@@ -1095,12 +1097,14 @@ static void parse_args(int argc, char **argv, Config *cfg,
                         case 'r': cfg->sort_reverse = 1; break;
                         case 'h': print_usage(); exit(0);
                         default:
-                            fprintf(stderr, "l: unknown option: -%c\n", arg[j]);
+                            fprintf(stderr, "%sError:%s Unknown option: -%c\n",
+                                    cfg->is_tty ? COLOR_RED : "", cfg->is_tty ? COLOR_RESET : "", arg[j]);
                             exit(1);
                     }
                 }
             } else {
-                fprintf(stderr, "l: unknown option: %s\n", arg);
+                fprintf(stderr, "%sError:%s Unknown option: %s\n",
+                        cfg->is_tty ? COLOR_RED : "", cfg->is_tty ? COLOR_RESET : "", arg);
                 exit(1);
             }
         } else {
@@ -1125,7 +1129,7 @@ static void parse_args(int argc, char **argv, Config *cfg,
 int main(int argc, char **argv) {
     /* Initialize global state */
     if (!getcwd(g_cwd, sizeof(g_cwd))) {
-        die("cannot determine current directory");
+        die("Cannot determine current directory");
     }
 
     const char *home = getenv("HOME");
