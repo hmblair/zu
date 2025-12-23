@@ -100,10 +100,14 @@ cmd_status() {
     echo "──────────────────────────────────"
 
     # Check daemon status
-    if zu_service_exists "$PLIST_LABEL"; then
-        printf "  Daemon:       ${GREEN}✓ installed${NC}\n"
-    else
+    if ! zu_service_exists "$PLIST_LABEL"; then
         printf "  Daemon:       ${YELLOW}✗ not installed${NC}\n"
+    elif zu_service_healthy "$PLIST_LABEL"; then
+        printf "  Daemon:       ${GREEN}✓ running${NC}\n"
+    else
+        local exit_code=$(zu_service_exit_code "$PLIST_LABEL")
+        printf "  Daemon:       ${RED}✗ error${NC} (exit $exit_code)\n"
+        has_error=true
     fi
 
     # Check status file

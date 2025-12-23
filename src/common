@@ -335,6 +335,26 @@ zu_service_exists() {
     [[ -f "$(zu_service_path "$label" "$level")" ]]
 }
 
+# Get the last exit code of a service (0 = healthy, non-zero = error)
+# Usage: zu_service_exit_code <label>
+# Returns: exit code, or empty string if service not registered
+zu_service_exit_code() {
+    local label="$1"
+    local info=$(launchctl list "$label" 2>/dev/null)
+    local raw=$(echo "$info" | awk '/LastExitStatus/ {print $3}' | tr -d ';')
+    [[ -n "$raw" ]] && echo $((raw / 256))
+}
+
+# Check if a service is healthy (exists and last exit was 0)
+# Usage: zu_service_healthy <label> [user|system]
+zu_service_healthy() {
+    local label="$1"
+    local level="${2:-user}"
+    zu_service_exists "$label" "$level" || return 1
+    local code=$(zu_service_exit_code "$label")
+    [[ -z "$code" ]] || [[ "$code" -eq 0 ]]
+}
+
 # Load a service
 # Usage: zu_service_load <label> [user|system]
 zu_service_load() {
