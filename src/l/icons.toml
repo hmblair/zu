@@ -1,5 +1,6 @@
 # Icons for l command (nerd font icons)
 default = ""
+symlink = ""
 symlink_dir = ""
 symlink_exec = ""
 symlink_file = ""

@@ -1,0 +1,1180 @@
+/*
+ * l - Enhanced directory listing with tree view
+ *
+ * A fast, portable directory listing tool with tree visualization,
+ * git integration, icons, and colors.
+ *
+ * Build: cc -O2 -Wall -Wextra -std=c99 -o l l.c
+ */
+
+/* ============================================================================
+ * Platform Detection & Includes
+ * ============================================================================ */
+
+#define _DEFAULT_SOURCE  /* For DT_* constants on Linux */
+#define _BSD_SOURCE      /* For compatibility */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <limits.h>
+#include <ctype.h>
+
+#if defined(__APPLE__) && defined(__MACH__)
+    #define PLATFORM_MACOS 1
+    #define GET_MTIME(st) ((st).st_mtimespec.tv_sec)
+#elif defined(__linux__)
+    #define PLATFORM_LINUX 1
+    #define GET_MTIME(st) ((st).st_mtim.tv_sec)
+#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+    #define PLATFORM_BSD 1
+    #define GET_MTIME(st) ((st).st_mtimespec.tv_sec)
+#else
+    #define PLATFORM_GENERIC 1
+    #define GET_MTIME(st) ((st).st_mtime)
+#endif
+
+#ifndef PATH_MAX
+    #define PATH_MAX 4096
+#endif
+
+/* ============================================================================
+ * Constants
+ * ============================================================================ */
+
+#define MAX_DEPTH 50
+#define MAX_ICON_LEN 16
+#define HASH_SIZE 4096
+#define INITIAL_FILE_CAPACITY 64
+
+/* Tree drawing characters (UTF-8) */
+#define TREE_VERT   "│  "
+#define TREE_BRANCH "├─ "
+#define TREE_LAST   "└─ "
+#define TREE_SPACE  "   "
+
+/* ============================================================================
+ * ANSI Color Codes
+ * ============================================================================ */
+
+static const char *COLOR_RESET      = "\033[0m";
+static const char *COLOR_RED        = "\033[0;31m";
+static const char *COLOR_GREEN      = "\033[0;32m";
+static const char *COLOR_YELLOW     = "\033[0;33m";
+static const char *COLOR_BLUE       = "\033[0;34m";
+static const char *COLOR_CYAN       = "\033[0;36m";
+static const char *COLOR_GREY       = "\033[90m";
+static const char *COLOR_WHITE      = "\033[0;37m";
+static const char *COLOR_YELLOW_BOLD = "\033[1;33m";
+static const char *STYLE_ITALIC     = "\033[3m";
+
+/* ============================================================================
+ * Data Structures
+ * ============================================================================ */
+
+typedef enum {
+    SORT_NONE,
+    SORT_SIZE,
+    SORT_TIME,
+    SORT_NAME
+} SortMode;
+
+typedef enum {
+    FTYPE_UNKNOWN,
+    FTYPE_DIR,
+    FTYPE_FILE,
+    FTYPE_EXEC,
+    FTYPE_SYMLINK,
+    FTYPE_SYMLINK_DIR,
+    FTYPE_SYMLINK_EXEC,
+    FTYPE_SYMLINK_BROKEN
+} FileType;
+
+typedef struct {
+    int max_depth;
+    int show_hidden;
+    int show_sizes;
+    int count_lines;
+    int expand_all;
+    int list_mode;
+    int no_icons;
+    int sort_reverse;
+    int is_tty;
+    SortMode sort_by;
+} Config;
+
+typedef struct {
+    char default_icon[MAX_ICON_LEN];
+    char symlink[MAX_ICON_LEN];
+    char symlink_dir[MAX_ICON_LEN];
+    char symlink_exec[MAX_ICON_LEN];
+    char symlink_file[MAX_ICON_LEN];
+    char symlink_broken[MAX_ICON_LEN];
+    char directory[MAX_ICON_LEN];
+    char current_dir[MAX_ICON_LEN];
+    char executable[MAX_ICON_LEN];
+    char file[MAX_ICON_LEN];
+    char git_modified[MAX_ICON_LEN];
+    char git_untracked[MAX_ICON_LEN];
+    char git_staged[MAX_ICON_LEN];
+    char git_deleted[MAX_ICON_LEN];
+} Icons;
+
+typedef struct {
+    char *path;              /* Full absolute path (owned) */
+    char *name;              /* Pointer to basename within path */
+    char *symlink_target;    /* Resolved symlink target (owned, NULL if not symlink) */
+    mode_t mode;
+    off_t size;
+    time_t mtime;
+    int line_count;          /* -1 if not computed */
+    int is_ignored;
+    char git_status[3];      /* e.g., "??", " M", "A " */
+    FileType type;
+} FileEntry;
+
+typedef struct {
+    FileEntry *entries;
+    size_t count;
+    size_t capacity;
+} FileList;
+
+typedef struct GitStatusNode {
+    char *path;
+    char status[3];
+    struct GitStatusNode *next;
+} GitStatusNode;
+
+typedef struct {
+    GitStatusNode *buckets[HASH_SIZE];
+    char *git_root;
+    int is_git_repo;
+} GitCache;
+
+/* ============================================================================
+ * Global State
+ * ============================================================================ */
+
+static char g_cwd[PATH_MAX];         /* Current working directory */
+static long g_total_lines = 0;       /* Total line count for -l option */
+static char g_home[PATH_MAX];        /* Home directory */
+static char g_script_dir[PATH_MAX];  /* Directory containing this executable */
+
+/* ============================================================================
+ * Utility Functions
+ * ============================================================================ */
+
+static void die(const char *msg) {
+    fprintf(stderr, "l: %s\n", msg);
+    exit(1);
+}
+
+static char *xstrdup(const char *s) {
+    char *dup = strdup(s);
+    if (!dup) die("out of memory");
+    return dup;
+}
+
+static void *xmalloc(size_t size) {
+    void *p = malloc(size);
+    if (!p) die("out of memory");
+    return p;
+}
+
+static void *xrealloc(void *ptr, size_t size) {
+    void *p = realloc(ptr, size);
+    if (!p) die("out of memory");
+    return p;
+}
+
+/* Simple djb2 hash */
+static unsigned int hash_string(const char *str) {
+    unsigned int hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
+    return hash % HASH_SIZE;
+}
+
+/* Get absolute path, resolving symlinks */
+static int get_realpath(const char *path, char *resolved) {
+    char *rp = realpath(path, resolved);
+    if (!rp) {
+        /* If realpath fails, try to at least get the absolute path */
+        if (path[0] == '/') {
+            strncpy(resolved, path, PATH_MAX - 1);
+            resolved[PATH_MAX - 1] = '\0';
+            return 0;
+        }
+        snprintf(resolved, PATH_MAX, "%s/%s", g_cwd, path);
+        return 0;
+    }
+    return 0;
+}
+
+/* Abbreviate home directory with ~ */
+static void abbreviate_home(const char *path, char *buf, size_t len) {
+    size_t home_len = strlen(g_home);
+    if (strncmp(path, g_home, home_len) == 0 &&
+        (path[home_len] == '/' || path[home_len] == '\0')) {
+        snprintf(buf, len, "~%s", path + home_len);
+    } else {
+        strncpy(buf, path, len - 1);
+        buf[len - 1] = '\0';
+    }
+}
+
+/* Format size in human-readable form */
+static void format_size(off_t bytes, char *buf, size_t len) {
+    const char *units[] = {"B", "K", "M", "G", "T", "P"};
+    int unit_idx = 0;
+    double size = (double)bytes;
+
+    while (size >= 1024 && unit_idx < 5) {
+        size /= 1024;
+        unit_idx++;
+    }
+
+    if (unit_idx == 0) {
+        snprintf(buf, len, "%lld%s", (long long)bytes, units[0]);
+    } else if (size < 10) {
+        snprintf(buf, len, "%.1f%s", size, units[unit_idx]);
+    } else {
+        snprintf(buf, len, "%.0f%s", size, units[unit_idx]);
+    }
+}
+
+/* Calculate recursive directory size (actual file bytes) */
+static off_t get_dir_size(const char *path) {
+    off_t total = 0;
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(full_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                total += get_dir_size(full_path);
+            } else {
+                total += st.st_size;
+            }
+        }
+    }
+    closedir(dir);
+    return total;
+}
+
+/* ============================================================================
+ * File List Management
+ * ============================================================================ */
+
+static void file_list_init(FileList *list) {
+    list->entries = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static void file_list_add(FileList *list, FileEntry *entry) {
+    if (list->count >= list->capacity) {
+        list->capacity = list->capacity ? list->capacity * 2 : INITIAL_FILE_CAPACITY;
+        list->entries = xrealloc(list->entries, list->capacity * sizeof(FileEntry));
+    }
+    list->entries[list->count++] = *entry;
+}
+
+static void file_entry_free(FileEntry *entry) {
+    free(entry->path);
+    free(entry->symlink_target);
+}
+
+static void file_list_free(FileList *list) {
+    for (size_t i = 0; i < list->count; i++) {
+        file_entry_free(&list->entries[i]);
+    }
+    free(list->entries);
+    list->entries = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+/* ============================================================================
+ * File Type Detection
+ * ============================================================================ */
+
+static FileType detect_file_type(const char *path, struct stat *st,
+                                  char **symlink_target) {
+    struct stat lst;
+    *symlink_target = NULL;
+
+    /* Use lstat to detect symlinks */
+    if (lstat(path, &lst) != 0) {
+        return FTYPE_UNKNOWN;
+    }
+
+    *st = lst;
+
+    if (S_ISLNK(lst.st_mode)) {
+        /* Read symlink target */
+        char target[PATH_MAX];
+        ssize_t len = readlink(path, target, sizeof(target) - 1);
+        if (len > 0) {
+            target[len] = '\0';
+
+            /* Resolve to absolute path */
+            char abs_target[PATH_MAX];
+            if (target[0] != '/') {
+                char dir[PATH_MAX];
+                strncpy(dir, path, PATH_MAX - 1);
+                char *slash = strrchr(dir, '/');
+                if (slash) {
+                    slash[1] = '\0';
+                    snprintf(abs_target, PATH_MAX, "%s%s", dir, target);
+                } else {
+                    strncpy(abs_target, target, PATH_MAX - 1);
+                }
+            } else {
+                strncpy(abs_target, target, PATH_MAX - 1);
+            }
+            abs_target[PATH_MAX - 1] = '\0';
+
+            *symlink_target = xstrdup(abs_target);
+
+            /* Check target type */
+            struct stat target_st;
+            if (stat(path, &target_st) == 0) {
+                if (S_ISDIR(target_st.st_mode)) {
+                    return FTYPE_SYMLINK_DIR;
+                } else if (target_st.st_mode & S_IXUSR) {
+                    return FTYPE_SYMLINK_EXEC;
+                } else {
+                    return FTYPE_SYMLINK;
+                }
+            } else {
+                return FTYPE_SYMLINK_BROKEN;
+            }
+        } else {
+            return FTYPE_SYMLINK_BROKEN;
+        }
+    } else if (S_ISDIR(lst.st_mode)) {
+        return FTYPE_DIR;
+    } else if (lst.st_mode & S_IXUSR) {
+        return FTYPE_EXEC;
+    } else {
+        return FTYPE_FILE;
+    }
+}
+
+/* Get color for file type */
+static const char *get_file_color(FileType type, int is_cwd, int is_ignored,
+                                   const Config *cfg) {
+    if (!cfg->is_tty) return "";
+
+    if (is_cwd) return COLOR_YELLOW_BOLD;
+    if (is_ignored) return COLOR_GREY;
+
+    switch (type) {
+        case FTYPE_DIR:           return COLOR_BLUE;
+        case FTYPE_EXEC:          return COLOR_GREEN;
+        case FTYPE_SYMLINK:       return COLOR_WHITE;
+        case FTYPE_SYMLINK_DIR:   return COLOR_CYAN;
+        case FTYPE_SYMLINK_EXEC:  return COLOR_GREEN;
+        case FTYPE_SYMLINK_BROKEN: return COLOR_RED;
+        default:                  return COLOR_WHITE;
+    }
+}
+
+/* ============================================================================
+ * Line Counting
+ * ============================================================================ */
+
+static int count_file_lines(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+
+    int count = 0;
+    int ch;
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch == '\n') count++;
+    }
+    fclose(f);
+    g_total_lines += count;
+    return count;
+}
+
+/* ============================================================================
+ * Icons (TOML Parser)
+ * ============================================================================ */
+
+static void icons_init_defaults(Icons *icons) {
+    memset(icons, 0, sizeof(Icons));
+    /* Default icons (Nerd Font) */
+    strcpy(icons->default_icon, "");
+    strcpy(icons->symlink, "");
+    strcpy(icons->directory, "");
+    strcpy(icons->current_dir, "");
+    strcpy(icons->file, "");
+    strcpy(icons->executable, "");
+    strcpy(icons->symlink_dir, "");
+    strcpy(icons->symlink_exec, "");
+    strcpy(icons->symlink_file, "");
+    strcpy(icons->symlink_broken, "");
+    strcpy(icons->git_modified, "");
+    strcpy(icons->git_untracked, "󰛑");
+    strcpy(icons->git_staged, "");
+    strcpy(icons->git_deleted, "");
+}
+
+static int parse_toml_line(const char *line, char *key, size_t key_len,
+                           char *value, size_t value_len) {
+    const char *p = line;
+
+    /* Skip whitespace */
+    while (*p && isspace(*p)) p++;
+
+    /* Skip comments and empty lines */
+    if (*p == '#' || *p == '\0') return 0;
+
+    /* Parse key */
+    const char *key_start = p;
+    while (*p && *p != '=' && !isspace(*p)) p++;
+    size_t klen = p - key_start;
+    if (klen == 0 || klen >= key_len) return 0;
+
+    memcpy(key, key_start, klen);
+    key[klen] = '\0';
+
+    /* Skip to = */
+    while (*p && isspace(*p)) p++;
+    if (*p != '=') return 0;
+    p++;
+
+    /* Skip to value */
+    while (*p && isspace(*p)) p++;
+    if (*p != '"') return 0;
+    p++;
+
+    /* Parse quoted value */
+    const char *val_start = p;
+    while (*p && *p != '"') p++;
+    size_t vlen = p - val_start;
+    if (vlen >= value_len) return 0;
+
+    memcpy(value, val_start, vlen);
+    value[vlen] = '\0';
+
+    return 1;
+}
+
+static void icons_load(Icons *icons, const char *script_dir) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/icons.toml", script_dir);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    char line[256];
+    char key[64], value[MAX_ICON_LEN];
+
+    while (fgets(line, sizeof(line), f)) {
+        if (!parse_toml_line(line, key, sizeof(key), value, sizeof(value)))
+            continue;
+
+        if (strcmp(key, "default") == 0) strcpy(icons->default_icon, value);
+        else if (strcmp(key, "directory") == 0) strcpy(icons->directory, value);
+        else if (strcmp(key, "current_dir") == 0) strcpy(icons->current_dir, value);
+        else if (strcmp(key, "file") == 0) strcpy(icons->file, value);
+        else if (strcmp(key, "executable") == 0) strcpy(icons->executable, value);
+        else if (strcmp(key, "symlink") == 0) strcpy(icons->symlink, value);
+        else if (strcmp(key, "symlink_dir") == 0) strcpy(icons->symlink_dir, value);
+        else if (strcmp(key, "symlink_exec") == 0) strcpy(icons->symlink_exec, value);
+        else if (strcmp(key, "symlink_file") == 0) strcpy(icons->symlink_file, value);
+        else if (strcmp(key, "symlink_broken") == 0) strcpy(icons->symlink_broken, value);
+        else if (strcmp(key, "git_modified") == 0) strcpy(icons->git_modified, value);
+        else if (strcmp(key, "git_untracked") == 0) strcpy(icons->git_untracked, value);
+        else if (strcmp(key, "git_staged") == 0) strcpy(icons->git_staged, value);
+        else if (strcmp(key, "git_deleted") == 0) strcpy(icons->git_deleted, value);
+    }
+
+    fclose(f);
+}
+
+static const char *get_icon(const Icons *icons, FileType type, int is_cwd) {
+    switch (type) {
+        case FTYPE_DIR:
+            return is_cwd ? icons->current_dir : icons->directory;
+        case FTYPE_EXEC:
+            return icons->executable;
+        case FTYPE_SYMLINK:
+            return icons->symlink_file[0] ? icons->symlink_file : icons->symlink;
+        case FTYPE_SYMLINK_DIR:
+            return icons->symlink_dir[0] ? icons->symlink_dir : icons->symlink;
+        case FTYPE_SYMLINK_EXEC:
+            return icons->symlink_exec[0] ? icons->symlink_exec : icons->symlink;
+        case FTYPE_SYMLINK_BROKEN:
+            return icons->symlink_broken[0] ? icons->symlink_broken : icons->symlink;
+        default:
+            return icons->file;
+    }
+}
+
+/* ============================================================================
+ * Git Integration
+ * ============================================================================ */
+
+static void git_cache_init(GitCache *cache) {
+    memset(cache->buckets, 0, sizeof(cache->buckets));
+    cache->git_root = NULL;
+    cache->is_git_repo = 0;
+}
+
+static void git_cache_free(GitCache *cache) {
+    for (int i = 0; i < HASH_SIZE; i++) {
+        GitStatusNode *node = cache->buckets[i];
+        while (node) {
+            GitStatusNode *next = node->next;
+            free(node->path);
+            free(node);
+            node = next;
+        }
+        cache->buckets[i] = NULL;
+    }
+    free(cache->git_root);
+    cache->git_root = NULL;
+    cache->is_git_repo = 0;
+}
+
+static void git_cache_add(GitCache *cache, const char *path, const char *status) {
+    unsigned int h = hash_string(path);
+    GitStatusNode *node = xmalloc(sizeof(GitStatusNode));
+    node->path = xstrdup(path);
+    strncpy(node->status, status, 2);
+    node->status[2] = '\0';
+    node->next = cache->buckets[h];
+    cache->buckets[h] = node;
+}
+
+static const char *git_cache_get(GitCache *cache, const char *path) {
+    unsigned int h = hash_string(path);
+    GitStatusNode *node = cache->buckets[h];
+    while (node) {
+        if (strcmp(node->path, path) == 0) {
+            return node->status;
+        }
+        node = node->next;
+    }
+    return NULL;
+}
+
+static void git_detect_repo(GitCache *cache, const char *dir) {
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --show-toplevel 2>/dev/null", dir);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return;
+
+    char root[PATH_MAX];
+    if (fgets(root, sizeof(root), fp)) {
+        /* Remove trailing newline */
+        size_t len = strlen(root);
+        if (len > 0 && root[len - 1] == '\n') root[len - 1] = '\0';
+        cache->git_root = xstrdup(root);
+        cache->is_git_repo = 1;
+    }
+
+    pclose(fp);
+}
+
+static void git_populate_status(GitCache *cache) {
+    if (!cache->is_git_repo) return;
+
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored 2>/dev/null", cache->git_root);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return;
+
+    char line[PATH_MAX + 8];
+    while (fgets(line, sizeof(line), fp)) {
+        /* Remove trailing newline */
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+
+        if (len < 4) continue;  /* Need at least "XY path" */
+
+        char status[3] = {line[0], line[1], '\0'};
+        const char *path = line + 3;
+
+        /* Handle renamed files: "R  old -> new" */
+        const char *arrow = strstr(path, " -> ");
+        if (arrow) {
+            path = arrow + 4;
+        }
+
+        /* Remove trailing slash from directories */
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", cache->git_root, path);
+        len = strlen(full_path);
+        if (len > 0 && full_path[len - 1] == '/') full_path[len - 1] = '\0';
+
+        git_cache_add(cache, full_path, status);
+    }
+
+    pclose(fp);
+}
+
+static const char *get_git_indicator(GitCache *cache, const char *path,
+                                      const Icons *icons, const Config *cfg) {
+    static char indicator[32];
+    indicator[0] = '\0';
+
+    if (!cache->is_git_repo || cfg->no_icons) return indicator;
+
+    const char *status = git_cache_get(cache, path);
+    if (!status) return indicator;
+
+    if (strcmp(status, "!!") == 0) {
+        /* Ignored - no indicator */
+        return indicator;
+    } else if (strcmp(status, "??") == 0) {
+        snprintf(indicator, sizeof(indicator), "%s%s%s ",
+                 cfg->is_tty ? COLOR_RED : "", icons->git_untracked,
+                 cfg->is_tty ? COLOR_RESET : "");
+    } else if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
+        /* Staged */
+        snprintf(indicator, sizeof(indicator), "%s%s%s ",
+                 cfg->is_tty ? COLOR_YELLOW : "", icons->git_staged,
+                 cfg->is_tty ? COLOR_RESET : "");
+    } else if (status[1] == 'M') {
+        /* Modified */
+        snprintf(indicator, sizeof(indicator), "%s%s%s ",
+                 cfg->is_tty ? COLOR_RED : "", icons->git_modified,
+                 cfg->is_tty ? COLOR_RESET : "");
+    } else if (status[1] == 'D') {
+        /* Deleted */
+        snprintf(indicator, sizeof(indicator), "%s%s%s ",
+                 cfg->is_tty ? COLOR_RED : "", icons->git_deleted,
+                 cfg->is_tty ? COLOR_RESET : "");
+    }
+
+    return indicator;
+}
+
+/* ============================================================================
+ * Directory Reading
+ * ============================================================================ */
+
+static int entry_cmp_name(const void *a, const void *b) {
+    const FileEntry *ea = (const FileEntry *)a;
+    const FileEntry *eb = (const FileEntry *)b;
+    return strcasecmp(ea->name, eb->name);
+}
+
+static int entry_cmp_size(const void *a, const void *b) {
+    const FileEntry *ea = (const FileEntry *)a;
+    const FileEntry *eb = (const FileEntry *)b;
+    if (eb->size > ea->size) return 1;
+    if (eb->size < ea->size) return -1;
+    return 0;
+}
+
+static int entry_cmp_time(const void *a, const void *b) {
+    const FileEntry *ea = (const FileEntry *)a;
+    const FileEntry *eb = (const FileEntry *)b;
+    if (eb->mtime > ea->mtime) return 1;
+    if (eb->mtime < ea->mtime) return -1;
+    return 0;
+}
+
+static void sort_file_list(FileList *list, const Config *cfg) {
+    if (list->count == 0) return;
+
+    int (*cmp)(const void *, const void *) = NULL;
+
+    switch (cfg->sort_by) {
+        case SORT_NAME: cmp = entry_cmp_name; break;
+        case SORT_SIZE: cmp = entry_cmp_size; break;
+        case SORT_TIME: cmp = entry_cmp_time; break;
+        default: return;
+    }
+
+    qsort(list->entries, list->count, sizeof(FileEntry), cmp);
+
+    if (cfg->sort_reverse) {
+        /* Reverse in place */
+        for (size_t i = 0; i < list->count / 2; i++) {
+            FileEntry tmp = list->entries[i];
+            list->entries[i] = list->entries[list->count - 1 - i];
+            list->entries[list->count - 1 - i] = tmp;
+        }
+    }
+}
+
+static int read_directory(const char *dir_path, FileList *list, const Config *cfg) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) return -1;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        /* Skip hidden files unless -a flag */
+        if (!cfg->show_hidden && entry->d_name[0] == '.')
+            continue;
+
+        /* Build full path */
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+
+        FileEntry fe;
+        memset(&fe, 0, sizeof(fe));
+        fe.path = xstrdup(full_path);
+        fe.name = strrchr(fe.path, '/');
+        fe.name = fe.name ? fe.name + 1 : fe.path;
+        fe.line_count = -1;
+        fe.git_status[0] = '\0';
+
+        struct stat st;
+        fe.type = detect_file_type(full_path, &st, &fe.symlink_target);
+        fe.mode = st.st_mode;
+        fe.mtime = GET_MTIME(st);
+
+        /* Compute size - recursive for directories when -s is set */
+        if (cfg->show_sizes && fe.type == FTYPE_DIR) {
+            fe.size = get_dir_size(full_path);
+        } else {
+            fe.size = st.st_size;
+        }
+
+        /* Count lines for files when -l is set */
+        if (cfg->count_lines && (fe.type == FTYPE_FILE || fe.type == FTYPE_EXEC)) {
+            fe.line_count = count_file_lines(full_path);
+        }
+
+        file_list_add(list, &fe);
+    }
+
+    closedir(dir);
+
+    /* Always sort alphabetically by default, then apply user sort */
+    qsort(list->entries, list->count, sizeof(FileEntry), entry_cmp_name);
+
+    /* Apply user-requested sort on top */
+    if (cfg->sort_by != SORT_NONE && cfg->sort_by != SORT_NAME) {
+        sort_file_list(list, cfg);
+    } else if (cfg->sort_reverse) {
+        /* Reverse the default alphabetical sort */
+        for (size_t i = 0; i < list->count / 2; i++) {
+            FileEntry tmp = list->entries[i];
+            list->entries[i] = list->entries[list->count - 1 - i];
+            list->entries[list->count - 1 - i] = tmp;
+        }
+    }
+
+    return 0;
+}
+
+/* ============================================================================
+ * Tree Printing
+ * ============================================================================ */
+
+static void print_prefix(int depth, int *continuation, const Config *cfg) {
+    if (cfg->list_mode) {
+        /* No prefix in list mode */
+        return;
+    }
+
+    if (!cfg->is_tty) {
+        /* Simple indentation for non-TTY */
+        for (int i = 0; i < depth; i++) {
+            printf("  ");
+        }
+        return;
+    }
+
+    printf("%s", COLOR_GREY);
+    for (int i = 0; i < depth - 1; i++) {
+        printf("%s", continuation[i] ? TREE_VERT : TREE_SPACE);
+    }
+    if (depth > 0) {
+        printf("%s", continuation[depth - 1] ? TREE_BRANCH : TREE_LAST);
+    }
+    printf("%s", COLOR_RESET);
+}
+
+static void print_entry(const char *path, const char *name, FileType type,
+                        const char *symlink_target, off_t size, int line_count,
+                        int depth, int *continuation,
+                        GitCache *git, const Icons *icons, const Config *cfg) {
+    char abs_path[PATH_MAX];
+    get_realpath(path, abs_path);
+
+    int is_cwd = (strcmp(abs_path, g_cwd) == 0);
+    int is_hidden = (name[0] == '.');
+    int is_gitdir = (strcmp(name, ".git") == 0);
+
+    /* Check if ignored */
+    const char *git_status = git_cache_get(git, abs_path);
+    int is_ignored = is_gitdir || (git_status && strcmp(git_status, "!!") == 0);
+
+    /* Print tree prefix */
+    print_prefix(depth, continuation, cfg);
+
+    /* Git indicator */
+    const char *git_ind = get_git_indicator(git, abs_path, icons, cfg);
+    printf("%s", git_ind);
+
+    /* Color and style */
+    const char *color = get_file_color(type, is_cwd, is_ignored, cfg);
+    const char *style = (is_hidden && cfg->is_tty) ? STYLE_ITALIC : "";
+
+    /* Icon */
+    if (!cfg->no_icons) {
+        printf("%s%s%s ", color, get_icon(icons, type, is_cwd), COLOR_RESET);
+    }
+
+    /* Filename (full path in list mode) */
+    if (cfg->list_mode) {
+        char abbrev[PATH_MAX];
+        abbreviate_home(abs_path, abbrev, sizeof(abbrev));
+        printf("%s%s%s%s", color, style, abbrev, cfg->is_tty ? COLOR_RESET : "");
+    } else {
+        printf("%s%s%s%s", color, style, name, cfg->is_tty ? COLOR_RESET : "");
+    }
+
+    /* Size */
+    if (cfg->show_sizes) {
+        char size_buf[16];
+        format_size(size, size_buf, sizeof(size_buf));
+        printf(" %s(%s)%s", cfg->is_tty ? COLOR_GREY : "", size_buf,
+               cfg->is_tty ? COLOR_RESET : "");
+    }
+
+    /* Line count */
+    if (cfg->count_lines && line_count >= 0) {
+        printf(" %s(%d lines)%s", cfg->is_tty ? COLOR_GREY : "", line_count,
+               cfg->is_tty ? COLOR_RESET : "");
+    }
+
+    /* Symlink target */
+    if (symlink_target) {
+        char abbrev[PATH_MAX];
+        abbreviate_home(symlink_target, abbrev, sizeof(abbrev));
+        printf(" %s %s%s%s",
+               icons->symlink, color, abbrev, cfg->is_tty ? COLOR_RESET : "");
+    }
+
+    printf("\n");
+}
+
+static int should_skip_dir(const char *name, int is_ignored, const Config *cfg) {
+    if (cfg->expand_all) return 0;
+    if (is_ignored) return 1;
+    if (strcmp(name, ".git") == 0) return 1;
+    return 0;
+}
+
+static void print_tree(const char *path, int depth, int *continuation,
+                       GitCache *git, const Icons *icons, const Config *cfg);
+
+static void print_tree_recursive(const char *path, int depth, int *continuation,
+                                  GitCache *git, const Icons *icons, const Config *cfg) {
+    if (depth >= cfg->max_depth) return;
+
+    /* Check if readable */
+    if (access(path, R_OK) != 0) return;
+
+    FileList list;
+    file_list_init(&list);
+
+    if (read_directory(path, &list, cfg) != 0) {
+        file_list_free(&list);
+        return;
+    }
+
+    for (size_t i = 0; i < list.count; i++) {
+        FileEntry *fe = &list.entries[i];
+        int is_last = (i == list.count - 1);
+
+        continuation[depth] = !is_last;
+
+        /* Check if ignored */
+        const char *git_status = git_cache_get(git, fe->path);
+        int is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+                         strcmp(fe->name, ".git") == 0;
+
+        print_entry(fe->path, fe->name, fe->type, fe->symlink_target,
+                    fe->size, fe->line_count, depth + 1, continuation, git, icons, cfg);
+
+        /* Recurse into directories */
+        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, is_ignored, cfg)) {
+            print_tree_recursive(fe->path, depth + 1, continuation, git, icons, cfg);
+        }
+    }
+
+    file_list_free(&list);
+}
+
+static void print_tree(const char *path, int depth, int *continuation,
+                       GitCache *git, const Icons *icons, const Config *cfg) {
+    char abs_path[PATH_MAX];
+    get_realpath(path, abs_path);
+
+    /* Get info about root entry */
+    struct stat st;
+    char *symlink_target = NULL;
+    FileType type = detect_file_type(abs_path, &st, &symlink_target);
+
+    /* In list mode, skip printing root directory - just show contents */
+    if (cfg->list_mode && type == FTYPE_DIR) {
+        free(symlink_target);
+        print_tree_recursive(abs_path, depth - 1, continuation, git, icons, cfg);
+        return;
+    }
+
+    /* Print root entry */
+    const char *name = strrchr(abs_path, '/');
+    name = name ? name + 1 : abs_path;
+
+    int line_count = -1;
+    if (cfg->count_lines && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
+        line_count = count_file_lines(abs_path);
+    }
+
+    off_t size = st.st_size;
+    if (cfg->show_sizes && type == FTYPE_DIR) {
+        size = get_dir_size(abs_path);
+    }
+
+    print_entry(abs_path, name, type, symlink_target, size, line_count,
+                depth, continuation, git, icons, cfg);
+
+    free(symlink_target);
+
+    /* Recurse if directory */
+    if (type == FTYPE_DIR) {
+        print_tree_recursive(abs_path, depth, continuation, git, icons, cfg);
+    }
+}
+
+/* ============================================================================
+ * Argument Parsing
+ * ============================================================================ */
+
+static void print_usage(void) {
+    printf("Usage: l [OPTIONS] [FILE ...]\n");
+    printf("\n");
+    printf("Options:\n");
+    printf("  -a              Show hidden files\n");
+    printf("  -s              Show file/directory sizes\n");
+    printf("  -l              Show line counts for files\n");
+    printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
+    printf("  --depth INT     Limit tree depth\n");
+    printf("  --expand-all    Expand all directories (ignore skip list)\n");
+    printf("  --list          Flat list output (no tree structure)\n");
+    printf("  --no-icons      Hide file/folder/git icons\n");
+    printf("\n");
+    printf("Sorting:\n");
+    printf("  -S              Sort by size (largest first)\n");
+    printf("  -T              Sort by modification time (newest first)\n");
+    printf("  -N              Sort by name (alphabetical)\n");
+    printf("  -r              Reverse sort order\n");
+    printf("\n");
+    printf("  -h, --help      Show this help message\n");
+}
+
+static void parse_args(int argc, char **argv, Config *cfg,
+                       char ***dirs, int *dir_count) {
+    static char *default_dirs[] = {"."};
+
+    *dirs = NULL;
+    *dir_count = 0;
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+
+        if (arg[0] == '-' && arg[1] != '\0') {
+            if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+                print_usage();
+                exit(0);
+            } else if (strcmp(arg, "-a") == 0) {
+                cfg->show_hidden = 1;
+            } else if (strcmp(arg, "-s") == 0) {
+                cfg->show_sizes = 1;
+            } else if (strcmp(arg, "-l") == 0) {
+                cfg->count_lines = 1;
+            } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
+                cfg->max_depth = MAX_DEPTH;
+            } else if (strcmp(arg, "--depth") == 0) {
+                if (i + 1 >= argc) die("--depth requires an argument");
+                cfg->max_depth = atoi(argv[++i]);
+                if (cfg->max_depth <= 0) die("--depth requires a positive integer");
+            } else if (strncmp(arg, "--depth=", 8) == 0) {
+                cfg->max_depth = atoi(arg + 8);
+                if (cfg->max_depth <= 0) die("--depth requires a positive integer");
+            } else if (strcmp(arg, "--expand-all") == 0) {
+                cfg->expand_all = 1;
+            } else if (strcmp(arg, "--list") == 0) {
+                cfg->list_mode = 1;
+            } else if (strcmp(arg, "--no-icons") == 0) {
+                cfg->no_icons = 1;
+            } else if (strcmp(arg, "-S") == 0) {
+                cfg->sort_by = SORT_SIZE;
+            } else if (strcmp(arg, "-T") == 0) {
+                cfg->sort_by = SORT_TIME;
+            } else if (strcmp(arg, "-N") == 0) {
+                cfg->sort_by = SORT_NAME;
+            } else if (strcmp(arg, "-r") == 0) {
+                cfg->sort_reverse = 1;
+            } else if (arg[1] != '-') {
+                /* Handle combined short flags like -as */
+                for (int j = 1; arg[j]; j++) {
+                    switch (arg[j]) {
+                        case 'a': cfg->show_hidden = 1; break;
+                        case 's': cfg->show_sizes = 1; break;
+                        case 'l': cfg->count_lines = 1; break;
+                        case 't': cfg->max_depth = MAX_DEPTH; break;
+                        case 'S': cfg->sort_by = SORT_SIZE; break;
+                        case 'T': cfg->sort_by = SORT_TIME; break;
+                        case 'N': cfg->sort_by = SORT_NAME; break;
+                        case 'r': cfg->sort_reverse = 1; break;
+                        case 'h': print_usage(); exit(0);
+                        default:
+                            fprintf(stderr, "l: unknown option: -%c\n", arg[j]);
+                            exit(1);
+                    }
+                }
+            } else {
+                fprintf(stderr, "l: unknown option: %s\n", arg);
+                exit(1);
+            }
+        } else {
+            /* Directory argument */
+            (*dir_count)++;
+            *dirs = xrealloc(*dirs, *dir_count * sizeof(char *));
+            (*dirs)[*dir_count - 1] = (char *)arg;
+        }
+    }
+
+    /* Default to current directory */
+    if (*dir_count == 0) {
+        *dirs = default_dirs;
+        *dir_count = 1;
+    }
+}
+
+/* ============================================================================
+ * Main
+ * ============================================================================ */
+
+int main(int argc, char **argv) {
+    /* Initialize global state */
+    if (!getcwd(g_cwd, sizeof(g_cwd))) {
+        die("cannot determine current directory");
+    }
+
+    const char *home = getenv("HOME");
+    if (home) {
+        strncpy(g_home, home, sizeof(g_home) - 1);
+        g_home[sizeof(g_home) - 1] = '\0';
+    }
+
+    /* Get script directory (for icons.toml) */
+    char *exe_path = argv[0];
+    char *slash = strrchr(exe_path, '/');
+    if (slash) {
+        size_t len = slash - exe_path;
+        if (len >= sizeof(g_script_dir)) len = sizeof(g_script_dir) - 1;
+        memcpy(g_script_dir, exe_path, len);
+        g_script_dir[len] = '\0';
+    } else {
+        strcpy(g_script_dir, ".");
+    }
+
+    /* Initialize config with defaults */
+    Config cfg = {
+        .max_depth = 1,
+        .show_hidden = 0,
+        .show_sizes = 0,
+        .count_lines = 0,
+        .expand_all = 0,
+        .list_mode = 0,
+        .no_icons = 0,
+        .sort_reverse = 0,
+        .is_tty = isatty(STDOUT_FILENO),
+        .sort_by = SORT_NONE
+    };
+
+    /* Check if current directory exists */
+    char *cwd_check = getcwd(NULL, 0);
+    if (cwd_check == NULL) {
+        fprintf(stderr, "%sError:%s Current directory no longer exists\n",
+                cfg.is_tty ? COLOR_RED : "", cfg.is_tty ? COLOR_RESET : "");
+        return 1;
+    }
+    free(cwd_check);
+
+    /* Parse arguments */
+    char **dirs;
+    int dir_count;
+    parse_args(argc, argv, &cfg, &dirs, &dir_count);
+
+    /* Load icons */
+    Icons icons;
+    icons_init_defaults(&icons);
+    icons_load(&icons, g_script_dir);
+
+    /* Validate all inputs first */
+    for (int i = 0; i < dir_count; i++) {
+        struct stat st;
+        if (stat(dirs[i], &st) != 0) {
+            fprintf(stderr, "%sError:%s '%s' does not exist\n",
+                    cfg.is_tty ? COLOR_RED : "", cfg.is_tty ? COLOR_RESET : "",
+                    dirs[i]);
+            return 1;
+        }
+    }
+
+    /* Process each directory */
+    int continuation[MAX_DEPTH] = {0};
+
+    for (int i = 0; i < dir_count; i++) {
+        const char *dir = dirs[i];
+
+        /* Initialize git cache */
+        GitCache git;
+        git_cache_init(&git);
+
+        char abs_dir[PATH_MAX];
+        get_realpath(dir, abs_dir);
+        git_detect_repo(&git, abs_dir);
+        git_populate_status(&git);
+
+        /* Print tree */
+        print_tree(dir, 0, continuation, &git, &icons, &cfg);
+
+        git_cache_free(&git);
+    }
+
+    /* Print total line count */
+    if (cfg.count_lines && g_total_lines > 0) {
+        printf("\n%sTotal: %ld lines%s\n",
+               cfg.is_tty ? COLOR_GREY : "", g_total_lines,
+               cfg.is_tty ? COLOR_RESET : "");
+    }
+
+    return 0;
+}
