@@ -514,14 +514,18 @@ else:
         fi
     fi
 
-    # Write add request for daemon to process (no password needed)
+    # Get password to sign the request
+    local password=$(prompt_password)
+
+    # Write signed add request for daemon to process
     local request_data
     if [[ "$hidden" == "true" ]]; then
         request_data="{\"domain\": \"$domain\", \"expiry\": $expiry, \"hidden\": true}"
     else
         request_data="{\"domain\": \"$domain\", \"expiry\": $expiry}"
     fi
-    echo "$request_data" > "$ADD_REQUEST_FILE"
+    local hmac=$(zu_hmac "$request_data" "$password")
+    printf '%s\n%s' "$request_data" "$hmac" > "$ADD_REQUEST_FILE"
 
     # Signal daemon to process the request
     signal_daemon
@@ -622,14 +626,18 @@ else:
         fi
     fi
 
-    # Write add request for daemon to process (no password needed)
+    # Get password to sign the request
+    local password=$(prompt_password)
+
+    # Write signed add request for daemon to process
     local request_data
     if [[ "$hidden" == "true" ]]; then
         request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\", \"hidden\": true}"
     else
         request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\"}"
     fi
-    echo "$request_data" > "$ADD_REQUEST_FILE"
+    local hmac=$(zu_hmac "$request_data" "$password")
+    printf '%s\n%s' "$request_data" "$hmac" > "$ADD_REQUEST_FILE"
 
     # Signal daemon to process the request
     signal_daemon

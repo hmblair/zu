@@ -280,7 +280,7 @@ get_current_rules() {
 # Block Management
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Process add requests from the CLI (allows adding blocks without password)
+# Process add requests from the CLI (requires valid HMAC signature)
 process_add_requests() {
     local password="$1"
 
@@ -288,13 +288,25 @@ process_add_requests() {
         return 0
     fi
 
-    local request=$(cat "$ADD_REQUEST_FILE" 2>/dev/null)
-    if [[ -z "$request" ]]; then
+    local content=$(cat "$ADD_REQUEST_FILE" 2>/dev/null)
+    if [[ -z "$content" ]]; then
         rm -f "$ADD_REQUEST_FILE"
         return 0
     fi
 
-    log "Processing add request"
+    # Parse signed request: <json>\n<hmac>
+    local request="${content%$'\n'*}"
+    local provided_hmac="${content##*$'\n'}"
+
+    # Verify HMAC signature
+    local computed_hmac=$(zu_hmac "$request" "$password")
+    if [[ "$provided_hmac" != "$computed_hmac" ]]; then
+        log_error "Invalid HMAC signature on add request - rejecting"
+        rm -f "$ADD_REQUEST_FILE"
+        return 1
+    fi
+
+    log "Processing verified add request"
 
     # Decrypt current data
     local data=$(decrypt_data "$password")

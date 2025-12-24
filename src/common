@@ -127,15 +127,26 @@ zu_find_with_sizes() {
 # Encryption helpers (requires openssl)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Encrypt data using AES-256-CBC with PBKDF2
+# Generate HMAC-SHA256 of data
+# Usage: zu_hmac <data> <password>
+zu_hmac() {
+    local data="$1"
+    local password="$2"
+    printf '%s' "$data" | openssl dgst -sha256 -hmac "$password" -binary | xxd -p -c 64
+}
+
+# Encrypt data using AES-256-CBC with PBKDF2 and HMAC (encrypt-then-MAC)
+# Output format: <base64_ciphertext>.<hmac_hex>
 # Usage: zu_encrypt <data> <password>
 zu_encrypt() {
     local data="$1"
     local password="$2"
-    printf '%s' "$data" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A
+    local ciphertext=$(printf '%s' "$data" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A)
+    local hmac=$(zu_hmac "$ciphertext" "$password")
+    printf '%s.%s' "$ciphertext" "$hmac"
 }
 
-# Decrypt data using AES-256-CBC with PBKDF2
+# Decrypt data using AES-256-CBC with PBKDF2, verifying HMAC first
 # Usage: zu_decrypt <encrypted_file> <password>
 # Returns decrypted data on success, empty string on failure
 zu_decrypt() {
@@ -145,8 +156,22 @@ zu_decrypt() {
         echo "{}"
         return 0
     fi
+    local content=$(cat "$file")
+
+    # Check for HMAC format (contains .)
+    if [[ "$content" == *.* ]]; then
+        local ciphertext="${content%.*}"
+        local stored_hmac="${content##*.}"
+        local computed_hmac=$(zu_hmac "$ciphertext" "$password")
+        if [[ "$stored_hmac" != "$computed_hmac" ]]; then
+            return 1  # HMAC verification failed
+        fi
+        content="$ciphertext"
+    fi
+    # Legacy format without HMAC still supported for migration
+
     local decrypted
-    decrypted=$(cat "$file" | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A 2>/dev/null)
+    decrypted=$(printf '%s' "$content" | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass "pass:$password" -base64 -A 2>/dev/null)
     if [[ $? -ne 0 ]] || [[ -z "$decrypted" ]]; then
         return 1
     fi
