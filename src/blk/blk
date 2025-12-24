@@ -181,6 +181,49 @@ signal_daemon() {
     touch "$TRIGGER_FILE" 2>/dev/null
 }
 
+# Check if daemon is running and healthy
+check_daemon_health() {
+    # Returns: 0=healthy, 1=not running, 2=crashing
+    # Try sudo launchctl first (works for system daemons)
+    local daemon_info=$(sudo launchctl list 2>/dev/null | grep "$PLIST_LABEL")
+    if [[ -n "$daemon_info" ]]; then
+        # Parse: PID  ExitCode  Label
+        local exit_code=$(echo "$daemon_info" | awk '{print $2}')
+        local pid=$(echo "$daemon_info" | awk '{print $1}')
+        if [[ "$pid" == "-" ]] && [[ "$exit_code" != "0" ]]; then
+            echo "crashing:$exit_code"
+            return 2
+        fi
+        echo "running"
+        return 0
+    fi
+    # Fallback: check if blkd process is running
+    if pgrep -f "blkd" >/dev/null 2>&1; then
+        echo "running"
+        return 0
+    fi
+    # Check if plist exists but daemon not running
+    if [[ -f "/Library/LaunchDaemons/${PLIST_LABEL}.plist" ]]; then
+        echo "not_running"
+        return 1
+    fi
+    echo "not_installed"
+    return 1
+}
+
+# Check if pf rules are loaded when they should be
+check_pf_enforcement() {
+    # Returns: 0=ok, 1=rules missing
+    local anchor_name="com.zu.blk"
+    local rules=$(sudo pfctl -a "$anchor_name" -s rules 2>/dev/null | grep -c "block")
+    if [[ "$rules" -gt 0 ]]; then
+        echo "enforced:$rules"
+        return 0
+    fi
+    echo "not_enforced"
+    return 1
+}
+
 # Parse schedule string (HH:MM-HH:MM) and validate
 parse_schedule() {
     local schedule="$1"
@@ -734,6 +777,75 @@ cmd_list() {
     local has_timed=false
     local has_daily=false
     local show_hidden_flag="$show_hidden"
+
+    # Check daemon health and pf enforcement
+    local daemon_status=$(check_daemon_health)
+    local has_active_blocks=false
+
+    # Determine if there are any active blocks (timed or in-schedule daily)
+    local active_check=$(echo "$data" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+now = $now
+for domain, val in data.items():
+    if isinstance(val, (int, float)) and val > now:
+        print('timed')
+        sys.exit(0)
+    elif isinstance(val, dict) and 'expiry' in val and val['expiry'] > now:
+        print('timed')
+        sys.exit(0)
+    elif isinstance(val, dict) and 'schedule' in val:
+        print(val['schedule'])
+        sys.exit(0)
+print('none')
+" 2>/dev/null)
+
+    if [[ "$active_check" == "timed" ]]; then
+        has_active_blocks=true
+    elif [[ "$active_check" != "none" ]] && [[ -n "$active_check" ]]; then
+        # It's a schedule string like "08:00-18:00"
+        if is_schedule_active "$active_check"; then
+            has_active_blocks=true
+        fi
+    fi
+
+    # Show daemon/enforcement status
+    echo ""
+    echo "${BOLD}Status${NC}"
+    echo "─────────────────────────────────────────"
+    case "$daemon_status" in
+        running)
+            if [[ "$has_active_blocks" == "true" ]]; then
+                local pf_status=$(check_pf_enforcement)
+                if [[ "$pf_status" == enforced* ]]; then
+                    local rule_count="${pf_status#enforced:}"
+                    printf "  Daemon: ${GREEN}running${NC}    Firewall: ${GREEN}enforced${NC} (%s rules)\n" "$rule_count"
+                else
+                    printf "  Daemon: ${GREEN}running${NC}    Firewall: ${RED}NOT ENFORCED${NC}\n"
+                    warn "Blocks are configured but firewall rules are not loaded!"
+                fi
+            else
+                printf "  Daemon: ${GREEN}running${NC}    Firewall: ${GREY}no active blocks${NC}\n"
+            fi
+            ;;
+        not_running)
+            printf "  Daemon: ${RED}not running${NC}\n"
+            warn "Daemon is not running. Run 'blk reload' to fix."
+            ;;
+        not_installed)
+            printf "  Daemon: ${RED}not installed${NC}\n"
+            warn "Daemon is not installed. Run 'blk setup' first."
+            ;;
+        crashing:*)
+            local exit_code="${daemon_status#crashing:}"
+            printf "  Daemon: ${RED}crashing${NC} (exit code %s)\n" "$exit_code"
+            if [[ "$exit_code" == "127" ]]; then
+                warn "Daemon script not found. Run 'blk reload' to fix."
+            else
+                warn "Daemon is crashing. Check /var/log/blkd.log for details."
+            fi
+            ;;
+    esac
 
     # Get timed blocks
     local timed_blocks=$(echo "$data" | python3 -c "
