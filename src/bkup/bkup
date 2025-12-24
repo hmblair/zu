@@ -15,7 +15,7 @@ DEFAULT_LOG_DIR="$CONFIG_DIR/logs"
 PLIST_PREFIX="com.zu.bkup"
 
 # SSH options for borg - keep connection alive during long transfers
-export BORG_RSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o TCPKeepAlive=yes"
+export BORG_RSH="ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes -o ConnectTimeout=30"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -482,17 +482,39 @@ cmd_run() {
         EXCLUDE_ARGS+=(--exclude "$exclude")
     done
 
-    # Run backup
+    # Run backup with retry logic for transient connection failures
     info "Running backup '$NAME' to $REMOTE_USER@$HOST:$HOST_DIR"
 
-    /opt/homebrew/bin/borg create --stats --progress \
-        "$BACKUP_DEST" \
-        "${EXCLUDE_ARGS[@]}" \
-        "${DIRS[@]}" \
-        >"$LOG_PATH/borg-$DAY.log" \
-        2>&1
+    local max_retries=3
+    local retry_delay=60
+    local attempt=1
+    local RESULT
 
-    local RESULT=$?
+    while [[ $attempt -le $max_retries ]]; do
+        /opt/homebrew/bin/borg create --stats --progress \
+            "$BACKUP_DEST" \
+            "${EXCLUDE_ARGS[@]}" \
+            "${DIRS[@]}" \
+            >"$LOG_PATH/borg-$DAY.log" \
+            2>&1
+        RESULT=$?
+
+        # Success or warning - don't retry
+        if [[ $RESULT -eq 0 ]] || [[ $RESULT -eq 1 ]]; then
+            break
+        fi
+
+        # Check for transient connection errors worth retrying
+        if grep -qi "websocket\|handshake\|Connection closed\|Connection reset" "$LOG_PATH/borg-$DAY.log"; then
+            if [[ $attempt -lt $max_retries ]]; then
+                echo "${YELLOW}Connection failed, retrying in ${retry_delay}s (attempt $attempt/$max_retries)...${NC}"
+                sleep $retry_delay
+                ((attempt++))
+                continue
+            fi
+        fi
+        break
+    done
     local STATUS_DIR="$CONFIG_DIR/status"
     mkdir -p "$STATUS_DIR"
 
