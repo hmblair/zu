@@ -31,6 +31,8 @@ usage() {
     echo "  add [--hidden] <domain> <duration>  Block a domain/pattern for specified duration"
     echo "  daily [--hidden] <domain> <schedule>  Set up a daily recurring block"
     echo "  remove <domain>             Remove a daily schedule (only when not active)"
+    echo "  link <parent> <domain>...   Link domains to follow parent's block rules"
+    echo "  unlink <parent> <domain>... Remove linked domains from parent"
     echo "  list [--show-hidden]        Show all active blocks with time remaining"
     echo "  status <domain>             Check if a domain is blocked"
     echo "  dns on                      Switch DNS to 1.1.1.3 (blocks malware/adult content)"
@@ -62,6 +64,7 @@ usage() {
     echo "  blk add '*reddit*' 1d"
     echo "  blk daily '*reddit*' 09:00-17:00"
     echo "  blk remove '*reddit*'"
+    echo "  blk link youtube.com googlevideo.com ytimg.com"
     echo "  blk list"
 }
 
@@ -742,6 +745,136 @@ print(json.dumps(data))
     success "Removed block for $domain"
 }
 
+cmd_link() {
+    if [[ $# -lt 2 ]]; then
+        error "Usage: blk link <parent> <domain> [domain...]"
+    fi
+
+    local parent="$1"
+    shift
+    local domains=("$@")
+
+    check_setup
+
+    # Normalize parent
+    parent=$(echo "$parent" | sed -E 's|^https?://||; s|^www\.||; s|/.*$||' | tr '[:upper:]' '[:lower:]')
+
+    # Get password and decrypt
+    local password=$(prompt_password)
+    local data
+    data=$(decrypt_data "$password")
+    if [[ $? -ne 0 ]]; then
+        error "Incorrect password or corrupted data."
+    fi
+
+    # Check parent exists and add linked domains
+    local new_data=$(python3 -c "
+import sys, json
+
+data = json.loads('''$data''')
+parent = '$parent'
+domains = '''${(j:,:)domains}'''.split(',')
+
+if parent not in data:
+    print('ERROR:Parent domain is not blocked')
+    sys.exit(0)
+
+# Initialize includes array if needed
+if 'includes' not in data[parent]:
+    data[parent]['includes'] = []
+
+# Add new domains (avoid duplicates)
+for d in domains:
+    d = d.strip().lower()
+    if d and d not in data[parent]['includes']:
+        data[parent]['includes'].append(d)
+
+print(json.dumps(data))
+" 2>/dev/null)
+
+    if [[ "$new_data" == ERROR:* ]]; then
+        error "${new_data#ERROR:}"
+    fi
+
+    # Sign and write request for daemon
+    local request_data="{\"action\": \"update\", \"data\": $new_data}"
+    local hmac=$(zu_hmac "$new_data" "$password")
+
+    # Re-encrypt and save directly (link doesn't need daemon request flow)
+    local encrypted=$(zu_encrypt "$new_data" "$password")
+    printf '%s\n' "$encrypted" > "$DATA_FILE"
+
+    # Signal daemon
+    signal_daemon
+
+    success "Linked ${#domains[@]} domain(s) to $parent"
+}
+
+cmd_unlink() {
+    if [[ $# -lt 2 ]]; then
+        error "Usage: blk unlink <parent> <domain> [domain...]"
+    fi
+
+    local parent="$1"
+    shift
+    local domains=("$@")
+
+    check_setup
+
+    # Normalize parent
+    parent=$(echo "$parent" | sed -E 's|^https?://||; s|^www\.||; s|/.*$||' | tr '[:upper:]' '[:lower:]')
+
+    # Get password and decrypt
+    local password=$(prompt_password)
+    local data
+    data=$(decrypt_data "$password")
+    if [[ $? -ne 0 ]]; then
+        error "Incorrect password or corrupted data."
+    fi
+
+    # Remove linked domains
+    local new_data=$(python3 -c "
+import sys, json
+
+data = json.loads('''$data''')
+parent = '$parent'
+domains = '''${(j:,:)domains}'''.split(',')
+
+if parent not in data:
+    print('ERROR:Parent domain is not blocked')
+    sys.exit(0)
+
+if 'includes' not in data[parent]:
+    print('ERROR:No linked domains for this parent')
+    sys.exit(0)
+
+# Remove specified domains
+for d in domains:
+    d = d.strip().lower()
+    if d in data[parent]['includes']:
+        data[parent]['includes'].remove(d)
+
+# Clean up empty includes
+if not data[parent]['includes']:
+    del data[parent]['includes']
+
+print(json.dumps(data))
+" 2>/dev/null)
+
+    if [[ "$new_data" == ERROR:* ]]; then
+        error "${new_data#ERROR:}"
+    fi
+
+    # Re-encrypt and save
+    local encrypted=$(zu_encrypt "$new_data" "$password")
+    printf '%s\n' "$encrypted" > "$DATA_FILE"
+
+    # Signal daemon
+    signal_daemon
+
+    success "Unlinked ${#domains[@]} domain(s) from $parent"
+}
+
 cmd_list() {
     local show_hidden=false
 
@@ -855,7 +988,7 @@ print('none')
             ;;
     esac
 
-    # Get timed blocks
+    # Get timed blocks (format: domain|remaining|expiry|hidden|includes_csv)
     local timed_blocks=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -865,18 +998,18 @@ for domain, val in sorted(data.items()):
     if isinstance(val, (int, float)):
         remaining = int(val) - now
         if remaining > 0:
-            print(f'{domain}|{remaining}|{int(val)}')
+            print(f'{domain}|{remaining}|{int(val)}||')
     elif isinstance(val, dict) and 'expiry' in val:
-        # Hidden timed block
         if not show_hidden and val.get('hidden'):
             continue
         remaining = int(val['expiry']) - now
         if remaining > 0:
-            hidden_marker = '|hidden' if val.get('hidden') else ''
-            print(f'{domain}|{remaining}|{int(val[\"expiry\"])}{hidden_marker}')
+            hidden = 'hidden' if val.get('hidden') else ''
+            includes = ','.join(val.get('includes', []))
+            print(f'{domain}|{remaining}|{int(val[\"expiry\"])}|{hidden}|{includes}')
 " 2>/dev/null)
 
-    # Get daily blocks
+    # Get daily blocks (format: domain|schedule|hidden|includes_csv)
     local daily_blocks=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -885,8 +1018,9 @@ for domain, val in sorted(data.items()):
     if isinstance(val, dict) and 'schedule' in val:
         if not show_hidden and val.get('hidden'):
             continue
-        hidden_marker = '|hidden' if val.get('hidden') else ''
-        print(f'{domain}|{val[\"schedule\"]}{hidden_marker}')
+        hidden = 'hidden' if val.get('hidden') else ''
+        includes = ','.join(val.get('includes', []))
+        print(f'{domain}|{val[\"schedule\"]}|{hidden}|{includes}')
 " 2>/dev/null)
 
     echo ""
@@ -894,13 +1028,19 @@ for domain, val in sorted(data.items()):
     echo "─────────────────────────────────────────"
 
     if [[ -n "$timed_blocks" ]]; then
-        echo "$timed_blocks" | while IFS='|' read domain remaining expiry hidden_marker; do
+        echo "$timed_blocks" | while IFS='|' read domain remaining expiry hidden_marker includes; do
             has_timed=true
             local formatted=$(format_duration "$remaining")
             local expiry_date=$(date -r "$expiry" '+%Y-%m-%d %H:%M')
             local hidden_label=""
             [[ "$hidden_marker" == "hidden" ]] && hidden_label=" ${GREY}[hidden]${NC}"
             printf "  ${CYAN}%-30s${NC} ${YELLOW}%s${NC} (until %s)%b\n" "$domain" "$formatted" "$expiry_date" "$hidden_label"
+            # Show linked domains
+            if [[ -n "$includes" ]]; then
+                echo "$includes" | tr ',' '\n' | while read inc; do
+                    [[ -n "$inc" ]] && printf "    ${GREY}└─ %s${NC}\n" "$inc"
+                done
+            fi
         done
     else
         echo "  ${GREY}No timed blocks${NC}"
@@ -911,7 +1051,7 @@ for domain, val in sorted(data.items()):
     echo "─────────────────────────────────────────"
 
     if [[ -n "$daily_blocks" ]]; then
-        echo "$daily_blocks" | while IFS='|' read domain schedule hidden_marker; do
+        echo "$daily_blocks" | while IFS='|' read domain schedule hidden_marker includes; do
             has_daily=true
             local hidden_label=""
             [[ "$hidden_marker" == "hidden" ]] && hidden_label=" ${GREY}[hidden]${NC}"
@@ -919,6 +1059,12 @@ for domain, val in sorted(data.items()):
                 printf "  ${RED}%-30s${NC} ${YELLOW}%s${NC} ${RED}[ACTIVE]${NC}%b\n" "$domain" "$schedule" "$hidden_label"
             else
                 printf "  ${CYAN}%-30s${NC} ${YELLOW}%s${NC} ${GREEN}[inactive]${NC}%b\n" "$domain" "$schedule" "$hidden_label"
+            fi
+            # Show linked domains
+            if [[ -n "$includes" ]]; then
+                echo "$includes" | tr ',' '\n' | while read inc; do
+                    [[ -n "$inc" ]] && printf "    ${GREY}└─ %s${NC}\n" "$inc"
+                done
             fi
         done
     else
@@ -1108,6 +1254,14 @@ case "${1:-}" in
         ;;
     remove)
         cmd_remove "$2"
+        ;;
+    link)
+        shift
+        cmd_link "$@"
+        ;;
+    unlink)
+        shift
+        cmd_unlink "$@"
         ;;
     list)
         shift

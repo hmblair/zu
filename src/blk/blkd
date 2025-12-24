@@ -202,42 +202,48 @@ generate_pf_rules() {
     local rules=""
 
     # Parse JSON and get entries that should be active now
-    # Handles both timed blocks (expiry timestamp) and daily schedules
+    # Handles timed blocks, daily schedules, and included domains
+    # Output format: domain|schedule (schedule empty for timed blocks)
     local entries=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 now = $now
-for entry, val in data.items():
+
+def is_active(val):
     if isinstance(val, (int, float)):
-        # Timed block (simple format) - check if not expired
-        if val > now:
-            print(entry)
+        return val > now
     elif isinstance(val, dict) and 'expiry' in val:
-        # Timed block (hidden format) - check if not expired
-        if val['expiry'] > now:
-            print(entry)
+        return val['expiry'] > now
     elif isinstance(val, dict) and 'schedule' in val:
-        # Daily schedule - print entry|schedule for shell to check
-        print(f'{entry}|{val[\"schedule\"]}')
+        return True  # Schedule check done in shell
+    return False
+
+def get_schedule(val):
+    if isinstance(val, dict) and 'schedule' in val:
+        return val['schedule']
+    return ''
+
+for entry, val in data.items():
+    if not is_active(val):
+        continue
+    schedule = get_schedule(val)
+    # Output main entry
+    print(f'{entry}|{schedule}')
+    # Output included domains with same schedule
+    if isinstance(val, dict) and 'includes' in val:
+        for inc in val['includes']:
+            print(f'{inc}|{schedule}')
 " 2>/dev/null)
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
 
-        local entry
-        local schedule=""
+        local entry="${line%%|*}"
+        local schedule="${line#*|}"
 
-        if [[ "$line" == *"|"* ]]; then
-            # Daily schedule entry
-            entry="${line%%|*}"
-            schedule="${line#*|}"
-            # Check if schedule is currently active
-            if ! is_schedule_active "$schedule"; then
-                continue
-            fi
-        else
-            # Timed block entry
-            entry="$line"
+        # Check if schedule is currently active (if it has one)
+        if [[ -n "$schedule" ]] && ! is_schedule_active "$schedule"; then
+            continue
         fi
 
         local ips=$(resolve_entry "$entry")
@@ -368,7 +374,7 @@ update_summary_file() {
     local data="$1"
     local now=$(date +%s)
 
-    # Extract non-hidden active blocks
+    # Extract non-hidden active blocks (including linked domains)
     local summary=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -383,11 +389,20 @@ for domain, val in data.items():
         # Skip hidden entries
         if val.get('hidden'):
             continue
+        entry = {}
         if 'expiry' in val:
             if val['expiry'] > now:
-                summary[domain] = {'expiry': int(val['expiry'])}
+                entry['expiry'] = int(val['expiry'])
+            else:
+                continue
         elif 'schedule' in val:
-            summary[domain] = {'schedule': val['schedule']}
+            entry['schedule'] = val['schedule']
+        else:
+            continue
+        # Include linked domains
+        if 'includes' in val:
+            entry['includes'] = val['includes']
+        summary[domain] = entry
 print(json.dumps(summary))
 " 2>/dev/null)
 
