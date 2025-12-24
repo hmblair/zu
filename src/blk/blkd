@@ -20,8 +20,6 @@ SUMMARY_FILE="$BLOCK_DIR/summary"
 ANCHOR_NAME="com.zu.blk"
 ANCHOR_FILE="/etc/pf.anchors/$ANCHOR_NAME"
 DAEMON_PASS_FILE="/var/root/.blk_pass"
-DNSMASQ_CONF_DIR="/opt/homebrew/etc/dnsmasq.d"
-DNSMASQ_CONF_FILE="$DNSMASQ_CONF_DIR/blk.conf"
 
 CHECK_INTERVAL=5  # seconds between rule verification
 LOG_PREFIX="[blkd]"
@@ -206,7 +204,6 @@ generate_pf_rules() {
     # Parse JSON and get entries that should be active now
     # Handles timed blocks, daily schedules, and included domains
     # Output format: domain|schedule (schedule empty for timed blocks)
-    # Excludes *.domain.com patterns (those go to dnsmasq)
     local entries=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -226,22 +223,16 @@ def get_schedule(val):
         return val['schedule']
     return ''
 
-def is_dnsmasq_wildcard(s):
-    # *.domain.com patterns go to dnsmasq, not pf
-    return s.startswith('*.') and s.count('*') == 1
-
 for entry, val in data.items():
     if not is_active(val):
         continue
     schedule = get_schedule(val)
-    # Output main entry (skip dnsmasq wildcards)
-    if not is_dnsmasq_wildcard(entry):
-        print(f'{entry}|{schedule}')
-    # Output included domains with same schedule (skip dnsmasq wildcards)
+    # Output main entry
+    print(f'{entry}|{schedule}')
+    # Output included domains with same schedule
     if isinstance(val, dict) and 'includes' in val:
         for inc in val['includes']:
-            if not is_dnsmasq_wildcard(inc):
-                print(f'{inc}|{schedule}')
+            print(f'{inc}|{schedule}')
 " 2>/dev/null)
 
     while IFS= read -r line; do
@@ -289,104 +280,6 @@ apply_pf_rules() {
 
 get_current_rules() {
     pfctl -a "$ANCHOR_NAME" -s rules 2>/dev/null
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# dnsmasq Management (for wildcard subdomain blocking)
-# ─────────────────────────────────────────────────────────────────────────────
-
-dnsmasq_available() {
-    command -v dnsmasq &>/dev/null && [[ -d "$DNSMASQ_CONF_DIR" ]]
-}
-
-# Check if a pattern is a dnsmasq wildcard (*.domain.com format)
-is_dnsmasq_wildcard() {
-    [[ "$1" == \*\.* ]] && [[ "$1" != *\*\* ]]
-}
-
-# Generate dnsmasq config for wildcard patterns
-# Returns: dnsmasq config lines
-generate_dnsmasq_config() {
-    local data="$1"
-    local now=$(date +%s)
-    local config=""
-
-    # Get active wildcard patterns (*.domain.com format)
-    local patterns=$(echo "$data" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-now = $now
-
-def is_active(val):
-    if isinstance(val, (int, float)):
-        return val > now
-    elif isinstance(val, dict) and 'expiry' in val:
-        return val['expiry'] > now
-    elif isinstance(val, dict) and 'schedule' in val:
-        return True
-    return False
-
-def get_schedule(val):
-    if isinstance(val, dict) and 'schedule' in val:
-        return val['schedule']
-    return ''
-
-def get_wildcards(val):
-    if isinstance(val, dict) and 'includes' in val:
-        return [i for i in val['includes'] if i.startswith('*.')]
-    return []
-
-for entry, val in data.items():
-    if not is_active(val):
-        continue
-    schedule = get_schedule(val)
-    # Check main entry
-    if entry.startswith('*.'):
-        print(f'{entry}|{schedule}')
-    # Check includes
-    for wc in get_wildcards(val):
-        print(f'{wc}|{schedule}')
-" 2>/dev/null)
-
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-
-        local pattern="${line%%|*}"
-        local schedule="${line#*|}"
-
-        # Check if schedule is active
-        if [[ -n "$schedule" ]] && ! is_schedule_active "$schedule"; then
-            continue
-        fi
-
-        # Convert *.domain.com to dnsmasq format: address=/domain.com/0.0.0.0
-        local domain="${pattern#\*.}"
-        config+="address=/${domain}/0.0.0.0"$'\n'
-    done <<< "$patterns"
-
-    echo "$config"
-}
-
-apply_dnsmasq_config() {
-    local config="$1"
-
-    if ! dnsmasq_available; then
-        return 0
-    fi
-
-    local current=""
-    [[ -f "$DNSMASQ_CONF_FILE" ]] && current=$(cat "$DNSMASQ_CONF_FILE")
-
-    if [[ "$config" != "$current" ]]; then
-        log "Updating dnsmasq config"
-        if [[ -n "$config" ]]; then
-            echo "$config" > "$DNSMASQ_CONF_FILE"
-        else
-            rm -f "$DNSMASQ_CONF_FILE"
-        fi
-        # Restart dnsmasq to pick up changes
-        brew services restart dnsmasq 2>/dev/null || killall -HUP dnsmasq 2>/dev/null
-    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -574,7 +467,6 @@ main() {
 
     local last_trigger_mtime=""
     local expected_rules=""
-    local expected_dnsmasq=""
 
     while true; do
         # Check if trigger file was modified (new block added)
@@ -603,11 +495,6 @@ main() {
                 apply_pf_rules ""
                 expected_rules=""
             fi
-            # Clear dnsmasq config if it exists
-            if [[ -n "$expected_dnsmasq" ]]; then
-                apply_dnsmasq_config ""
-                expected_dnsmasq=""
-            fi
             # Update summary file (empty)
             echo "{}" > "$SUMMARY_FILE"
             chmod 644 "$SUMMARY_FILE"
@@ -618,28 +505,21 @@ main() {
             # Update the summary file with non-hidden blocks
             update_summary_file "$data"
 
-            # Generate expected pf rules (for non-wildcard domains)
+            # Generate expected rules
             local new_rules=$(generate_pf_rules "$data")
 
-            # Check if pf rules need updating
+            # Check if rules need updating
             if [[ "$reload_needed" == "true" ]] || [[ "$new_rules" != "$expected_rules" ]]; then
                 log "Updating pf rules"
                 apply_pf_rules "$new_rules"
                 expected_rules="$new_rules"
             fi
 
-            # Verify pf rules are still in place (tamper detection)
+            # Verify rules are still in place (tamper detection)
             local current_rules=$(get_current_rules)
             if [[ -n "$expected_rules" ]] && [[ "$current_rules" != *"block return"* ]]; then
                 log "Rules were cleared externally, re-applying"
                 apply_pf_rules "$expected_rules"
-            fi
-
-            # Generate and apply dnsmasq config (for *.domain.com wildcards)
-            local new_dnsmasq=$(generate_dnsmasq_config "$data")
-            if [[ "$reload_needed" == "true" ]] || [[ "$new_dnsmasq" != "$expected_dnsmasq" ]]; then
-                apply_dnsmasq_config "$new_dnsmasq"
-                expected_dnsmasq="$new_dnsmasq"
             fi
         fi
 
