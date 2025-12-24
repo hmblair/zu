@@ -229,6 +229,45 @@ check_pf_enforcement() {
     return 1
 }
 
+# Check dnsmasq status for wildcard blocking
+check_dnsmasq_status() {
+    # Returns: not_installed, not_running, no_config, active:N
+    if ! command -v dnsmasq &>/dev/null; then
+        echo "not_installed"
+        return 1
+    fi
+    if ! pgrep -x dnsmasq &>/dev/null; then
+        echo "not_running"
+        return 1
+    fi
+    if [[ ! -f "$DNSMASQ_CONF_FILE" ]]; then
+        echo "no_config"
+        return 0
+    fi
+    local count=$(grep -c "^address=" "$DNSMASQ_CONF_FILE" 2>/dev/null || echo "0")
+    echo "active:$count"
+    return 0
+}
+
+# Check if data contains any dnsmasq wildcards (*.domain.com)
+has_dnsmasq_wildcards() {
+    local data="$1"
+    echo "$data" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for entry, val in data.items():
+    if entry.startswith('*.'):
+        print('yes')
+        sys.exit(0)
+    if isinstance(val, dict) and 'includes' in val:
+        for inc in val['includes']:
+            if inc.startswith('*.'):
+                print('yes')
+                sys.exit(0)
+print('no')
+" 2>/dev/null
+}
+
 # Parse schedule string (HH:MM-HH:MM) and validate
 parse_schedule() {
     local schedule="$1"
@@ -1012,6 +1051,33 @@ print('none')
             fi
             ;;
     esac
+
+    # Check dnsmasq status if there are wildcard patterns
+    local has_wildcards=$(has_dnsmasq_wildcards "$data")
+    if [[ "$has_wildcards" == "yes" ]] || command -v dnsmasq &>/dev/null; then
+        local dnsmasq_status=$(check_dnsmasq_status)
+        case "$dnsmasq_status" in
+            active:*)
+                local wc_count="${dnsmasq_status#active:}"
+                printf "  dnsmasq: ${GREEN}running${NC} (%s wildcards)\n" "$wc_count"
+                ;;
+            no_config)
+                printf "  dnsmasq: ${GREEN}running${NC} ${GREY}(no wildcards)${NC}\n"
+                ;;
+            not_running)
+                printf "  dnsmasq: ${RED}not running${NC}\n"
+                if [[ "$has_wildcards" == "yes" ]]; then
+                    warn "Wildcard patterns won't work. Run: brew services start dnsmasq"
+                fi
+                ;;
+            not_installed)
+                if [[ "$has_wildcards" == "yes" ]]; then
+                    printf "  dnsmasq: ${RED}not installed${NC}\n"
+                    warn "Wildcard patterns require dnsmasq. Run: brew install dnsmasq"
+                fi
+                ;;
+        esac
+    fi
 
     # Get timed blocks (format: domain|remaining|expiry|hidden|includes_csv)
     local timed_blocks=$(echo "$data" | python3 -c "
