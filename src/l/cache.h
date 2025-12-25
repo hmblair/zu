@@ -34,9 +34,8 @@ typedef struct {
     uint32_t version;
     uint32_t count;        /* Number of valid entries */
     uint32_t capacity;
-    uint32_t checksum;     /* CRC32 of entries array */
-    uint32_t reserved;     /* Padding for alignment */
     CacheEntry entries[CACHE_CAPACITY];
+    uint32_t checksum;     /* CRC32 of entries array (at end to preserve v2 layout) */
 } SizeCache;
 
 /* CRC32 implementation (IEEE polynomial) */
@@ -270,7 +269,6 @@ create_new:
     d_cache->version = CACHE_VERSION;
     d_cache->capacity = CACHE_CAPACITY;
     d_cache->checksum = 0;
-    d_cache->reserved = 0;
 
     /* Initialize all entries as empty */
     for (uint32_t i = 0; i < CACHE_CAPACITY; i++) {
