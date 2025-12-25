@@ -21,6 +21,7 @@ usage() {
     echo "  add <name> <value>    Add or update a variable"
     echo "  remove <name>         Remove a variable"
     echo "  list [--all]          Show managed variables (--all for all)"
+    echo "  find <pattern>        Find variables matching pattern"
     echo "  dir                   Show config file path"
     echo ""
     echo "Add to .zshrc:"
@@ -140,6 +141,29 @@ cmd_list() {
     done
 }
 
+cmd_find() {
+    if [[ $# -eq 0 ]]; then
+        error "Usage: envs find <pattern>"
+    fi
+
+    local pattern="$1"
+    local results=()
+
+    while IFS='=' read -r name value; do
+        [[ -z "$name" ]] && continue
+        if [[ "$name" == $~pattern ]]; then
+            results+=("$name=$value")
+        fi
+    done < <(env)
+
+    if [[ ${#results[@]} -eq 0 ]]; then
+        echo "${RED}Error:${NC} No match for '$pattern'" >&2
+        return 1
+    fi
+
+    printf '%s\n' "${results[@]}"
+}
+
 cmd_dir() {
     echo "$ENVS_FILE"
 }
@@ -161,6 +185,10 @@ case "${1:-}" in
         ;;
     list)
         cmd_list "$2"
+        ;;
+    find)
+        shift
+        cmd_find "$@"
         ;;
     dir)
         cmd_dir
