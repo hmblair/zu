@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <ctype.h>
+#include <time.h>
 
 #if defined(__APPLE__) && defined(__MACH__)
     #define PLATFORM_MACOS 1
@@ -100,8 +101,7 @@ typedef enum {
 typedef struct {
     int max_depth;
     int show_hidden;
-    int show_sizes;
-    int count_lines;
+    int long_format;
     int expand_all;
     int list_mode;
     int no_icons;
@@ -296,6 +296,25 @@ static void format_size(off_t bytes, char *buf, size_t len) {
         snprintf(buf, len, "%.1f%s", size, units[unit_idx]);
     } else {
         snprintf(buf, len, "%.0f%s", size, units[unit_idx]);
+    }
+}
+
+/* Format time as relative or short date */
+static void format_relative_time(time_t mtime, char *buf, size_t len) {
+    time_t now = time(NULL);
+    long diff = (long)(now - mtime);
+
+    if (diff < 60) {
+        snprintf(buf, len, "now");
+    } else if (diff < 3600) {
+        snprintf(buf, len, "%ldm ago", diff / 60);
+    } else if (diff < 86400) {
+        snprintf(buf, len, "%ldh ago", diff / 3600);
+    } else if (diff < 604800) {
+        snprintf(buf, len, "%ldd ago", diff / 86400);
+    } else {
+        struct tm *tm = localtime(&mtime);
+        strftime(buf, len, "%b %d", tm);
     }
 }
 
@@ -842,15 +861,15 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         fe.mode = st.st_mode;
         fe.mtime = GET_MTIME(st);
 
-        /* Compute size - recursive for directories when -s is set */
-        if (cfg->show_sizes && fe.type == FTYPE_DIR) {
+        /* Compute size - recursive for directories in long format */
+        if (cfg->long_format && fe.type == FTYPE_DIR) {
             fe.size = get_dir_size(full_path);
         } else {
             fe.size = st.st_size;
         }
 
-        /* Count lines for files when -l is set */
-        if (cfg->count_lines && (fe.type == FTYPE_FILE || fe.type == FTYPE_EXEC)) {
+        /* Count lines for files in long format */
+        if (cfg->long_format && (fe.type == FTYPE_FILE || fe.type == FTYPE_EXEC)) {
             fe.line_count = count_file_lines(full_path);
         }
 
@@ -907,7 +926,7 @@ static void print_prefix(int depth, int *continuation, const Config *cfg) {
 
 static void print_entry(const char *path, const char *name, FileType type,
                         const char *symlink_target, off_t size, int line_count,
-                        int depth, int *continuation,
+                        time_t mtime, int depth, int *continuation,
                         GitCache *git, const Icons *icons, const Config *cfg) {
     char abs_path[PATH_MAX];
     get_realpath(path, abs_path);
@@ -919,6 +938,31 @@ static void print_entry(const char *path, const char *name, FileType type,
     /* Check if ignored */
     const char *git_status = git_cache_get(git, abs_path);
     int is_ignored = is_gitdir || (git_status && strcmp(git_status, "!!") == 0);
+
+    /* Long format: SIZE LINES TIME before tree prefix */
+    if (cfg->long_format) {
+        char size_buf[16];
+        char time_buf[16];
+        format_size(size, size_buf, sizeof(size_buf));
+        format_relative_time(mtime, time_buf, sizeof(time_buf));
+
+        /* Size: 6 chars right-aligned */
+        printf("%s%6s%s ", cfg->is_tty ? COLOR_GREY : "", size_buf,
+               cfg->is_tty ? COLOR_RESET : "");
+
+        /* Lines: 6 chars right-aligned, or "-" for non-files */
+        if (line_count >= 0) {
+            printf("%s%6d%s ", cfg->is_tty ? COLOR_GREY : "", line_count,
+                   cfg->is_tty ? COLOR_RESET : "");
+        } else {
+            printf("%s     -%s ", cfg->is_tty ? COLOR_GREY : "",
+                   cfg->is_tty ? COLOR_RESET : "");
+        }
+
+        /* Time: 8 chars right-aligned */
+        printf("%s%8s%s ", cfg->is_tty ? COLOR_GREY : "", time_buf,
+               cfg->is_tty ? COLOR_RESET : "");
+    }
 
     /* Print tree prefix */
     print_prefix(depth, continuation, cfg);
@@ -943,20 +987,6 @@ static void print_entry(const char *path, const char *name, FileType type,
         printf("%s%s%s%s", color, style, abbrev, cfg->is_tty ? COLOR_RESET : "");
     } else {
         printf("%s%s%s%s", color, style, name, cfg->is_tty ? COLOR_RESET : "");
-    }
-
-    /* Size */
-    if (cfg->show_sizes) {
-        char size_buf[16];
-        format_size(size, size_buf, sizeof(size_buf));
-        printf(" %s(%s)%s", cfg->is_tty ? COLOR_GREY : "", size_buf,
-               cfg->is_tty ? COLOR_RESET : "");
-    }
-
-    /* Line count */
-    if (cfg->count_lines && line_count >= 0) {
-        printf(" %s(%d lines)%s", cfg->is_tty ? COLOR_GREY : "", line_count,
-               cfg->is_tty ? COLOR_RESET : "");
     }
 
     /* Symlink target */
@@ -1007,7 +1037,7 @@ static void print_tree_recursive(const char *path, int depth, int *continuation,
                          strcmp(fe->name, ".git") == 0;
 
         print_entry(fe->path, fe->name, fe->type, fe->symlink_target,
-                    fe->size, fe->line_count, depth + 1, continuation, git, icons, cfg);
+                    fe->size, fe->line_count, fe->mtime, depth + 1, continuation, git, icons, cfg);
 
         /* Recurse into directories */
         if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, is_ignored, cfg)) {
@@ -1040,17 +1070,19 @@ static void print_tree(const char *path, int depth, int *continuation,
     name = name ? name + 1 : abs_path;
 
     int line_count = -1;
-    if (cfg->count_lines && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
+    if (cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
         line_count = count_file_lines(abs_path);
     }
 
     off_t size = st.st_size;
-    if (cfg->show_sizes && type == FTYPE_DIR) {
+    if (cfg->long_format && type == FTYPE_DIR) {
         size = get_dir_size(abs_path);
     }
 
+    time_t mtime = GET_MTIME(st);
+
     print_entry(abs_path, name, type, symlink_target, size, line_count,
-                depth, continuation, git, icons, cfg);
+                mtime, depth, continuation, git, icons, cfg);
 
     free(symlink_target);
 
@@ -1069,8 +1101,7 @@ static void print_usage(void) {
     printf("\n");
     printf("Options:\n");
     printf("  -a              Show hidden files\n");
-    printf("  -s              Show file/directory sizes\n");
-    printf("  -l              Show line counts for files\n");
+    printf("  -l              Long format (size, lines, time)\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
     printf("  --depth INT     Limit tree depth\n");
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
@@ -1102,10 +1133,8 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 exit(0);
             } else if (strcmp(arg, "-a") == 0) {
                 cfg->show_hidden = 1;
-            } else if (strcmp(arg, "-s") == 0) {
-                cfg->show_sizes = 1;
             } else if (strcmp(arg, "-l") == 0) {
-                cfg->count_lines = 1;
+                cfg->long_format = 1;
             } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
                 cfg->max_depth = MAX_DEPTH;
             } else if (strcmp(arg, "--depth") == 0) {
@@ -1134,8 +1163,7 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 for (int j = 1; arg[j]; j++) {
                     switch (arg[j]) {
                         case 'a': cfg->show_hidden = 1; break;
-                        case 's': cfg->show_sizes = 1; break;
-                        case 'l': cfg->count_lines = 1; break;
+                        case 'l': cfg->long_format = 1; break;
                         case 't': cfg->max_depth = MAX_DEPTH; break;
                         case 'S': cfg->sort_by = SORT_SIZE; break;
                         case 'T': cfg->sort_by = SORT_TIME; break;
@@ -1191,8 +1219,7 @@ int main(int argc, char **argv) {
     Config cfg = {
         .max_depth = 1,
         .show_hidden = 0,
-        .show_sizes = 0,
-        .count_lines = 0,
+        .long_format = 0,
         .expand_all = 0,
         .list_mode = 0,
         .no_icons = 0,
@@ -1253,7 +1280,7 @@ int main(int argc, char **argv) {
     }
 
     /* Print total line count */
-    if (cfg.count_lines && g_total_lines > 0) {
+    if (cfg.long_format && g_total_lines > 0) {
         printf("\n%sTotal: %ld lines%s\n",
                cfg.is_tty ? COLOR_GREY : "", g_total_lines,
                cfg.is_tty ? COLOR_RESET : "");

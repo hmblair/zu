@@ -12,8 +12,7 @@ _l_files() {
 _l() {
     _arguments -s \
         '-a[Show hidden files]' \
-        '-s[Show file/directory sizes]' \
-        '-l[Show line counts for files]' \
+        '-l[Long format (size, lines, time)]' \
         '(-t --tree)'{-t,--tree}'[Show full tree]' \
         '--depth[Limit tree depth]:depth:' \
         '--expand-all[Expand all directories (ignore NO_EXPAND list)]' \
