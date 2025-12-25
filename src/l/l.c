@@ -109,6 +109,7 @@ typedef struct {
     int list_mode;
     int no_icons;
     int sort_reverse;
+    int file_count_mode;
     int is_tty;
     SortMode sort_by;
     /* Environment paths */
@@ -166,6 +167,7 @@ struct FileEntry {
     char *symlink_target;    /* Resolved symlink target (owned, NULL if not symlink) */
     mode_t mode;
     off_t size;
+    long file_count;         /* -1 if not computed */
     time_t mtime;
     int line_count;          /* -1 if not computed */
     int is_ignored;
@@ -354,7 +356,18 @@ static void format_relative_time(time_t mtime, char *buf, size_t len) {
  * ============================================================================ */
 
 static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
-    format_size(fe->size, buf, len);
+    if (fe->file_count >= 0) {
+        /* Show file count instead of size */
+        if (fe->file_count >= 1000000) {
+            snprintf(buf, len, "%.1fM", fe->file_count / 1000000.0);
+        } else if (fe->file_count >= 1000) {
+            snprintf(buf, len, "%.1fK", fe->file_count / 1000.0);
+        } else {
+            snprintf(buf, len, "%ld", fe->file_count);
+        }
+    } else {
+        format_size(fe->size, buf, len);
+    }
 }
 
 static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
@@ -396,11 +409,16 @@ static void columns_update_widths(Column *cols, const FileEntry *fe) {
     }
 }
 
-/* Calculate recursive directory size (actual file bytes) */
-static off_t get_dir_size(const char *path) {
-    off_t total = 0;
+/* Calculate recursive directory size using OMP tasks for work stealing */
+static off_t get_dir_size_task(const char *path) {
     DIR *dir = opendir(path);
     if (!dir) return 0;
+
+    /* Collect entries first */
+    char **subdirs = NULL;
+    size_t subdir_count = 0;
+    size_t subdir_cap = 0;
+    off_t file_total = 0;
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -413,14 +431,114 @@ static off_t get_dir_size(const char *path) {
         struct stat st;
         if (lstat(full_path, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
-                total += get_dir_size(full_path);
+                if (subdir_count >= subdir_cap) {
+                    subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
+                    subdirs = xrealloc(subdirs, subdir_cap * sizeof(char *));
+                }
+                subdirs[subdir_count++] = xstrdup(full_path);
             } else {
-                total += st.st_size;
+                file_total += st.st_size;
             }
         }
     }
     closedir(dir);
-    return total;
+
+    /* Spawn tasks for subdirectories */
+    off_t *sizes = NULL;
+    if (subdir_count > 0) {
+        sizes = xmalloc(subdir_count * sizeof(off_t));
+        for (size_t i = 0; i < subdir_count; i++) {
+            #pragma omp task shared(sizes) firstprivate(i)
+            sizes[i] = get_dir_size_task(subdirs[i]);
+        }
+        #pragma omp taskwait
+    }
+
+    /* Sum results */
+    off_t dir_total = 0;
+    for (size_t i = 0; i < subdir_count; i++) {
+        dir_total += sizes[i];
+        free(subdirs[i]);
+    }
+    free(subdirs);
+    free(sizes);
+
+    return file_total + dir_total;
+}
+
+static off_t get_dir_size(const char *path) {
+    off_t result;
+    #pragma omp parallel
+    #pragma omp single
+    {
+        result = get_dir_size_task(path);
+    }
+    return result;
+}
+
+/* Count files recursively using OMP tasks */
+static long get_file_count_task(const char *path) {
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+
+    char **subdirs = NULL;
+    size_t subdir_count = 0;
+    size_t subdir_cap = 0;
+    long file_count = 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(full_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (subdir_count >= subdir_cap) {
+                    subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
+                    subdirs = xrealloc(subdirs, subdir_cap * sizeof(char *));
+                }
+                subdirs[subdir_count++] = xstrdup(full_path);
+            } else {
+                file_count++;
+            }
+        }
+    }
+    closedir(dir);
+
+    /* Spawn tasks for subdirectories */
+    long *counts = NULL;
+    if (subdir_count > 0) {
+        counts = xmalloc(subdir_count * sizeof(long));
+        for (size_t i = 0; i < subdir_count; i++) {
+            #pragma omp task shared(counts) firstprivate(i)
+            counts[i] = get_file_count_task(subdirs[i]);
+        }
+        #pragma omp taskwait
+    }
+
+    /* Sum results */
+    for (size_t i = 0; i < subdir_count; i++) {
+        file_count += counts[i];
+        free(subdirs[i]);
+    }
+    free(subdirs);
+    free(counts);
+
+    return file_count;
+}
+
+static long get_file_count(const char *path) {
+    long result;
+    #pragma omp parallel
+    #pragma omp single
+    {
+        result = get_file_count_task(path);
+    }
+    return result;
 }
 
 /* ============================================================================
@@ -566,13 +684,16 @@ static int count_file_lines(const char *path) {
     }
 
     int count = 0;
-    int ch;
-    while ((ch = fgetc(f)) != EOF) {
-        if (ch == '\n') {
-            count++;
-            if (count > LINE_COUNT_LIMIT) {
-                fclose(f);
-                return LINE_COUNT_EXCEEDED;
+    char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i < n; i++) {
+            if (buf[i] == '\n') {
+                count++;
+                if (count > LINE_COUNT_LIMIT) {
+                    fclose(f);
+                    return LINE_COUNT_EXCEEDED;
+                }
             }
         }
     }
@@ -955,6 +1076,7 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         fe.name = strrchr(fe.path, '/');
         fe.name = fe.name ? fe.name + 1 : fe.path;
         fe.line_count = -1;
+        fe.file_count = -1;
         fe.git_status[0] = '\0';
 
         struct stat st;
@@ -968,13 +1090,17 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
 
     closedir(dir);
 
-    /* Phase 2: Compute expensive data in parallel (sizes, line counts) */
+    /* Phase 2: Compute expensive data in parallel (sizes/counts, line counts) */
     if (cfg->long_format && list->count > 0) {
         #pragma omp parallel for schedule(dynamic)
         for (size_t i = 0; i < list->count; i++) {
             FileEntry *fe = &list->entries[i];
             if (fe->type == FTYPE_DIR) {
-                fe->size = get_dir_size(fe->path);
+                if (cfg->file_count_mode) {
+                    fe->file_count = get_file_count(fe->path);
+                } else {
+                    fe->size = get_dir_size(fe->path);
+                }
             } else if (fe->type == FTYPE_FILE || fe->type == FTYPE_EXEC) {
                 fe->line_count = count_file_lines(fe->path);
             }
@@ -1149,6 +1275,24 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
         if (child->entry.type == FTYPE_DIR &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
             build_tree_children(child, depth + 1, cols, git, cfg);
+
+            /* Sum children's sizes instead of using get_dir_size result (only if showing all) */
+            if (cfg->long_format && cfg->show_hidden && child->child_count > 0) {
+                off_t total_size = 0;
+                long total_count = 0;
+                for (size_t j = 0; j < child->child_count; j++) {
+                    if (cfg->file_count_mode) {
+                        total_count += child->children[j].entry.file_count;
+                    } else {
+                        total_size += child->children[j].entry.size;
+                    }
+                }
+                if (cfg->file_count_mode) {
+                    child->entry.file_count = total_count;
+                } else {
+                    child->entry.size = total_size;
+                }
+            }
         }
     }
 
@@ -1177,14 +1321,20 @@ static TreeNode *build_tree(const char *path, Column *cols,
     root->entry.mode = st.st_mode;
     root->entry.mtime = GET_MTIME(st);
     root->entry.line_count = -1;
+    root->entry.file_count = -1;
 
     if (cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
         root->entry.line_count = count_file_lines(abs_path);
     }
 
     root->entry.size = st.st_size;
-    if (cfg->long_format && type == FTYPE_DIR) {
-        root->entry.size = get_dir_size(abs_path);
+    /* Size/count computed after children if show_hidden, else compute now */
+    if (cfg->long_format && type == FTYPE_DIR && !cfg->show_hidden) {
+        if (cfg->file_count_mode) {
+            root->entry.file_count = get_file_count(abs_path);
+        } else {
+            root->entry.size = get_dir_size(abs_path);
+        }
     }
 
     /* Set is_ignored for root */
@@ -1200,6 +1350,28 @@ static TreeNode *build_tree(const char *path, Column *cols,
     /* Build children if directory */
     if (type == FTYPE_DIR) {
         build_tree_children(root, 0, cols, git, cfg);
+
+        /* Sum children's sizes/counts to get root's total (only if showing all) */
+        if (cfg->long_format && cfg->show_hidden) {
+            off_t total_size = 0;
+            long total_count = 0;
+            for (size_t i = 0; i < root->child_count; i++) {
+                if (cfg->file_count_mode) {
+                    total_count += root->children[i].entry.file_count;
+                } else {
+                    total_size += root->children[i].entry.size;
+                }
+            }
+            if (cfg->file_count_mode) {
+                root->entry.file_count = total_count;
+            } else {
+                root->entry.size = total_size;
+            }
+            /* Update column widths now that we have the real value */
+            if (cols) {
+                columns_update_widths(cols, &root->entry);
+            }
+        }
     }
 
     return root;
@@ -1263,6 +1435,7 @@ static void print_usage(void) {
     printf("\n");
     printf("Options:\n");
     printf("  -a              Show hidden files\n");
+    printf("  -f              Show file count instead of size for directories\n");
     printf("  -s, --short     Short format (no size, lines, time)\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
     printf("  --depth INT     Limit tree depth\n");
@@ -1295,6 +1468,8 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 exit(0);
             } else if (strcmp(arg, "-a") == 0) {
                 cfg->show_hidden = 1;
+            } else if (strcmp(arg, "-f") == 0) {
+                cfg->file_count_mode = 1;
             } else if (strcmp(arg, "-s") == 0 || strcmp(arg, "--short") == 0) {
                 cfg->long_format = 0;
             } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
@@ -1321,10 +1496,11 @@ static void parse_args(int argc, char **argv, Config *cfg,
             } else if (strcmp(arg, "-r") == 0) {
                 cfg->sort_reverse = 1;
             } else if (arg[1] != '-') {
-                /* Handle combined short flags like -as */
+                /* Handle combined short flags like -af */
                 for (int j = 1; arg[j]; j++) {
                     switch (arg[j]) {
                         case 'a': cfg->show_hidden = 1; break;
+                        case 'f': cfg->file_count_mode = 1; break;
                         case 's': cfg->long_format = 0; break;
                         case 't': cfg->max_depth = MAX_DEPTH; break;
                         case 'S': cfg->sort_by = SORT_SIZE; break;
