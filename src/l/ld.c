@@ -25,8 +25,8 @@
 #include "watch.h"
 
 #define UPDATE_INTERVAL 300  /* 5 minutes */
-#define DEPTH_THRESHOLD 4
-#define MAX_DIRTY_PATHS 8192
+#define DEPTH_THRESHOLD 3    /* Cache directories at depth <= this */
+#define MAX_DIRTY_PATHS 65536
 
 /* Dirty paths that need recalculation */
 static char *g_dirty_paths[MAX_DIRTY_PATHS];
@@ -83,13 +83,17 @@ static void mark_dirty(const char *path) {
 static void on_change(const char *path, void *ctx) {
     (void)ctx;
 
-    /* Mark this path and all ancestors at depth >= DEPTH_THRESHOLD as dirty */
+    /* Mark all ancestors at depth <= DEPTH_THRESHOLD as dirty */
     char buf[PATH_MAX];
     strncpy(buf, path, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
-    while (path_depth(buf, g_root) >= DEPTH_THRESHOLD) {
-        mark_dirty(buf);
+    /* Walk up to root, marking cached ancestors as dirty */
+    int depth;
+    while ((depth = path_depth(buf, g_root)) > 0) {
+        if (depth <= DEPTH_THRESHOLD) {
+            mark_dirty(buf);
+        }
         parent_path(buf, buf, sizeof(buf));
     }
 }
@@ -195,6 +199,49 @@ static void handle_signal(int sig) {
     watch_stop();
 }
 
+/* Initial scan to populate cache for cold start */
+static void initial_scan(const char *path, int depth) {
+    if (g_shutdown) return;
+    if (depth > DEPTH_THRESHOLD) return;  /* Don't scan beyond threshold */
+
+    DIR *dir = opendir(path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.' &&
+            (entry->d_name[1] == '\0' ||
+             (entry->d_name[1] == '.' && entry->d_name[2] == '\0'))) {
+            continue;
+        }
+
+        char full[PATH_MAX];
+        snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(full, &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            /* Check if already cached */
+            uint64_t h = fnv1a_hash(full);
+            int found = 0;
+            if (d_cache) {
+                uint32_t idx = h % CACHE_CAPACITY;
+                for (int i = 0; i < 32 && !found; i++) {
+                    CacheEntry *e = &d_cache->entries[(idx + i) % CACHE_CAPACITY];
+                    if (e->size == -1) break;
+                    if (e->path_hash == h) found = 1;
+                }
+            }
+            if (!found) {
+                mark_dirty(full);
+            }
+            initial_scan(full, depth + 1);
+        }
+    }
+    closedir(dir);
+}
+
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s [root]\n", prog);
     fprintf(stderr, "  root: Directory to watch (default: $HOME)\n");
@@ -227,6 +274,16 @@ int main(int argc, char *argv[]) {
     if (cache_init() != 0) {
         fprintf(stderr, "Error: Failed to initialize cache\n");
         return 1;
+    }
+
+    /* Initial scan to populate cache */
+    fprintf(stderr, "l-cached: scanning for uncached directories...\n");
+    initial_scan(g_root, 0);
+    if (g_dirty_count > 0) {
+        fprintf(stderr, "l-cached: found %zu uncached directories, processing...\n", g_dirty_count);
+        process_dirty_paths();
+    } else {
+        fprintf(stderr, "l-cached: cache is up to date\n");
     }
 
     /* Set up signal handlers */

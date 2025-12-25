@@ -16,8 +16,8 @@
 #include <sys/stat.h>
 
 #define CACHE_MAGIC    0x4C53495A  /* "LSIZ" */
-#define CACHE_VERSION  1
-#define CACHE_CAPACITY 16384       /* ~512KB file */
+#define CACHE_VERSION  2
+#define CACHE_CAPACITY 65536       /* ~2MB file */
 
 typedef struct {
     uint64_t path_hash;    /* FNV-1a hash of absolute path */

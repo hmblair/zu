@@ -12,4 +12,5 @@ git_modified = ""
 git_untracked = "󰛑"
 git_staged = ""
 git_deleted = ""
+readonly = ""
 [extensions]
