@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include <time.h>
+#include <omp.h>
 
 #if defined(__APPLE__) && defined(__MACH__)
     #define PLATFORM_MACOS 1
@@ -152,6 +153,7 @@ typedef struct {
     char git_untracked[MAX_ICON_LEN];
     char git_staged[MAX_ICON_LEN];
     char git_deleted[MAX_ICON_LEN];
+    char readonly[MAX_ICON_LEN];
     ExtIcon ext_icons[MAX_EXT_ICONS];
     int ext_count;
 } Icons;
@@ -574,6 +576,7 @@ static void icons_init_defaults(Icons *icons) {
     strcpy(icons->git_untracked, "󰛑");
     strcpy(icons->git_staged, "");
     strcpy(icons->git_deleted, "");
+    strcpy(icons->readonly, "");
     icons->ext_count = 0;
 }
 
@@ -665,6 +668,7 @@ static void icons_load(Icons *icons, const char *script_dir) {
             else if (strcmp(key, "git_untracked") == 0) strcpy(icons->git_untracked, value);
             else if (strcmp(key, "git_staged") == 0) strcpy(icons->git_staged, value);
             else if (strcmp(key, "git_deleted") == 0) strcpy(icons->git_deleted, value);
+            else if (strcmp(key, "readonly") == 0) strcpy(icons->readonly, value);
         }
     }
 
@@ -905,6 +909,7 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
     DIR *dir = opendir(dir_path);
     if (!dir) return -1;
 
+    /* Phase 1: Collect all entries (fast, sequential) */
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         /* Skip . and .. */
@@ -931,23 +936,25 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         fe.type = detect_file_type(full_path, &st, &fe.symlink_target);
         fe.mode = st.st_mode;
         fe.mtime = GET_MTIME(st);
-
-        /* Compute size - recursive for directories in long format */
-        if (cfg->long_format && fe.type == FTYPE_DIR) {
-            fe.size = get_dir_size(full_path);
-        } else {
-            fe.size = st.st_size;
-        }
-
-        /* Count lines for files in long format */
-        if (cfg->long_format && (fe.type == FTYPE_FILE || fe.type == FTYPE_EXEC)) {
-            fe.line_count = count_file_lines(full_path);
-        }
+        fe.size = st.st_size;  /* Default to stat size, may be updated below */
 
         file_list_add(list, &fe);
     }
 
     closedir(dir);
+
+    /* Phase 2: Compute expensive data in parallel (sizes, line counts) */
+    if (cfg->long_format && list->count > 0) {
+        #pragma omp parallel for schedule(dynamic)
+        for (size_t i = 0; i < list->count; i++) {
+            FileEntry *fe = &list->entries[i];
+            if (fe->type == FTYPE_DIR) {
+                fe->size = get_dir_size(fe->path);
+            } else if (fe->type == FTYPE_FILE || fe->type == FTYPE_EXEC) {
+                fe->line_count = count_file_lines(fe->path);
+            }
+        }
+    }
 
     /* Always sort alphabetically by default, then apply user sort */
     qsort(list->entries, list->count, sizeof(FileEntry), entry_cmp_name);
@@ -1015,6 +1022,12 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
 
     /* Print tree prefix */
     print_prefix(depth, ctx->continuation, ctx->cfg);
+
+    /* Readonly indicator */
+    if (!ctx->cfg->no_icons && access(fe->path, W_OK) != 0 && access(fe->path, R_OK) == 0) {
+        printf("%s%s%s ", ctx->cfg->is_tty ? COLOR_YELLOW : "",
+               ctx->icons->readonly, ctx->cfg->is_tty ? COLOR_RESET : "");
+    }
 
     /* Git indicator */
     const char *git_ind = get_git_indicator(ctx->git, abs_path, ctx->icons, ctx->cfg);
