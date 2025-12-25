@@ -170,7 +170,6 @@ typedef struct {
  * ============================================================================ */
 
 static char g_cwd[PATH_MAX];         /* Current working directory */
-static long g_total_lines = 0;       /* Total line count for -l option */
 static char g_home[PATH_MAX];        /* Home directory */
 static char g_script_dir[PATH_MAX];  /* Directory containing this executable */
 
@@ -478,7 +477,6 @@ static int count_file_lines(const char *path) {
         if (ch == '\n') count++;
     }
     fclose(f);
-    g_total_lines += count;
     return count;
 }
 
@@ -1277,13 +1275,6 @@ int main(int argc, char **argv) {
         print_tree(dir, 0, continuation, &git, &icons, &cfg);
 
         git_cache_free(&git);
-    }
-
-    /* Print total line count */
-    if (cfg.long_format && g_total_lines > 0) {
-        printf("\n%sTotal: %ld lines%s\n",
-               cfg.is_tty ? COLOR_GREY : "", g_total_lines,
-               cfg.is_tty ? COLOR_RESET : "");
     }
 
     return 0;
