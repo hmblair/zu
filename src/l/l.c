@@ -1106,9 +1106,14 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         if (!cfg->show_hidden && entry->d_name[0] == '.')
             continue;
 
-        /* Build full path */
+        /* Build full path (avoid double slash when dir_path is "/") */
         char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        size_t dir_len = strlen(dir_path);
+        if (dir_len > 0 && dir_path[dir_len - 1] == '/') {
+            snprintf(full_path, sizeof(full_path), "%s%s", dir_path, entry->d_name);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        }
 
         FileEntry fe;
         memset(&fe, 0, sizeof(fe));
