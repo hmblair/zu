@@ -111,6 +111,12 @@ typedef struct {
 } Config;
 
 typedef struct {
+    int size_width;
+    int lines_width;
+    int time_width;
+} ColumnWidths;
+
+typedef struct {
     char ext[MAX_EXT_LEN];
     char icon[MAX_ICON_LEN];
 } ExtIcon;
@@ -925,7 +931,8 @@ static void print_prefix(int depth, int *continuation, const Config *cfg) {
 static void print_entry(const char *path, const char *name, FileType type,
                         const char *symlink_target, off_t size, int line_count,
                         time_t mtime, int depth, int *continuation,
-                        GitCache *git, const Icons *icons, const Config *cfg) {
+                        GitCache *git, const Icons *icons, const Config *cfg,
+                        const ColumnWidths *widths) {
     char abs_path[PATH_MAX];
     get_realpath(path, abs_path);
 
@@ -938,27 +945,31 @@ static void print_entry(const char *path, const char *name, FileType type,
     int is_ignored = is_gitdir || (git_status && strcmp(git_status, "!!") == 0);
 
     /* Long format: SIZE LINES TIME before tree prefix */
-    if (cfg->long_format) {
+    if (cfg->long_format && widths) {
         char size_buf[16];
         char time_buf[16];
         format_size(size, size_buf, sizeof(size_buf));
         format_relative_time(mtime, time_buf, sizeof(time_buf));
 
-        /* Size: 6 chars right-aligned */
-        printf("%s%6s%s ", cfg->is_tty ? COLOR_GREY : "", size_buf,
+        /* Size: dynamic width, right-aligned, 2 spaces after */
+        printf("%s%*s%s  ", cfg->is_tty ? COLOR_GREY : "",
+               widths->size_width, size_buf,
                cfg->is_tty ? COLOR_RESET : "");
 
-        /* Lines: 6 chars right-aligned, or "-" for non-files */
+        /* Lines: dynamic width, right-aligned, or "-" for non-files, 2 spaces after */
         if (line_count >= 0) {
-            printf("%s%6d%s ", cfg->is_tty ? COLOR_GREY : "", line_count,
+            printf("%s%*d%s  ", cfg->is_tty ? COLOR_GREY : "",
+                   widths->lines_width, line_count,
                    cfg->is_tty ? COLOR_RESET : "");
         } else {
-            printf("%s     -%s ", cfg->is_tty ? COLOR_GREY : "",
+            printf("%s%*s%s  ", cfg->is_tty ? COLOR_GREY : "",
+                   widths->lines_width, "-",
                    cfg->is_tty ? COLOR_RESET : "");
         }
 
-        /* Time: 8 chars right-aligned */
-        printf("%s%8s%s ", cfg->is_tty ? COLOR_GREY : "", time_buf,
+        /* Time: dynamic width, right-aligned, 2 spaces after */
+        printf("%s%*s%s  ", cfg->is_tty ? COLOR_GREY : "",
+               widths->time_width, time_buf,
                cfg->is_tty ? COLOR_RESET : "");
     }
 
@@ -1005,11 +1016,59 @@ static int should_skip_dir(const char *name, int is_ignored, const Config *cfg) 
     return 0;
 }
 
+/* Pre-scan tree to calculate global column widths */
+static void scan_tree_widths(const char *path, int depth, ColumnWidths *widths,
+                              GitCache *git, const Config *cfg) {
+    if (depth >= cfg->max_depth) return;
+    if (access(path, R_OK) != 0) return;
+
+    FileList list;
+    file_list_init(&list);
+
+    if (read_directory(path, &list, cfg) != 0) {
+        file_list_free(&list);
+        return;
+    }
+
+    /* Update widths from this directory's entries */
+    for (size_t i = 0; i < list.count; i++) {
+        FileEntry *fe = &list.entries[i];
+        char buf[32];
+        int len;
+
+        format_size(fe->size, buf, sizeof(buf));
+        len = (int)strlen(buf);
+        if (len > widths->size_width) widths->size_width = len;
+
+        if (fe->line_count >= 0) {
+            snprintf(buf, sizeof(buf), "%d", fe->line_count);
+            len = (int)strlen(buf);
+            if (len > widths->lines_width) widths->lines_width = len;
+        }
+
+        format_relative_time(fe->mtime, buf, sizeof(buf));
+        len = (int)strlen(buf);
+        if (len > widths->time_width) widths->time_width = len;
+
+        /* Recurse into directories */
+        const char *git_status = git_cache_get(git, fe->path);
+        int is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+                         strcmp(fe->name, ".git") == 0;
+        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, is_ignored, cfg)) {
+            scan_tree_widths(fe->path, depth + 1, widths, git, cfg);
+        }
+    }
+
+    file_list_free(&list);
+}
+
 static void print_tree(const char *path, int depth, int *continuation,
-                       GitCache *git, const Icons *icons, const Config *cfg);
+                       GitCache *git, const Icons *icons, const Config *cfg,
+                       const ColumnWidths *widths);
 
 static void print_tree_recursive(const char *path, int depth, int *continuation,
-                                  GitCache *git, const Icons *icons, const Config *cfg) {
+                                  GitCache *git, const Icons *icons, const Config *cfg,
+                                  const ColumnWidths *widths) {
     if (depth >= cfg->max_depth) return;
 
     /* Check if readable */
@@ -1035,11 +1094,12 @@ static void print_tree_recursive(const char *path, int depth, int *continuation,
                          strcmp(fe->name, ".git") == 0;
 
         print_entry(fe->path, fe->name, fe->type, fe->symlink_target,
-                    fe->size, fe->line_count, fe->mtime, depth + 1, continuation, git, icons, cfg);
+                    fe->size, fe->line_count, fe->mtime, depth + 1, continuation, git, icons, cfg,
+                    widths);
 
         /* Recurse into directories */
         if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, is_ignored, cfg)) {
-            print_tree_recursive(fe->path, depth + 1, continuation, git, icons, cfg);
+            print_tree_recursive(fe->path, depth + 1, continuation, git, icons, cfg, widths);
         }
     }
 
@@ -1047,7 +1107,8 @@ static void print_tree_recursive(const char *path, int depth, int *continuation,
 }
 
 static void print_tree(const char *path, int depth, int *continuation,
-                       GitCache *git, const Icons *icons, const Config *cfg) {
+                       GitCache *git, const Icons *icons, const Config *cfg,
+                       const ColumnWidths *widths) {
     char abs_path[PATH_MAX];
     get_realpath(path, abs_path);
 
@@ -1059,7 +1120,7 @@ static void print_tree(const char *path, int depth, int *continuation,
     /* In list mode, skip printing root directory - just show contents */
     if (cfg->list_mode && type == FTYPE_DIR) {
         free(symlink_target);
-        print_tree_recursive(abs_path, depth - 1, continuation, git, icons, cfg);
+        print_tree_recursive(abs_path, depth - 1, continuation, git, icons, cfg, widths);
         return;
     }
 
@@ -1080,13 +1141,13 @@ static void print_tree(const char *path, int depth, int *continuation,
     time_t mtime = GET_MTIME(st);
 
     print_entry(abs_path, name, type, symlink_target, size, line_count,
-                mtime, depth, continuation, git, icons, cfg);
+                mtime, depth, continuation, git, icons, cfg, widths);
 
     free(symlink_target);
 
     /* Recurse if directory */
     if (type == FTYPE_DIR) {
-        print_tree_recursive(abs_path, depth, continuation, git, icons, cfg);
+        print_tree_recursive(abs_path, depth, continuation, git, icons, cfg, widths);
     }
 }
 
@@ -1271,8 +1332,39 @@ int main(int argc, char **argv) {
         git_detect_repo(&git, abs_dir);
         git_populate_status(&git);
 
+        /* Calculate column widths for entire tree */
+        ColumnWidths widths = {1, 1, 1};
+        if (cfg.long_format) {
+            /* Include root entry in width calculation */
+            struct stat st;
+            if (stat(abs_dir, &st) == 0) {
+                char buf[32];
+                int len;
+                off_t size = S_ISDIR(st.st_mode) ? get_dir_size(abs_dir) : st.st_size;
+                format_size(size, buf, sizeof(buf));
+                len = (int)strlen(buf);
+                if (len > widths.size_width) widths.size_width = len;
+
+                format_relative_time(GET_MTIME(st), buf, sizeof(buf));
+                len = (int)strlen(buf);
+                if (len > widths.time_width) widths.time_width = len;
+
+                if (!S_ISDIR(st.st_mode)) {
+                    int lines = count_file_lines(abs_dir);
+                    if (lines >= 0) {
+                        snprintf(buf, sizeof(buf), "%d", lines);
+                        len = (int)strlen(buf);
+                        if (len > widths.lines_width) widths.lines_width = len;
+                    }
+                }
+            }
+            /* Scan entire tree for widths */
+            scan_tree_widths(abs_dir, 0, &widths, &git, &cfg);
+        }
+
         /* Print tree */
-        print_tree(dir, 0, continuation, &git, &icons, &cfg);
+        print_tree(dir, 0, continuation, &git, &icons, &cfg,
+                   cfg.long_format ? &widths : NULL);
 
         git_cache_free(&git);
     }
