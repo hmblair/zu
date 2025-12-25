@@ -40,9 +40,19 @@ static inline int ds_is_dot_or_dotdot(const char *name) {
            (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
 }
 
+/* Check if path is or ends with .git */
+static inline int ds_is_git_dir(const char *path) {
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    return strcmp(name, ".git") == 0;
+}
+
 /* Internal: recursive task function using directory fd for efficiency */
 static DirStats ds_get_stats_task(const char *path, dir_stats_cache_fn cache_fn) {
     DirStats result = {-1, -1};
+
+    /* For .git directories, don't count files (but still compute size) */
+    int skip_file_count = ds_is_git_dir(path);
 
     int dirfd = open(path, O_RDONLY | O_DIRECTORY);
     if (dirfd < 0) return result;
@@ -164,7 +174,7 @@ static DirStats ds_get_stats_task(const char *path, dir_stats_cache_fn cache_fn)
     free(sub_stats);
 
     result.size = file_size_total + dir_size_total;
-    result.file_count = file_count_total + dir_count_total;
+    result.file_count = skip_file_count ? -1 : (file_count_total + dir_count_total);
     return result;
 }
 

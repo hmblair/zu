@@ -230,10 +230,20 @@ static void handle_signal(int sig) {
     watch_stop();
 }
 
+/* Check if path ends with .git */
+static int is_git_dir(const char *path) {
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    return strcmp(name, ".git") == 0;
+}
+
 /* Initial scan - single bottom-up pass that computes and caches in one traversal */
 static DirStats initial_scan(const char *path) {
     DirStats result = {0, 0};
     if (atomic_load(&g_shutdown)) return result;
+
+    /* For .git directories, don't count files (but still compute size) */
+    int skip_file_count = is_git_dir(path);
 
     int dirfd = open(path, O_RDONLY | O_DIRECTORY);
     if (dirfd < 0) return (DirStats){-1, -1};
@@ -289,19 +299,21 @@ static DirStats initial_scan(const char *path) {
                 }
             }
             result.size += file_size;
-            result.file_count++;
+            if (!skip_file_count) result.file_count++;
         } else if (is_dir) {
             char full[PATH_MAX];
             snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
             DirStats sub = initial_scan(full);
             if (sub.size >= 0) result.size += sub.size;
-            if (sub.file_count >= 0) result.file_count += sub.file_count;
+            if (sub.file_count >= 0 && !skip_file_count) result.file_count += sub.file_count;
         }
     }
     closedir(dir);
 
-    /* Cache if meets threshold */
-    if (result.file_count >= FILE_COUNT_THRESHOLD) {
+    /* For .git dirs, set file_count to -1; cache if size-worthy or meets threshold */
+    if (skip_file_count) {
+        result.file_count = -1;
+    } else if (result.file_count >= FILE_COUNT_THRESHOLD) {
         pthread_mutex_lock(&g_cache_lock);
         if (cache_store(path, result.size, result.file_count)) {
             log_info("cached %s (%ld files)", path, result.file_count);
