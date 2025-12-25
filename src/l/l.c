@@ -617,6 +617,9 @@ static FileType detect_file_type(const char *path, struct stat *st,
         }
     } else if (S_ISDIR(lst.st_mode)) {
         return FTYPE_DIR;
+    } else if (!S_ISREG(lst.st_mode)) {
+        /* Device files, sockets, FIFOs, etc. */
+        return FTYPE_UNKNOWN;
     } else if (lst.st_mode & S_IXUSR) {
         return FTYPE_EXEC;
     } else {
