@@ -26,6 +26,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <omp.h>
+#include "cache.h"
 
 #if defined(__APPLE__) && defined(__MACH__)
     #define PLATFORM_MACOS 1
@@ -482,6 +483,10 @@ static off_t get_dir_size_task(const char *path, off_t *global_total) {
 }
 
 static off_t get_dir_size(const char *path) {
+    /* Check cache first */
+    int64_t cached = cache_lookup(path);
+    if (cached >= 0) return (off_t)cached;
+
     off_t result;
     off_t global_total = 0;
     #pragma omp parallel
@@ -1606,6 +1611,9 @@ int main(int argc, char **argv) {
     icons_init_defaults(&icons);
     icons_load(&icons, cfg.script_dir);
 
+    /* Load size cache */
+    cache_load();
+
     /* Validate all inputs first */
     for (int i = 0; i < dir_count; i++) {
         struct stat st;
@@ -1655,5 +1663,6 @@ int main(int argc, char **argv) {
         git_cache_free(&git);
     }
 
+    cache_unload();
     return 0;
 }
