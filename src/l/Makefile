@@ -16,11 +16,11 @@ endif
 
 all: l l-cached link-l-cache
 
-l: l.c cache.h
+l: l.c cache.h dir_stats.h
 	$(CC) $(CFLAGS) $(OMPFLAGS) -o $(BINDIR)/l l.c
 
-l-cached: ld.c cache.h watch.h $(WATCH_SRC)
-	$(CC) $(CFLAGS) -o $(BINDIR)/l-cached ld.c $(WATCH_SRC) $(WATCH_LIBS) -lpthread
+l-cached: ld.c cache.h dir_stats.h watch.h $(WATCH_SRC)
+	$(CC) $(CFLAGS) $(OMPFLAGS) -o $(BINDIR)/l-cached ld.c $(WATCH_SRC) $(WATCH_LIBS) -lpthread
 
 link-l-cache:
 	chmod +x l-cache

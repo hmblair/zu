@@ -27,6 +27,7 @@
 #include <time.h>
 #include <omp.h>
 #include "cache.h"
+#include "dir_stats.h"
 
 #if defined(__APPLE__) && defined(__MACH__)
     #define PLATFORM_MACOS 1
@@ -429,103 +430,26 @@ static void columns_update_widths(Column *cols, const FileEntry *fe) {
     }
 }
 
-/* Directory statistics result */
-typedef struct {
-    off_t size;
-    long file_count;
-} DirStats;
-
-/* Check if entry is . or .. (efficient bitwise check) */
-static inline int is_dot_or_dotdot(const char *name) {
-    return name[0] == '.' &&
-           (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
-}
-
-/* Calculate recursive directory stats using OMP tasks for work stealing */
-static DirStats get_dir_stats_task(const char *path) {
-    DirStats result = {-1, -1};
-    DIR *dir = opendir(path);
-    if (!dir) return result;  /* Can't read directory */
-
-    /* Collect entries first */
-    char **subdirs = NULL;
-    size_t subdir_count = 0;
-    size_t subdir_cap = 0;
-    off_t file_size_total = 0;
-    long file_count_total = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (is_dot_or_dotdot(entry->d_name))
-            continue;
-
-        char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-
-        struct stat st;
-        if (lstat(full_path, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                if (subdir_count >= subdir_cap) {
-                    subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
-                    subdirs = xrealloc(subdirs, subdir_cap * sizeof(char *));
-                }
-                subdirs[subdir_count++] = xstrdup(full_path);
-            } else {
-                file_size_total += st.st_size;
-                file_count_total++;
-            }
-        }
-    }
-    closedir(dir);
-
-    /* Spawn tasks for subdirectories (check cache first) */
-    DirStats *sub_stats = NULL;
-    if (subdir_count > 0) {
-        sub_stats = xmalloc(subdir_count * sizeof(DirStats));
-        for (size_t i = 0; i < subdir_count; i++) {
-            /* Check cache before spawning task */
-            const CacheEntry *cached = cache_lookup_entry(subdirs[i]);
-            if (cached && cached->size >= 0 && cached->file_count >= 0) {
-                sub_stats[i].size = (off_t)cached->size;
-                sub_stats[i].file_count = (long)cached->file_count;
-            } else {
-                #pragma omp task shared(sub_stats) firstprivate(i)
-                sub_stats[i] = get_dir_stats_task(subdirs[i]);
-            }
-        }
-        #pragma omp taskwait
-    }
-
-    /* Sum results */
-    off_t dir_size_total = 0;
-    long dir_count_total = 0;
-    for (size_t i = 0; i < subdir_count; i++) {
-        if (sub_stats[i].size >= 0) dir_size_total += sub_stats[i].size;
-        if (sub_stats[i].file_count >= 0) dir_count_total += sub_stats[i].file_count;
-        free(subdirs[i]);
-    }
-    free(subdirs);
-    free(sub_stats);
-
-    result.size = file_size_total + dir_size_total;
-    result.file_count = file_count_total + dir_count_total;
-    return result;
-}
-
-static DirStats get_dir_stats(const char *path) {
-    /* Check cache first */
+/* Cache lookup wrapper for dir_stats.h */
+static int cache_lookup_wrapper(const char *path, off_t *size, long *count) {
     const CacheEntry *cached = cache_lookup_entry(path);
     if (cached && cached->size >= 0 && cached->file_count >= 0) {
-        return (DirStats){(off_t)cached->size, (long)cached->file_count};
+        *size = (off_t)cached->size;
+        *count = (long)cached->file_count;
+        return 1;
     }
+    return 0;
+}
 
-    DirStats result;
-    #pragma omp parallel
-    #pragma omp single
-    {
-        result = get_dir_stats_task(path);
+/* Get directory stats with cache lookup */
+static DirStats get_dir_stats(const char *path) {
+    /* Check cache first for the top-level call */
+    off_t size;
+    long count;
+    if (cache_lookup_wrapper(path, &size, &count)) {
+        return (DirStats){size, count};
     }
-    return result;
+    return dir_stats_get(path, cache_lookup_wrapper);
 }
 
 
@@ -1111,7 +1035,7 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         /* Skip . and .. */
-        if (is_dot_or_dotdot(entry->d_name))
+        if (ds_is_dot_or_dotdot(entry->d_name))
             continue;
 
         /* Skip hidden files unless -a flag */

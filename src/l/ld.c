@@ -24,7 +24,12 @@
 #include <stdatomic.h>
 
 #include "cache.h"
+#include "dir_stats.h"
 #include "watch.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #define UPDATE_INTERVAL 300  /* 5 minutes */
 #define DEPTH_THRESHOLD 3    /* Cache directories at depth <= this */
@@ -129,48 +134,6 @@ static void on_change(const char *path, void *ctx) {
     }
 }
 
-/* Compute both size and file count in one pass */
-static void get_dir_stats(const char *path, off_t *size_out, long *count_out) {
-    DIR *dir = opendir(path);
-    if (!dir) {
-        *size_out = -1;
-        *count_out = -1;
-        return;
-    }
-
-    off_t total_size = 0;
-    long total_count = 0;
-    struct dirent *entry;
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.' &&
-            (entry->d_name[1] == '\0' ||
-             (entry->d_name[1] == '.' && entry->d_name[2] == '\0'))) {
-            continue;
-        }
-
-        char full[PATH_MAX];
-        snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
-
-        struct stat st;
-        if (lstat(full, &st) != 0) continue;
-
-        if (S_ISDIR(st.st_mode)) {
-            off_t sub_size;
-            long sub_count;
-            get_dir_stats(full, &sub_size, &sub_count);
-            total_size += sub_size;
-            total_count += sub_count;
-        } else {
-            total_size += st.st_size;
-            total_count++;
-        }
-    }
-
-    closedir(dir);
-    *size_out = total_size;
-    *count_out = total_count;
-}
 
 /* Process dirty paths and update cache */
 static void process_dirty_paths(void) {
@@ -197,7 +160,10 @@ static void process_dirty_paths(void) {
     for (size_t i = 0; i < count; i++) {
         struct stat st;
         if (stat(paths[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-            get_dir_stats(paths[i], &sizes[i], &counts[i]);
+            /* Use shared traversal code, no cache lookup (we're building the cache) */
+            DirStats ds = dir_stats_get(paths[i], NULL);
+            sizes[i] = ds.size;
+            counts[i] = ds.file_count;
             valid[i] = 1;
         } else {
             valid[i] = 0;
@@ -295,6 +261,11 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Run single-threaded - OMP pragmas become no-ops */
+    #ifdef _OPENMP
+    omp_set_num_threads(1);
+    #endif
+
     /* Determine root directory */
     const char *root = getenv("HOME");
     if (argc > 1) {
