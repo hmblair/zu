@@ -102,8 +102,8 @@ static void on_change(const char *path, void *ctx) {
 static void get_dir_stats(const char *path, off_t *size_out, long *count_out) {
     DIR *dir = opendir(path);
     if (!dir) {
-        *size_out = 0;
-        *count_out = 0;
+        *size_out = -1;
+        *count_out = -1;
         return;
     }
 

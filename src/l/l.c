@@ -356,7 +356,11 @@ static void format_relative_time(time_t mtime, char *buf, size_t len) {
  * ============================================================================ */
 
 static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
-    format_size(fe->size, buf, len);
+    if (fe->size < 0) {
+        snprintf(buf, len, "-");
+    } else {
+        format_size(fe->size, buf, len);
+    }
 }
 
 static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
@@ -410,7 +414,7 @@ static void columns_update_widths(Column *cols, const FileEntry *fe) {
 /* Calculate recursive directory size using OMP tasks for work stealing */
 static off_t get_dir_size_task(const char *path) {
     DIR *dir = opendir(path);
-    if (!dir) return 0;
+    if (!dir) return -1;  /* Can't read directory */
 
     /* Collect entries first */
     char **subdirs = NULL;
@@ -492,7 +496,7 @@ static off_t get_dir_size(const char *path) {
 /* Count files recursively using OMP tasks */
 static long get_file_count_task(const char *path) {
     DIR *dir = opendir(path);
-    if (!dir) return 0;
+    if (!dir) return -1;  /* Can't read directory */
 
     char **subdirs = NULL;
     size_t subdir_count = 0;
@@ -1230,7 +1234,9 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
     printf("%s", git_ind);
 
     /* Color and style */
-    const char *color = get_file_color(fe->type, is_cwd, fe->is_ignored, ctx->cfg);
+    int is_unreadable = (fe->type == FTYPE_DIR && fe->size < 0);
+    const char *color = is_unreadable && ctx->cfg->is_tty ? COLOR_RED :
+                        get_file_color(fe->type, is_cwd, fe->is_ignored, ctx->cfg);
     const char *style = (is_hidden && ctx->cfg->is_tty) ? STYLE_ITALIC : "";
 
     /* Icon */
