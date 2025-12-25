@@ -542,9 +542,24 @@ static const char *get_file_color(FileType type, int is_cwd, int is_ignored,
  * Line Counting
  * ============================================================================ */
 
+static int is_binary_file(FILE *f) {
+    unsigned char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    rewind(f);
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] == '\0') return 1;
+    }
+    return 0;
+}
+
 static int count_file_lines(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return -1;
+
+    if (is_binary_file(f)) {
+        fclose(f);
+        return -1;
+    }
 
     int count = 0;
     int ch;
