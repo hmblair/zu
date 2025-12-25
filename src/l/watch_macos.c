@@ -12,7 +12,8 @@
 #include <signal.h>
 
 static FSEventStreamRef g_stream = NULL;
-static CFRunLoopRef g_runloop = NULL;
+static dispatch_queue_t g_queue = NULL;
+static dispatch_semaphore_t g_semaphore = NULL;
 static watch_callback g_callback = NULL;
 static void *g_ctx = NULL;
 static volatile sig_atomic_t g_running = 0;
@@ -70,20 +71,23 @@ int watch_init(const char *root, watch_callback cb, void *ctx) {
 void watch_run(void) {
     if (!g_stream) return;
 
-    g_runloop = CFRunLoopGetCurrent();
-    FSEventStreamScheduleWithRunLoop(g_stream, g_runloop, kCFRunLoopDefaultMode);
+    g_queue = dispatch_queue_create("com.zu.l.fsevents", DISPATCH_QUEUE_SERIAL);
+    g_semaphore = dispatch_semaphore_create(0);
+
+    FSEventStreamSetDispatchQueue(g_stream, g_queue);
     FSEventStreamStart(g_stream);
 
     g_running = 1;
     while (g_running) {
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, true);
+        dispatch_semaphore_wait(g_semaphore, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
     }
 }
 
 void watch_stop(void) {
-    /* Only set the flag - async-signal-safe.
-     * The run loop will exit on next iteration (within 1 second). */
     g_running = 0;
+    if (g_semaphore) {
+        dispatch_semaphore_signal(g_semaphore);
+    }
 }
 
 void watch_cleanup(void) {
@@ -93,7 +97,14 @@ void watch_cleanup(void) {
         FSEventStreamRelease(g_stream);
         g_stream = NULL;
     }
-    g_runloop = NULL;
+    if (g_queue) {
+        dispatch_release(g_queue);
+        g_queue = NULL;
+    }
+    if (g_semaphore) {
+        dispatch_release(g_semaphore);
+        g_semaphore = NULL;
+    }
     g_callback = NULL;
     g_ctx = NULL;
 }
