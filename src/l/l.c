@@ -108,13 +108,29 @@ typedef struct {
     int sort_reverse;
     int is_tty;
     SortMode sort_by;
+    /* Environment paths */
+    char cwd[PATH_MAX];
+    char home[PATH_MAX];
+    char script_dir[PATH_MAX];
 } Config;
 
+/* Forward declaration for Column formatter */
+typedef struct FileEntry FileEntry;
+
+/* Column definition for long format output */
+typedef void (*ColumnFormatter)(const FileEntry *fe, char *buf, size_t len);
+
 typedef struct {
-    int size_width;
-    int lines_width;
-    int time_width;
-} ColumnWidths;
+    const char *name;        /* Column identifier */
+    int width;               /* Current max width (computed during tree build) */
+    ColumnFormatter format;  /* Function to format value */
+} Column;
+
+/* Number of columns in long format */
+#define NUM_COLUMNS 3
+#define COL_SIZE  0
+#define COL_LINES 1
+#define COL_TIME  2
 
 typedef struct {
     char ext[MAX_EXT_LEN];
@@ -140,7 +156,7 @@ typedef struct {
     int ext_count;
 } Icons;
 
-typedef struct {
+struct FileEntry {
     char *path;              /* Full absolute path (owned) */
     char *name;              /* Pointer to basename within path */
     char *symlink_target;    /* Resolved symlink target (owned, NULL if not symlink) */
@@ -151,7 +167,7 @@ typedef struct {
     int is_ignored;
     char git_status[3];      /* e.g., "??", " M", "A " */
     FileType type;
-} FileEntry;
+};
 
 typedef struct {
     FileEntry *entries;
@@ -181,17 +197,9 @@ typedef struct {
     GitCache *git;
     const Icons *icons;
     const Config *cfg;
-    const ColumnWidths *widths;
+    Column *columns;         /* Array of NUM_COLUMNS columns (NULL if not long format) */
     int *continuation;
 } PrintContext;
-
-/* ============================================================================
- * Global State
- * ============================================================================ */
-
-static char g_cwd[PATH_MAX];         /* Current working directory */
-static char g_home[PATH_MAX];        /* Home directory */
-static char g_script_dir[PATH_MAX];  /* Directory containing this executable */
 
 /* ============================================================================
  * Utility Functions
@@ -232,7 +240,7 @@ static unsigned int hash_string(const char *str) {
 }
 
 /* Get absolute path, resolving symlinks */
-static int get_realpath(const char *path, char *resolved) {
+static int get_realpath(const char *path, char *resolved, const Config *cfg) {
     char *rp = realpath(path, resolved);
     if (!rp) {
         /* If realpath fails, try to at least get the absolute path */
@@ -241,16 +249,16 @@ static int get_realpath(const char *path, char *resolved) {
             resolved[PATH_MAX - 1] = '\0';
             return 0;
         }
-        snprintf(resolved, PATH_MAX, "%s/%s", g_cwd, path);
+        snprintf(resolved, PATH_MAX, "%s/%s", cfg->cwd, path);
         return 0;
     }
     return 0;
 }
 
 /* Abbreviate home directory with ~ */
-static void abbreviate_home(const char *path, char *buf, size_t len) {
-    size_t home_len = strlen(g_home);
-    if (strncmp(path, g_home, home_len) == 0 &&
+static void abbreviate_home(const char *path, char *buf, size_t len, const Config *cfg) {
+    size_t home_len = strlen(cfg->home);
+    if (strncmp(path, cfg->home, home_len) == 0 &&
         (path[home_len] == '/' || path[home_len] == '\0')) {
         snprintf(buf, len, "~%s", path + home_len);
     } else {
@@ -334,6 +342,51 @@ static void format_relative_time(time_t mtime, char *buf, size_t len) {
     } else {
         struct tm *tm = localtime(&mtime);
         strftime(buf, len, "%b %d", tm);
+    }
+}
+
+/* ============================================================================
+ * Column Formatters
+ * ============================================================================ */
+
+static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
+    format_size(fe->size, buf, len);
+}
+
+static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
+    if (fe->line_count >= 0) {
+        snprintf(buf, len, "%d", fe->line_count);
+    } else {
+        snprintf(buf, len, "-");
+    }
+}
+
+static void col_format_time(const FileEntry *fe, char *buf, size_t len) {
+    format_relative_time(fe->mtime, buf, len);
+}
+
+/* Initialize column definitions */
+static void columns_init(Column *cols) {
+    cols[COL_SIZE].name = "size";
+    cols[COL_SIZE].width = 1;
+    cols[COL_SIZE].format = col_format_size;
+
+    cols[COL_LINES].name = "lines";
+    cols[COL_LINES].width = 1;
+    cols[COL_LINES].format = col_format_lines;
+
+    cols[COL_TIME].name = "time";
+    cols[COL_TIME].width = 1;
+    cols[COL_TIME].format = col_format_time;
+}
+
+/* Update column widths from a file entry */
+static void columns_update_widths(Column *cols, const FileEntry *fe) {
+    char buf[32];
+    for (int i = 0; i < NUM_COLUMNS; i++) {
+        cols[i].format(fe, buf, sizeof(buf));
+        int len = (int)strlen(buf);
+        if (len > cols[i].width) cols[i].width = len;
     }
 }
 
@@ -944,38 +997,20 @@ static void print_prefix(int depth, int *continuation, const Config *cfg) {
 
 static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx) {
     char abs_path[PATH_MAX];
-    get_realpath(fe->path, abs_path);
+    get_realpath(fe->path, abs_path, ctx->cfg);
 
-    int is_cwd = (strcmp(abs_path, g_cwd) == 0);
+    int is_cwd = (strcmp(abs_path, ctx->cfg->cwd) == 0);
     int is_hidden = (fe->name[0] == '.');
 
-    /* Long format: SIZE LINES TIME before tree prefix */
-    if (ctx->cfg->long_format && ctx->widths) {
-        char size_buf[16];
-        char time_buf[16];
-        format_size(fe->size, size_buf, sizeof(size_buf));
-        format_relative_time(fe->mtime, time_buf, sizeof(time_buf));
-
-        /* Size: dynamic width, right-aligned, 2 spaces after */
-        printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
-               ctx->widths->size_width, size_buf,
-               ctx->cfg->is_tty ? COLOR_RESET : "");
-
-        /* Lines: dynamic width, right-aligned, or "-" for non-files, 2 spaces after */
-        if (fe->line_count >= 0) {
-            printf("%s%*d%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
-                   ctx->widths->lines_width, fe->line_count,
-                   ctx->cfg->is_tty ? COLOR_RESET : "");
-        } else {
+    /* Long format: print all columns before tree prefix */
+    if (ctx->cfg->long_format && ctx->columns) {
+        char buf[32];
+        for (int i = 0; i < NUM_COLUMNS; i++) {
+            ctx->columns[i].format(fe, buf, sizeof(buf));
             printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
-                   ctx->widths->lines_width, "-",
+                   ctx->columns[i].width, buf,
                    ctx->cfg->is_tty ? COLOR_RESET : "");
         }
-
-        /* Time: dynamic width, right-aligned, 2 spaces after */
-        printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
-               ctx->widths->time_width, time_buf,
-               ctx->cfg->is_tty ? COLOR_RESET : "");
     }
 
     /* Print tree prefix */
@@ -997,7 +1032,7 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
     /* Filename (full path in list mode) */
     if (ctx->cfg->list_mode) {
         char abbrev[PATH_MAX];
-        abbreviate_home(abs_path, abbrev, sizeof(abbrev));
+        abbreviate_home(abs_path, abbrev, sizeof(abbrev), ctx->cfg);
         printf("%s%s%s%s", color, style, abbrev, ctx->cfg->is_tty ? COLOR_RESET : "");
     } else {
         printf("%s%s%s%s", color, style, fe->name, ctx->cfg->is_tty ? COLOR_RESET : "");
@@ -1006,7 +1041,7 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
     /* Symlink target */
     if (fe->symlink_target) {
         char abbrev[PATH_MAX];
-        abbreviate_home(fe->symlink_target, abbrev, sizeof(abbrev));
+        abbreviate_home(fe->symlink_target, abbrev, sizeof(abbrev), ctx->cfg);
         printf(" %s %s%s%s",
                ctx->icons->symlink, color, abbrev, ctx->cfg->is_tty ? COLOR_RESET : "");
     }
@@ -1034,26 +1069,7 @@ static void tree_node_free(TreeNode *node) {
     file_entry_free(&node->entry);
 }
 
-static void update_widths(const FileEntry *fe, ColumnWidths *widths) {
-    char buf[32];
-    int len;
-
-    format_size(fe->size, buf, sizeof(buf));
-    len = (int)strlen(buf);
-    if (len > widths->size_width) widths->size_width = len;
-
-    if (fe->line_count >= 0) {
-        snprintf(buf, sizeof(buf), "%d", fe->line_count);
-        len = (int)strlen(buf);
-        if (len > widths->lines_width) widths->lines_width = len;
-    }
-
-    format_relative_time(fe->mtime, buf, sizeof(buf));
-    len = (int)strlen(buf);
-    if (len > widths->time_width) widths->time_width = len;
-}
-
-static void build_tree_children(TreeNode *parent, int depth, ColumnWidths *widths,
+static void build_tree_children(TreeNode *parent, int depth, Column *cols,
                                  GitCache *git, const Config *cfg) {
     if (depth >= cfg->max_depth) return;
     if (access(parent->entry.path, R_OK) != 0) return;
@@ -1087,14 +1103,14 @@ static void build_tree_children(TreeNode *parent, int depth, ColumnWidths *width
                                    strcmp(child->entry.name, ".git") == 0;
 
         /* Update column widths */
-        if (cfg->long_format) {
-            update_widths(&child->entry, widths);
+        if (cfg->long_format && cols) {
+            columns_update_widths(cols, &child->entry);
         }
 
         /* Recurse into directories */
         if (child->entry.type == FTYPE_DIR &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
-            build_tree_children(child, depth + 1, widths, git, cfg);
+            build_tree_children(child, depth + 1, cols, git, cfg);
         }
     }
 
@@ -1102,10 +1118,10 @@ static void build_tree_children(TreeNode *parent, int depth, ColumnWidths *width
     free(list.entries);
 }
 
-static TreeNode *build_tree(const char *path, ColumnWidths *widths,
+static TreeNode *build_tree(const char *path, Column *cols,
                             GitCache *git, const Config *cfg) {
     char abs_path[PATH_MAX];
-    get_realpath(path, abs_path);
+    get_realpath(path, abs_path, cfg);
 
     struct stat st;
     char *symlink_target = NULL;
@@ -1138,14 +1154,14 @@ static TreeNode *build_tree(const char *path, ColumnWidths *widths,
     root->entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
                               strcmp(root->entry.name, ".git") == 0;
 
-    /* Update widths from root */
-    if (cfg->long_format) {
-        update_widths(&root->entry, widths);
+    /* Update column widths from root */
+    if (cfg->long_format && cols) {
+        columns_update_widths(cols, &root->entry);
     }
 
     /* Build children if directory */
     if (type == FTYPE_DIR) {
-        build_tree_children(root, 0, widths, git, cfg);
+        build_tree_children(root, 0, cols, git, cfg);
     }
 
     return root;
@@ -1309,20 +1325,6 @@ static void parse_args(int argc, char **argv, Config *cfg,
  * ============================================================================ */
 
 int main(int argc, char **argv) {
-    /* Initialize global state */
-    if (!getcwd(g_cwd, sizeof(g_cwd))) {
-        die("Cannot determine current directory");
-    }
-
-    const char *home = getenv("HOME");
-    if (home) {
-        strncpy(g_home, home, sizeof(g_home) - 1);
-        g_home[sizeof(g_home) - 1] = '\0';
-    }
-
-    /* Get source directory (for icons.toml) */
-    resolve_source_dir(argv[0], g_script_dir, sizeof(g_script_dir));
-
     /* Initialize config with defaults */
     Config cfg = {
         .max_depth = 1,
@@ -1333,8 +1335,25 @@ int main(int argc, char **argv) {
         .no_icons = 0,
         .sort_reverse = 0,
         .is_tty = isatty(STDOUT_FILENO),
-        .sort_by = SORT_NONE
+        .sort_by = SORT_NONE,
+        .cwd = "",
+        .home = "",
+        .script_dir = ""
     };
+
+    /* Initialize environment paths */
+    if (!getcwd(cfg.cwd, sizeof(cfg.cwd))) {
+        die("Cannot determine current directory");
+    }
+
+    const char *home = getenv("HOME");
+    if (home) {
+        strncpy(cfg.home, home, sizeof(cfg.home) - 1);
+        cfg.home[sizeof(cfg.home) - 1] = '\0';
+    }
+
+    /* Get source directory (for icons.toml) */
+    resolve_source_dir(argv[0], cfg.script_dir, sizeof(cfg.script_dir));
 
     /* Check if current directory exists */
     char *cwd_check = getcwd(NULL, 0);
@@ -1353,7 +1372,7 @@ int main(int argc, char **argv) {
     /* Load icons */
     Icons icons;
     icons_init_defaults(&icons);
-    icons_load(&icons, g_script_dir);
+    icons_load(&icons, cfg.script_dir);
 
     /* Validate all inputs first */
     for (int i = 0; i < dir_count; i++) {
@@ -1377,20 +1396,23 @@ int main(int argc, char **argv) {
         git_cache_init(&git);
 
         char abs_dir[PATH_MAX];
-        get_realpath(dir, abs_dir);
+        get_realpath(dir, abs_dir, &cfg);
         git_detect_repo(&git, abs_dir);
         git_populate_status(&git);
 
-        /* Build tree and compute widths in single pass */
-        ColumnWidths widths = {1, 1, 1};
-        TreeNode *tree = build_tree(dir, &widths, &git, &cfg);
+        /* Initialize columns for long format */
+        Column cols[NUM_COLUMNS];
+        columns_init(cols);
+
+        /* Build tree and compute column widths in single pass */
+        TreeNode *tree = build_tree(dir, cfg.long_format ? cols : NULL, &git, &cfg);
 
         /* Print tree */
         PrintContext ctx = {
             .git = &git,
             .icons = &icons,
             .cfg = &cfg,
-            .widths = cfg.long_format ? &widths : NULL,
+            .columns = cfg.long_format ? cols : NULL,
             .continuation = continuation
         };
         print_tree_node(tree, 0, &ctx);
