@@ -280,6 +280,16 @@ static int get_realpath(const char *path, char *resolved, const Config *cfg) {
     return 0;
 }
 
+/* Get absolute path WITHOUT resolving symlinks */
+static void get_abspath(const char *path, char *resolved, const Config *cfg) {
+    if (path[0] == '/') {
+        strncpy(resolved, path, PATH_MAX - 1);
+        resolved[PATH_MAX - 1] = '\0';
+    } else {
+        snprintf(resolved, PATH_MAX, "%s/%s", cfg->cwd, path);
+    }
+}
+
 /* Abbreviate home directory with ~ */
 static void abbreviate_home(const char *path, char *buf, size_t len, const Config *cfg) {
     size_t home_len = strlen(cfg->home);
@@ -1284,7 +1294,7 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
 static TreeNode *build_tree(const char *path, Column *cols,
                             GitCache *git, const Config *cfg) {
     char abs_path[PATH_MAX];
-    get_realpath(path, abs_path, cfg);
+    get_abspath(path, abs_path, cfg);  /* Don't resolve symlinks for root */
 
     struct stat st;
     char *symlink_target = NULL;
