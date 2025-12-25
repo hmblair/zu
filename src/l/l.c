@@ -295,6 +295,7 @@ static void get_abspath(const char *path, char *resolved, const Config *cfg) {
     /* Normalize . and .. components */
     char *components[PATH_MAX / 2];
     int depth = 0;
+    int max_depth = PATH_MAX / 2;
 
     char *p = tmp;
     while (*p) {
@@ -311,23 +312,28 @@ static void get_abspath(const char *path, char *resolved, const Config *cfg) {
         } else if (len == 2 && start[0] == '.' && start[1] == '.') {
             /* Go up for .. */
             if (depth > 0) depth--;
-        } else {
-            /* Save component */
+        } else if (depth < max_depth) {
+            /* Save component (with bounds check) */
             components[depth] = start;
             if (*p) *p++ = '\0';  /* Null-terminate */
             depth++;
         }
     }
 
-    /* Rebuild path */
+    /* Rebuild path with bounds checking */
     if (depth == 0) {
         strcpy(resolved, "/");
     } else {
-        resolved[0] = '\0';
-        for (int i = 0; i < depth; i++) {
-            strcat(resolved, "/");
-            strcat(resolved, components[i]);
+        size_t pos = 0;
+        for (int i = 0; i < depth && pos < PATH_MAX - 1; i++) {
+            size_t comp_len = strlen(components[i]);
+            if (pos + 1 + comp_len >= PATH_MAX) break;
+            resolved[pos++] = '/';
+            memcpy(resolved + pos, components[i], comp_len);
+            pos += comp_len;
         }
+        resolved[pos] = '\0';
+        if (pos == 0) strcpy(resolved, "/");
     }
 }
 

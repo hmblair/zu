@@ -417,7 +417,12 @@ int main(int argc, char *argv[]) {
 
     /* Start timer thread */
     pthread_t timer;
-    pthread_create(&timer, NULL, timer_thread, NULL);
+    if (pthread_create(&timer, NULL, timer_thread, NULL) != 0) {
+        log_error("failed to create timer thread");
+        watch_cleanup();
+        cache_free();
+        return 1;
+    }
 
     /* Run watcher (blocks until watch_stop) */
     watch_run();
