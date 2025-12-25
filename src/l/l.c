@@ -159,6 +159,12 @@ typedef struct {
     size_t capacity;
 } FileList;
 
+typedef struct TreeNode {
+    FileEntry entry;
+    struct TreeNode *children;
+    size_t child_count;
+} TreeNode;
+
 typedef struct GitStatusNode {
     char *path;
     char status[3];
@@ -1015,139 +1021,182 @@ static int should_skip_dir(const char *name, int is_ignored, const Config *cfg) 
     return 0;
 }
 
-/* Pre-scan tree to calculate global column widths */
-static void scan_tree_widths(const char *path, int depth, ColumnWidths *widths,
-                              GitCache *git, const Config *cfg) {
-    if (depth >= cfg->max_depth) return;
-    if (access(path, R_OK) != 0) return;
+/* ============================================================================
+ * Tree Building (single pass: read + compute widths)
+ * ============================================================================ */
 
-    FileList list;
-    file_list_init(&list);
-
-    if (read_directory(path, &list, cfg) != 0) {
-        file_list_free(&list);
-        return;
+static void tree_node_free(TreeNode *node) {
+    if (!node) return;
+    for (size_t i = 0; i < node->child_count; i++) {
+        tree_node_free(&node->children[i]);
     }
-
-    /* Update widths from this directory's entries */
-    for (size_t i = 0; i < list.count; i++) {
-        FileEntry *fe = &list.entries[i];
-        char buf[32];
-        int len;
-
-        format_size(fe->size, buf, sizeof(buf));
-        len = (int)strlen(buf);
-        if (len > widths->size_width) widths->size_width = len;
-
-        if (fe->line_count >= 0) {
-            snprintf(buf, sizeof(buf), "%d", fe->line_count);
-            len = (int)strlen(buf);
-            if (len > widths->lines_width) widths->lines_width = len;
-        }
-
-        format_relative_time(fe->mtime, buf, sizeof(buf));
-        len = (int)strlen(buf);
-        if (len > widths->time_width) widths->time_width = len;
-
-        /* Set is_ignored and recurse into directories */
-        const char *git_status = git_cache_get(git, fe->path);
-        fe->is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
-                         strcmp(fe->name, ".git") == 0;
-        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, fe->is_ignored, cfg)) {
-            scan_tree_widths(fe->path, depth + 1, widths, git, cfg);
-        }
-    }
-
-    file_list_free(&list);
+    free(node->children);
+    file_entry_free(&node->entry);
 }
 
-static void print_tree(const char *path, int depth, PrintContext *ctx);
+static void update_widths(const FileEntry *fe, ColumnWidths *widths) {
+    char buf[32];
+    int len;
 
-static void print_tree_recursive(const char *path, int depth, PrintContext *ctx) {
-    if (depth >= ctx->cfg->max_depth) return;
+    format_size(fe->size, buf, sizeof(buf));
+    len = (int)strlen(buf);
+    if (len > widths->size_width) widths->size_width = len;
 
-    /* Check if readable */
-    if (access(path, R_OK) != 0) return;
+    if (fe->line_count >= 0) {
+        snprintf(buf, sizeof(buf), "%d", fe->line_count);
+        len = (int)strlen(buf);
+        if (len > widths->lines_width) widths->lines_width = len;
+    }
+
+    format_relative_time(fe->mtime, buf, sizeof(buf));
+    len = (int)strlen(buf);
+    if (len > widths->time_width) widths->time_width = len;
+}
+
+static void build_tree_children(TreeNode *parent, int depth, ColumnWidths *widths,
+                                 GitCache *git, const Config *cfg) {
+    if (depth >= cfg->max_depth) return;
+    if (access(parent->entry.path, R_OK) != 0) return;
 
     FileList list;
     file_list_init(&list);
 
-    if (read_directory(path, &list, ctx->cfg) != 0) {
+    if (read_directory(parent->entry.path, &list, cfg) != 0) {
         file_list_free(&list);
         return;
     }
 
+    if (list.count == 0) {
+        file_list_free(&list);
+        return;
+    }
+
+    parent->children = xmalloc(list.count * sizeof(TreeNode));
+    parent->child_count = list.count;
+
     for (size_t i = 0; i < list.count; i++) {
-        FileEntry *fe = &list.entries[i];
-        int is_last = (i == list.count - 1);
+        TreeNode *child = &parent->children[i];
+        memset(child, 0, sizeof(TreeNode));
 
-        ctx->continuation[depth] = !is_last;
+        /* Move entry from list to tree node (transfer ownership) */
+        child->entry = list.entries[i];
 
-        /* Set is_ignored in FileEntry */
-        const char *git_status = git_cache_get(ctx->git, fe->path);
-        fe->is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
-                         strcmp(fe->name, ".git") == 0;
+        /* Set is_ignored */
+        const char *git_status = git_cache_get(git, child->entry.path);
+        child->entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+                                   strcmp(child->entry.name, ".git") == 0;
 
-        print_entry(fe, depth + 1, ctx);
+        /* Update column widths */
+        if (cfg->long_format) {
+            update_widths(&child->entry, widths);
+        }
 
         /* Recurse into directories */
-        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, fe->is_ignored, ctx->cfg)) {
-            print_tree_recursive(fe->path, depth + 1, ctx);
+        if (child->entry.type == FTYPE_DIR &&
+            !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
+            build_tree_children(child, depth + 1, widths, git, cfg);
         }
     }
 
-    file_list_free(&list);
+    /* Don't call file_list_free - we transferred ownership of entries */
+    free(list.entries);
 }
 
-static void print_tree(const char *path, int depth, PrintContext *ctx) {
+static TreeNode *build_tree(const char *path, ColumnWidths *widths,
+                            GitCache *git, const Config *cfg) {
     char abs_path[PATH_MAX];
     get_realpath(path, abs_path);
 
-    /* Get info about root entry */
     struct stat st;
     char *symlink_target = NULL;
     FileType type = detect_file_type(abs_path, &st, &symlink_target);
 
-    /* In list mode, skip printing root directory - just show contents */
-    if (ctx->cfg->list_mode && type == FTYPE_DIR) {
-        free(symlink_target);
-        print_tree_recursive(abs_path, depth - 1, ctx);
-        return;
+    TreeNode *root = xmalloc(sizeof(TreeNode));
+    memset(root, 0, sizeof(TreeNode));
+
+    /* Build root entry */
+    root->entry.path = xstrdup(abs_path);
+    root->entry.name = strrchr(root->entry.path, '/');
+    root->entry.name = root->entry.name ? root->entry.name + 1 : root->entry.path;
+    root->entry.type = type;
+    root->entry.symlink_target = symlink_target;
+    root->entry.mode = st.st_mode;
+    root->entry.mtime = GET_MTIME(st);
+    root->entry.line_count = -1;
+
+    if (cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
+        root->entry.line_count = count_file_lines(abs_path);
     }
 
-    /* Build FileEntry for root */
-    FileEntry root_entry;
-    memset(&root_entry, 0, sizeof(root_entry));
-    root_entry.path = abs_path;  /* Not owned - don't free */
-    root_entry.name = strrchr(abs_path, '/');
-    root_entry.name = root_entry.name ? root_entry.name + 1 : abs_path;
-    root_entry.type = type;
-    root_entry.symlink_target = symlink_target;
-    root_entry.mode = st.st_mode;
-    root_entry.mtime = GET_MTIME(st);
-    root_entry.line_count = -1;
-
-    if (ctx->cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
-        root_entry.line_count = count_file_lines(abs_path);
-    }
-
-    root_entry.size = st.st_size;
-    if (ctx->cfg->long_format && type == FTYPE_DIR) {
-        root_entry.size = get_dir_size(abs_path);
+    root->entry.size = st.st_size;
+    if (cfg->long_format && type == FTYPE_DIR) {
+        root->entry.size = get_dir_size(abs_path);
     }
 
     /* Set is_ignored for root */
-    const char *git_status = git_cache_get(ctx->git, abs_path);
-    root_entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
-                            strcmp(root_entry.name, ".git") == 0;
+    const char *git_status = git_cache_get(git, abs_path);
+    root->entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+                              strcmp(root->entry.name, ".git") == 0;
 
-    print_entry(&root_entry, depth, ctx);
+    /* Update widths from root */
+    if (cfg->long_format) {
+        update_widths(&root->entry, widths);
+    }
 
-    free(symlink_target);
-
-    /* Recurse if directory */
+    /* Build children if directory */
     if (type == FTYPE_DIR) {
-        print_tree_recursive(abs_path, depth, ctx);
+        build_tree_children(root, 0, widths, git, cfg);
+    }
+
+    return root;
+}
+
+/* ============================================================================
+ * Tree Printing (no I/O, just walks the built tree)
+ * ============================================================================ */
+
+static void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx);
+
+static void print_tree_children(const TreeNode *parent, int depth, PrintContext *ctx) {
+    for (size_t i = 0; i < parent->child_count; i++) {
+        const TreeNode *child = &parent->children[i];
+        int is_last = (i == parent->child_count - 1);
+
+        ctx->continuation[depth] = !is_last;
+
+        print_entry(&child->entry, depth + 1, ctx);
+
+        /* Recurse into directories that have children */
+        if (child->child_count > 0) {
+            print_tree_children(child, depth + 1, ctx);
+        }
+    }
+}
+
+static void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx) {
+    /* In list mode, skip printing root directory - just show contents */
+    if (ctx->cfg->list_mode && node->entry.type == FTYPE_DIR) {
+        /* Adjust depth for list mode */
+        for (size_t i = 0; i < node->child_count; i++) {
+            const TreeNode *child = &node->children[i];
+            int is_last = (i == node->child_count - 1);
+            ctx->continuation[depth - 1] = !is_last;
+
+            print_entry(&child->entry, depth, ctx);
+
+            if (child->child_count > 0) {
+                print_tree_children(child, depth, ctx);
+            }
+        }
+        return;
+    }
+
+    /* Print root entry */
+    print_entry(&node->entry, depth, ctx);
+
+    /* Print children */
+    if (node->child_count > 0) {
+        print_tree_children(node, depth, ctx);
     }
 }
 
@@ -1332,35 +1381,9 @@ int main(int argc, char **argv) {
         git_detect_repo(&git, abs_dir);
         git_populate_status(&git);
 
-        /* Calculate column widths for entire tree */
+        /* Build tree and compute widths in single pass */
         ColumnWidths widths = {1, 1, 1};
-        if (cfg.long_format) {
-            /* Include root entry in width calculation */
-            struct stat st;
-            if (stat(abs_dir, &st) == 0) {
-                char buf[32];
-                int len;
-                off_t size = S_ISDIR(st.st_mode) ? get_dir_size(abs_dir) : st.st_size;
-                format_size(size, buf, sizeof(buf));
-                len = (int)strlen(buf);
-                if (len > widths.size_width) widths.size_width = len;
-
-                format_relative_time(GET_MTIME(st), buf, sizeof(buf));
-                len = (int)strlen(buf);
-                if (len > widths.time_width) widths.time_width = len;
-
-                if (!S_ISDIR(st.st_mode)) {
-                    int lines = count_file_lines(abs_dir);
-                    if (lines >= 0) {
-                        snprintf(buf, sizeof(buf), "%d", lines);
-                        len = (int)strlen(buf);
-                        if (len > widths.lines_width) widths.lines_width = len;
-                    }
-                }
-            }
-            /* Scan entire tree for widths */
-            scan_tree_widths(abs_dir, 0, &widths, &git, &cfg);
-        }
+        TreeNode *tree = build_tree(dir, &widths, &git, &cfg);
 
         /* Print tree */
         PrintContext ctx = {
@@ -1370,8 +1393,11 @@ int main(int argc, char **argv) {
             .widths = cfg.long_format ? &widths : NULL,
             .continuation = continuation
         };
-        print_tree(dir, 0, &ctx);
+        print_tree_node(tree, 0, &ctx);
 
+        /* Cleanup */
+        tree_node_free(tree);
+        free(tree);
         git_cache_free(&git);
     }
 
