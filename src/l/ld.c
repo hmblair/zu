@@ -32,7 +32,7 @@
 #endif
 
 #define UPDATE_INTERVAL 300  /* 5 minutes */
-#define FILE_COUNT_THRESHOLD 1000  /* Cache directories with >= this many files */
+#define FILE_COUNT_THRESHOLD 2500  /* Cache directories with >= this many files */
 #define MAX_DIRTY_PATHS 65536
 #define MAX_PROBE_DEPTH 32   /* Hash table probe limit */
 #define MAX_ROOTS 8          /* Maximum watched directories */

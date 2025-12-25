@@ -19,7 +19,7 @@
 
 #define CACHE_MAGIC      0x4C53495A  /* "LSIZ" */
 #define CACHE_VERSION    3           /* Bumped for checksum support */
-#define CACHE_CAPACITY   65536       /* ~2MB file */
+#define CACHE_CAPACITY   262144      /* ~8MB file */
 #define MAX_PROBE_DEPTH  32          /* Max slots to probe in hash table */
 
 typedef struct {
