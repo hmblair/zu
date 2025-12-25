@@ -1225,7 +1225,7 @@ static void print_usage(void) {
     printf("\n");
     printf("Options:\n");
     printf("  -a              Show hidden files\n");
-    printf("  -l              Long format (size, lines, time)\n");
+    printf("  -s, --short     Short format (no size, lines, time)\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
     printf("  --depth INT     Limit tree depth\n");
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
@@ -1257,8 +1257,8 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 exit(0);
             } else if (strcmp(arg, "-a") == 0) {
                 cfg->show_hidden = 1;
-            } else if (strcmp(arg, "-l") == 0) {
-                cfg->long_format = 1;
+            } else if (strcmp(arg, "-s") == 0 || strcmp(arg, "--short") == 0) {
+                cfg->long_format = 0;
             } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
                 cfg->max_depth = MAX_DEPTH;
             } else if (strcmp(arg, "--depth") == 0) {
@@ -1287,7 +1287,7 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 for (int j = 1; arg[j]; j++) {
                     switch (arg[j]) {
                         case 'a': cfg->show_hidden = 1; break;
-                        case 'l': cfg->long_format = 1; break;
+                        case 's': cfg->long_format = 0; break;
                         case 't': cfg->max_depth = MAX_DEPTH; break;
                         case 'S': cfg->sort_by = SORT_SIZE; break;
                         case 'T': cfg->sort_by = SORT_TIME; break;
@@ -1329,7 +1329,7 @@ int main(int argc, char **argv) {
     Config cfg = {
         .max_depth = 1,
         .show_hidden = 0,
-        .long_format = 0,
+        .long_format = 1,
         .expand_all = 0,
         .list_mode = 0,
         .no_icons = 0,
