@@ -110,7 +110,6 @@ typedef struct {
     int list_mode;
     int no_icons;
     int sort_reverse;
-    int file_count_mode;
     int is_tty;
     SortMode sort_by;
     /* Environment paths */
@@ -357,8 +356,12 @@ static void format_relative_time(time_t mtime, char *buf, size_t len) {
  * ============================================================================ */
 
 static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
+    format_size(fe->size, buf, len);
+}
+
+static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
     if (fe->file_count >= 0) {
-        /* Show file count instead of size */
+        /* Directory: show file count */
         if (fe->file_count >= 1000000) {
             snprintf(buf, len, "%.1fM", fe->file_count / 1000000.0);
         } else if (fe->file_count >= 1000) {
@@ -366,13 +369,7 @@ static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
         } else {
             snprintf(buf, len, "%ld", fe->file_count);
         }
-    } else {
-        format_size(fe->size, buf, len);
-    }
-}
-
-static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
-    if (fe->line_count == LINE_COUNT_EXCEEDED) {
+    } else if (fe->line_count == LINE_COUNT_EXCEEDED) {
         snprintf(buf, len, ">10K");
     } else if (fe->line_count >= 0) {
         snprintf(buf, len, "%d", fe->line_count);
@@ -690,6 +687,29 @@ static const char *get_file_color(FileType type, int is_cwd, int is_ignored,
  * Line Counting
  * ============================================================================ */
 
+static int has_binary_extension(const char *path) {
+    const char *dot = strrchr(path, '/');
+    dot = dot ? strrchr(dot, '.') : strrchr(path, '.');
+    if (!dot) return 0;
+    dot++;  /* skip the dot */
+
+    /* Common binary extensions */
+    static const char *exts[] = {
+        "pdf", "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg",
+        "mp3", "mp4", "wav", "flac", "ogg", "avi", "mkv", "mov", "webm",
+        "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "dmg", "iso",
+        "exe", "dll", "so", "dylib", "o", "a", "class", "pyc",
+        "ttf", "otf", "woff", "woff2", "eot",
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods",
+        "sqlite", "db", "bin", "dat",
+        NULL
+    };
+    for (const char **e = exts; *e; e++) {
+        if (strcasecmp(dot, *e) == 0) return 1;
+    }
+    return 0;
+}
+
 static int is_binary_file(FILE *f) {
     unsigned char buf[512];
     size_t n = fread(buf, 1, sizeof(buf), f);
@@ -701,6 +721,8 @@ static int is_binary_file(FILE *f) {
 }
 
 static int count_file_lines(const char *path) {
+    if (has_binary_extension(path)) return -1;
+
     FILE *f = fopen(path, "r");
     if (!f) return -1;
 
@@ -1122,11 +1144,8 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         for (size_t i = 0; i < list->count; i++) {
             FileEntry *fe = &list->entries[i];
             if (fe->type == FTYPE_DIR) {
-                if (cfg->file_count_mode) {
-                    fe->file_count = get_file_count(fe->path);
-                } else {
-                    fe->size = get_dir_size(fe->path);
-                }
+                fe->size = get_dir_size(fe->path);
+                fe->file_count = get_file_count(fe->path);
             } else if (fe->type == FTYPE_FILE || fe->type == FTYPE_EXEC) {
                 fe->line_count = count_file_lines(fe->path);
             }
@@ -1307,17 +1326,11 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
                 off_t total_size = 0;
                 long total_count = 0;
                 for (size_t j = 0; j < child->child_count; j++) {
-                    if (cfg->file_count_mode) {
-                        total_count += child->children[j].entry.file_count;
-                    } else {
-                        total_size += child->children[j].entry.size;
-                    }
+                    total_size += child->children[j].entry.size;
+                    total_count += child->children[j].entry.file_count;
                 }
-                if (cfg->file_count_mode) {
-                    child->entry.file_count = total_count;
-                } else {
-                    child->entry.size = total_size;
-                }
+                child->entry.size = total_size;
+                child->entry.file_count = total_count;
             }
         }
     }
@@ -1356,11 +1369,8 @@ static TreeNode *build_tree(const char *path, Column *cols,
     root->entry.size = st.st_size;
     /* Size/count computed after children if show_hidden, else compute now */
     if (cfg->long_format && type == FTYPE_DIR && !cfg->show_hidden) {
-        if (cfg->file_count_mode) {
-            root->entry.file_count = get_file_count(abs_path);
-        } else {
-            root->entry.size = get_dir_size(abs_path);
-        }
+        root->entry.size = get_dir_size(abs_path);
+        root->entry.file_count = get_file_count(abs_path);
     }
 
     /* Set is_ignored for root */
@@ -1382,17 +1392,11 @@ static TreeNode *build_tree(const char *path, Column *cols,
             off_t total_size = 0;
             long total_count = 0;
             for (size_t i = 0; i < root->child_count; i++) {
-                if (cfg->file_count_mode) {
-                    total_count += root->children[i].entry.file_count;
-                } else {
-                    total_size += root->children[i].entry.size;
-                }
+                total_size += root->children[i].entry.size;
+                total_count += root->children[i].entry.file_count;
             }
-            if (cfg->file_count_mode) {
-                root->entry.file_count = total_count;
-            } else {
-                root->entry.size = total_size;
-            }
+            root->entry.size = total_size;
+            root->entry.file_count = total_count;
             /* Update column widths now that we have the real value */
             if (cols) {
                 columns_update_widths(cols, &root->entry);
@@ -1461,7 +1465,6 @@ static void print_usage(void) {
     printf("\n");
     printf("Options:\n");
     printf("  -a              Show hidden files\n");
-    printf("  -f              Show file count instead of size for directories\n");
     printf("  -s, --short     Short format (no size, lines, time)\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
     printf("  --depth INT     Limit tree depth\n");
@@ -1494,8 +1497,6 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 exit(0);
             } else if (strcmp(arg, "-a") == 0) {
                 cfg->show_hidden = 1;
-            } else if (strcmp(arg, "-f") == 0) {
-                cfg->file_count_mode = 1;
             } else if (strcmp(arg, "-s") == 0 || strcmp(arg, "--short") == 0) {
                 cfg->long_format = 0;
             } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
@@ -1522,11 +1523,10 @@ static void parse_args(int argc, char **argv, Config *cfg,
             } else if (strcmp(arg, "-r") == 0) {
                 cfg->sort_reverse = 1;
             } else if (arg[1] != '-') {
-                /* Handle combined short flags like -af */
+                /* Handle combined short flags like -as */
                 for (int j = 1; arg[j]; j++) {
                     switch (arg[j]) {
                         case 'a': cfg->show_hidden = 1; break;
-                        case 'f': cfg->file_count_mode = 1; break;
                         case 's': cfg->long_format = 0; break;
                         case 't': cfg->max_depth = MAX_DEPTH; break;
                         case 'S': cfg->sort_by = SORT_SIZE; break;
