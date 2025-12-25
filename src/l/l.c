@@ -499,10 +499,17 @@ static int cache_lookup_wrapper(const char *path, off_t *size, long *count) {
 
 /* Get directory stats with cache lookup */
 static DirStats get_dir_stats(const char *path) {
+    /* Resolve symlinks for cache lookup (cache stores real paths) */
+    char resolved[PATH_MAX];
+    const char *lookup_path = path;
+    if (realpath(path, resolved) != NULL) {
+        lookup_path = resolved;
+    }
+
     /* Check cache first for the top-level call */
     off_t size;
     long count;
-    if (cache_lookup_wrapper(path, &size, &count)) {
+    if (cache_lookup_wrapper(lookup_path, &size, &count)) {
         return (DirStats){size, count};
     }
     return dir_stats_get(path, cache_lookup_wrapper);
@@ -1663,14 +1670,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < dir_count; i++) {
         const char *dir = dirs[i];
 
-        /* Initialize git cache */
+        /* Initialize git cache (skip if --no-icons since we won't show indicators) */
         GitCache git;
         git_cache_init(&git);
 
-        char abs_dir[PATH_MAX];
-        get_realpath(dir, abs_dir, &cfg);
-        git_detect_repo(&git, abs_dir);
-        git_populate_status(&git);
+        if (!cfg.no_icons) {
+            char abs_dir[PATH_MAX];
+            get_realpath(dir, abs_dir, &cfg);
+            git_detect_repo(&git, abs_dir);
+            git_populate_status(&git);
+        }
 
         /* Initialize columns for long format */
         Column cols[NUM_COLUMNS];
