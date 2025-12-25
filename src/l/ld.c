@@ -316,7 +316,15 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev) {
             if (!skip_file_count) result.file_count++;
         } else if (is_dir) {
             char full[PATH_MAX];
-            snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+            /* Avoid double slash when path is "/" */
+            size_t plen = strlen(path);
+            if (plen > 0 && path[plen - 1] == '/') {
+                snprintf(full, sizeof(full), "%s%s", path, entry->d_name);
+            } else {
+                snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+            }
+            /* Skip paths that cause double-counting (macOS firmlinks) */
+            if (ds_skip_path(full)) continue;
             DirStats sub = initial_scan_impl(full, root_dev);
             if (sub.size >= 0) result.size += sub.size;
             if (sub.file_count >= 0 && !skip_file_count) result.file_count += sub.file_count;

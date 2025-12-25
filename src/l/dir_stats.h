@@ -47,6 +47,17 @@ static inline int ds_is_git_dir(const char *path) {
     return strcmp(name, ".git") == 0;
 }
 
+/* Check if path should be skipped to avoid double-counting.
+ * On macOS APFS, firmlinks share the same st_dev, so we must check paths explicitly. */
+static inline int ds_skip_path(const char *path) {
+    /* /System/Volumes contains Data, Preboot, VM - causes double-counting via firmlinks */
+    if (strncmp(path, "/System/Volumes", 15) == 0 &&
+        (path[15] == '/' || path[15] == '\0')) return 1;
+    if (strncmp(path, "//System/Volumes", 16) == 0 &&
+        (path[16] == '/' || path[16] == '\0')) return 1;
+    return 0;
+}
+
 /* Internal: recursive task function using directory fd for efficiency */
 static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn, dev_t root_dev) {
     DirStats result = {-1, -1};
@@ -122,10 +133,39 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
         }
 
         if (is_dir) {
+            /* Build full path for subdirectory */
+            size_t path_len = strlen(path);
+            size_t name_len = strlen(entry->d_name);
+            /* Avoid double slash when path is "/" */
+            int need_slash = (path_len > 0 && path[path_len - 1] != '/');
+            size_t subpath_len = path_len + need_slash + name_len + 1;
+            char *subpath = malloc(subpath_len);
+            if (!subpath) {
+                for (size_t i = 0; i < subdir_count; i++) free(subdirs[i]);
+                free(subdirs);
+                closedir(dir);
+                return result;
+            }
+            if (need_slash) {
+                memcpy(subpath, path, path_len);
+                subpath[path_len] = '/';
+                memcpy(subpath + path_len + 1, entry->d_name, name_len + 1);
+            } else {
+                memcpy(subpath, path, path_len);
+                memcpy(subpath + path_len, entry->d_name, name_len + 1);
+            }
+
+            /* Skip paths that cause double-counting (macOS firmlinks) */
+            if (ds_skip_path(subpath)) {
+                free(subpath);
+                continue;
+            }
+
             if (subdir_count >= subdir_cap) {
                 subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
                 char **new_subdirs = realloc(subdirs, subdir_cap * sizeof(char *));
                 if (!new_subdirs) {
+                    free(subpath);
                     for (size_t i = 0; i < subdir_count; i++) free(subdirs[i]);
                     free(subdirs);
                     closedir(dir);
@@ -133,19 +173,6 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
                 }
                 subdirs = new_subdirs;
             }
-            /* Build full path for subdirectory (needed for recursion and cache lookup) */
-            size_t path_len = strlen(path);
-            size_t name_len = strlen(entry->d_name);
-            char *subpath = malloc(path_len + 1 + name_len + 1);
-            if (!subpath) {
-                for (size_t i = 0; i < subdir_count; i++) free(subdirs[i]);
-                free(subdirs);
-                closedir(dir);
-                return result;
-            }
-            memcpy(subpath, path, path_len);
-            subpath[path_len] = '/';
-            memcpy(subpath + path_len + 1, entry->d_name, name_len + 1);
             subdirs[subdir_count++] = subpath;
         }
     }
