@@ -18,14 +18,7 @@ else
         if [[ ! -e "$file" ]]; then
             error "File not found: $file"
         fi
-        # Get absolute path
-        if [[ -d "$file" ]]; then
-            # If it's a directory, use cd to get full path
-            (cd "$file" && pwd)
-        else
-            # If it's a file, get directory and combine with filename
-            local dir="$(cd "$(dirname "$file")" && pwd)"
-            echo "${dir}/$(basename "$file")"
-        fi
+        # Get absolute path using zsh's :A modifier
+        echo "${file:A}"
     done
 fi
