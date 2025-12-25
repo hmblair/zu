@@ -189,7 +189,7 @@ static void process_dirty_paths(void) {
         if (valid[i]) {
             /* Only cache directories with >= FILE_COUNT_THRESHOLD files */
             if (counts[i] >= FILE_COUNT_THRESHOLD) {
-                if (cache_store(paths[i], sizes[i], counts[i])) {
+                if (cache_store(paths[i], sizes[i], counts[i]) == 0) {
                     stored++;
                 } else {
                     failed++;
@@ -315,7 +315,7 @@ static DirStats initial_scan(const char *path) {
         result.file_count = -1;
     } else if (result.file_count >= FILE_COUNT_THRESHOLD) {
         pthread_mutex_lock(&g_cache_lock);
-        if (cache_store(path, result.size, result.file_count)) {
+        if (cache_store(path, result.size, result.file_count) == 0) {
             log_info("cached %s (%ld files)", path, result.file_count);
         }
         pthread_mutex_unlock(&g_cache_lock);

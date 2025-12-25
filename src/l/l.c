@@ -60,6 +60,7 @@
 #define LINE_COUNT_LIMIT 10000
 #define LINE_COUNT_EXCEEDED -2
 #define READ_BUFFER_SIZE 65536
+#define BINARY_CHECK_SIZE 512
 
 /* Tree drawing characters (UTF-8) */
 #define TREE_VERT   "│  "
@@ -265,19 +266,17 @@ static unsigned int hash_string(const char *str) {
 }
 
 /* Get absolute path, resolving symlinks */
-static int get_realpath(const char *path, char *resolved, const Config *cfg) {
+static void get_realpath(const char *path, char *resolved, const Config *cfg) {
     char *rp = realpath(path, resolved);
     if (!rp) {
         /* If realpath fails, try to at least get the absolute path */
         if (path[0] == '/') {
             strncpy(resolved, path, PATH_MAX - 1);
             resolved[PATH_MAX - 1] = '\0';
-            return 0;
+            return;
         }
         snprintf(resolved, PATH_MAX, "%s/%s", cfg->cwd, path);
-        return 0;
     }
-    return 0;
 }
 
 /* Get absolute path WITHOUT resolving symlinks, but normalize . and .. */
@@ -658,7 +657,7 @@ static int has_binary_extension(const char *path) {
 }
 
 static int is_binary_file(FILE *f) {
-    unsigned char buf[512];
+    unsigned char buf[BINARY_CHECK_SIZE];
     size_t n = fread(buf, 1, sizeof(buf), f);
     rewind(f);
     for (size_t i = 0; i < n; i++) {

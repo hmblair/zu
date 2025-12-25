@@ -284,9 +284,9 @@ static inline void cache_free(void) {
     d_cache = NULL;
 }
 
-/* Store or update a cache entry. Returns 1 on success, 0 if table full. */
+/* Store or update a cache entry. Returns 0 on success, -1 if table full. */
 static inline int cache_store(const char *path, int64_t size, int64_t file_count) {
-    if (!d_cache) return 0;
+    if (!d_cache) return -1;
 
     uint64_t h = fnv1a_hash(path);
     uint32_t idx = h % CACHE_CAPACITY;
@@ -300,11 +300,11 @@ static inline int cache_store(const char *path, int64_t size, int64_t file_count
             e->size = size;
             e->file_count = file_count;
             e->timestamp = time(NULL);
-            return 1;
+            return 0;
         }
     }
     /* Table full in this region */
-    return 0;
+    return -1;
 }
 
 /* Save cache to disk (atomic write with checksum) */

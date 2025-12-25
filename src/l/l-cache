@@ -77,9 +77,29 @@ cmd_status() {
     # Cache info
     local cache_file="$CACHE_DIR/sizes.bin"
     if [[ -f "$cache_file" ]]; then
-        local size=$(du -h "$cache_file" | cut -f1)
         local mtime=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$cache_file")
-        echo "Cache: ${GREEN}$size${NC} (updated $mtime)"
+        # Read header: magic(4) version(4) count(4) capacity(4)
+        local header=$(xxd -l 16 -p "$cache_file" 2>/dev/null)
+        if [[ -n "$header" ]]; then
+            # Parse little-endian uint32 values (bytes 8-11 = count, 12-15 = capacity)
+            local count_hex="${header:22:2}${header:20:2}${header:18:2}${header:16:2}"
+            local cap_hex="${header:30:2}${header:28:2}${header:26:2}${header:24:2}"
+            local count=$((16#$count_hex))
+            local capacity=$((16#$cap_hex))
+            local pct=$((count * 100 / capacity))
+
+            if (( pct >= 95 )); then
+                echo "Cache: ${RED}$count/$capacity entries ($pct% full)${NC} - ${RED}NEARLY FULL${NC}"
+            elif (( pct >= 80 )); then
+                echo "Cache: ${YELLOW}$count/$capacity entries ($pct% full)${NC}"
+            else
+                echo "Cache: ${GREEN}$count/$capacity entries ($pct% full)${NC}"
+            fi
+            echo "       updated $mtime"
+        else
+            local size=$(du -h "$cache_file" | cut -f1)
+            echo "Cache: ${GREEN}$size${NC} (updated $mtime)"
+        fi
     else
         echo "Cache: ${GREY}not created yet${NC}"
     fi
