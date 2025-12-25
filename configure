@@ -18,9 +18,9 @@ for f in "$BIN_DIR"/*; do
     [[ -L "$f" ]] && rm -f "$f"
 done
 
-# Build C programs
+# Build C programs (also creates l-cache symlink via Makefile)
 echo "Building C programs..."
-make -C "$SRC_DIR/l" -s
+make -C "$SRC_DIR/l" BINDIR="$BIN_DIR" -s
 
 # Link dir/dir pattern scripts (e.g., src/bkup/bkup, src/blk/blk)
 for script in "$SRC_DIR"/*/*; do
