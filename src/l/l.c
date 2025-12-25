@@ -171,6 +171,14 @@ typedef struct {
     int is_git_repo;
 } GitCache;
 
+typedef struct {
+    GitCache *git;
+    const Icons *icons;
+    const Config *cfg;
+    const ColumnWidths *widths;
+    int *continuation;
+} PrintContext;
+
 /* ============================================================================
  * Global State
  * ============================================================================ */
@@ -928,82 +936,73 @@ static void print_prefix(int depth, int *continuation, const Config *cfg) {
     printf("%s", COLOR_RESET);
 }
 
-static void print_entry(const char *path, const char *name, FileType type,
-                        const char *symlink_target, off_t size, int line_count,
-                        time_t mtime, int depth, int *continuation,
-                        GitCache *git, const Icons *icons, const Config *cfg,
-                        const ColumnWidths *widths) {
+static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx) {
     char abs_path[PATH_MAX];
-    get_realpath(path, abs_path);
+    get_realpath(fe->path, abs_path);
 
     int is_cwd = (strcmp(abs_path, g_cwd) == 0);
-    int is_hidden = (name[0] == '.');
-    int is_gitdir = (strcmp(name, ".git") == 0);
-
-    /* Check if ignored */
-    const char *git_status = git_cache_get(git, abs_path);
-    int is_ignored = is_gitdir || (git_status && strcmp(git_status, "!!") == 0);
+    int is_hidden = (fe->name[0] == '.');
 
     /* Long format: SIZE LINES TIME before tree prefix */
-    if (cfg->long_format && widths) {
+    if (ctx->cfg->long_format && ctx->widths) {
         char size_buf[16];
         char time_buf[16];
-        format_size(size, size_buf, sizeof(size_buf));
-        format_relative_time(mtime, time_buf, sizeof(time_buf));
+        format_size(fe->size, size_buf, sizeof(size_buf));
+        format_relative_time(fe->mtime, time_buf, sizeof(time_buf));
 
         /* Size: dynamic width, right-aligned, 2 spaces after */
-        printf("%s%*s%s  ", cfg->is_tty ? COLOR_GREY : "",
-               widths->size_width, size_buf,
-               cfg->is_tty ? COLOR_RESET : "");
+        printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
+               ctx->widths->size_width, size_buf,
+               ctx->cfg->is_tty ? COLOR_RESET : "");
 
         /* Lines: dynamic width, right-aligned, or "-" for non-files, 2 spaces after */
-        if (line_count >= 0) {
-            printf("%s%*d%s  ", cfg->is_tty ? COLOR_GREY : "",
-                   widths->lines_width, line_count,
-                   cfg->is_tty ? COLOR_RESET : "");
+        if (fe->line_count >= 0) {
+            printf("%s%*d%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
+                   ctx->widths->lines_width, fe->line_count,
+                   ctx->cfg->is_tty ? COLOR_RESET : "");
         } else {
-            printf("%s%*s%s  ", cfg->is_tty ? COLOR_GREY : "",
-                   widths->lines_width, "-",
-                   cfg->is_tty ? COLOR_RESET : "");
+            printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
+                   ctx->widths->lines_width, "-",
+                   ctx->cfg->is_tty ? COLOR_RESET : "");
         }
 
         /* Time: dynamic width, right-aligned, 2 spaces after */
-        printf("%s%*s%s  ", cfg->is_tty ? COLOR_GREY : "",
-               widths->time_width, time_buf,
-               cfg->is_tty ? COLOR_RESET : "");
+        printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
+               ctx->widths->time_width, time_buf,
+               ctx->cfg->is_tty ? COLOR_RESET : "");
     }
 
     /* Print tree prefix */
-    print_prefix(depth, continuation, cfg);
+    print_prefix(depth, ctx->continuation, ctx->cfg);
 
     /* Git indicator */
-    const char *git_ind = get_git_indicator(git, abs_path, icons, cfg);
+    const char *git_ind = get_git_indicator(ctx->git, abs_path, ctx->icons, ctx->cfg);
     printf("%s", git_ind);
 
     /* Color and style */
-    const char *color = get_file_color(type, is_cwd, is_ignored, cfg);
-    const char *style = (is_hidden && cfg->is_tty) ? STYLE_ITALIC : "";
+    const char *color = get_file_color(fe->type, is_cwd, fe->is_ignored, ctx->cfg);
+    const char *style = (is_hidden && ctx->cfg->is_tty) ? STYLE_ITALIC : "";
 
     /* Icon */
-    if (!cfg->no_icons) {
-        printf("%s%s%s ", color, get_icon(icons, type, is_cwd, name), COLOR_RESET);
+    if (!ctx->cfg->no_icons) {
+        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, fe->name), COLOR_RESET);
     }
 
     /* Filename (full path in list mode) */
-    if (cfg->list_mode) {
+    if (ctx->cfg->list_mode) {
         char abbrev[PATH_MAX];
         abbreviate_home(abs_path, abbrev, sizeof(abbrev));
-        printf("%s%s%s%s", color, style, abbrev, cfg->is_tty ? COLOR_RESET : "");
+        printf("%s%s%s%s", color, style, abbrev, ctx->cfg->is_tty ? COLOR_RESET : "");
     } else {
-        printf("%s%s%s%s", color, style, name, cfg->is_tty ? COLOR_RESET : "");
+        printf("%s%s%s%s", color, style, fe->name, ctx->cfg->is_tty ? COLOR_RESET : "");
     }
 
     /* Symlink target */
-    if (symlink_target) {
+    if (fe->symlink_target) {
         char abbrev[PATH_MAX];
-        abbreviate_home(symlink_target, abbrev, sizeof(abbrev));
+        abbreviate_home(fe->symlink_target, abbrev, sizeof(abbrev));
         printf(" %s %s%s%s",
-               icons->symlink, color, abbrev, cfg->is_tty ? COLOR_RESET : "");
+               ctx->icons->symlink, color, abbrev, ctx->cfg->is_tty ? COLOR_RESET : "");
     }
 
     printf("\n");
@@ -1050,11 +1049,11 @@ static void scan_tree_widths(const char *path, int depth, ColumnWidths *widths,
         len = (int)strlen(buf);
         if (len > widths->time_width) widths->time_width = len;
 
-        /* Recurse into directories */
+        /* Set is_ignored and recurse into directories */
         const char *git_status = git_cache_get(git, fe->path);
-        int is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+        fe->is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
                          strcmp(fe->name, ".git") == 0;
-        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, is_ignored, cfg)) {
+        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, fe->is_ignored, cfg)) {
             scan_tree_widths(fe->path, depth + 1, widths, git, cfg);
         }
     }
@@ -1062,14 +1061,10 @@ static void scan_tree_widths(const char *path, int depth, ColumnWidths *widths,
     file_list_free(&list);
 }
 
-static void print_tree(const char *path, int depth, int *continuation,
-                       GitCache *git, const Icons *icons, const Config *cfg,
-                       const ColumnWidths *widths);
+static void print_tree(const char *path, int depth, PrintContext *ctx);
 
-static void print_tree_recursive(const char *path, int depth, int *continuation,
-                                  GitCache *git, const Icons *icons, const Config *cfg,
-                                  const ColumnWidths *widths) {
-    if (depth >= cfg->max_depth) return;
+static void print_tree_recursive(const char *path, int depth, PrintContext *ctx) {
+    if (depth >= ctx->cfg->max_depth) return;
 
     /* Check if readable */
     if (access(path, R_OK) != 0) return;
@@ -1077,7 +1072,7 @@ static void print_tree_recursive(const char *path, int depth, int *continuation,
     FileList list;
     file_list_init(&list);
 
-    if (read_directory(path, &list, cfg) != 0) {
+    if (read_directory(path, &list, ctx->cfg) != 0) {
         file_list_free(&list);
         return;
     }
@@ -1086,29 +1081,25 @@ static void print_tree_recursive(const char *path, int depth, int *continuation,
         FileEntry *fe = &list.entries[i];
         int is_last = (i == list.count - 1);
 
-        continuation[depth] = !is_last;
+        ctx->continuation[depth] = !is_last;
 
-        /* Check if ignored */
-        const char *git_status = git_cache_get(git, fe->path);
-        int is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+        /* Set is_ignored in FileEntry */
+        const char *git_status = git_cache_get(ctx->git, fe->path);
+        fe->is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
                          strcmp(fe->name, ".git") == 0;
 
-        print_entry(fe->path, fe->name, fe->type, fe->symlink_target,
-                    fe->size, fe->line_count, fe->mtime, depth + 1, continuation, git, icons, cfg,
-                    widths);
+        print_entry(fe, depth + 1, ctx);
 
         /* Recurse into directories */
-        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, is_ignored, cfg)) {
-            print_tree_recursive(fe->path, depth + 1, continuation, git, icons, cfg, widths);
+        if (fe->type == FTYPE_DIR && !should_skip_dir(fe->name, fe->is_ignored, ctx->cfg)) {
+            print_tree_recursive(fe->path, depth + 1, ctx);
         }
     }
 
     file_list_free(&list);
 }
 
-static void print_tree(const char *path, int depth, int *continuation,
-                       GitCache *git, const Icons *icons, const Config *cfg,
-                       const ColumnWidths *widths) {
+static void print_tree(const char *path, int depth, PrintContext *ctx) {
     char abs_path[PATH_MAX];
     get_realpath(path, abs_path);
 
@@ -1118,36 +1109,45 @@ static void print_tree(const char *path, int depth, int *continuation,
     FileType type = detect_file_type(abs_path, &st, &symlink_target);
 
     /* In list mode, skip printing root directory - just show contents */
-    if (cfg->list_mode && type == FTYPE_DIR) {
+    if (ctx->cfg->list_mode && type == FTYPE_DIR) {
         free(symlink_target);
-        print_tree_recursive(abs_path, depth - 1, continuation, git, icons, cfg, widths);
+        print_tree_recursive(abs_path, depth - 1, ctx);
         return;
     }
 
-    /* Print root entry */
-    const char *name = strrchr(abs_path, '/');
-    name = name ? name + 1 : abs_path;
+    /* Build FileEntry for root */
+    FileEntry root_entry;
+    memset(&root_entry, 0, sizeof(root_entry));
+    root_entry.path = abs_path;  /* Not owned - don't free */
+    root_entry.name = strrchr(abs_path, '/');
+    root_entry.name = root_entry.name ? root_entry.name + 1 : abs_path;
+    root_entry.type = type;
+    root_entry.symlink_target = symlink_target;
+    root_entry.mode = st.st_mode;
+    root_entry.mtime = GET_MTIME(st);
+    root_entry.line_count = -1;
 
-    int line_count = -1;
-    if (cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
-        line_count = count_file_lines(abs_path);
+    if (ctx->cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
+        root_entry.line_count = count_file_lines(abs_path);
     }
 
-    off_t size = st.st_size;
-    if (cfg->long_format && type == FTYPE_DIR) {
-        size = get_dir_size(abs_path);
+    root_entry.size = st.st_size;
+    if (ctx->cfg->long_format && type == FTYPE_DIR) {
+        root_entry.size = get_dir_size(abs_path);
     }
 
-    time_t mtime = GET_MTIME(st);
+    /* Set is_ignored for root */
+    const char *git_status = git_cache_get(ctx->git, abs_path);
+    root_entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
+                            strcmp(root_entry.name, ".git") == 0;
 
-    print_entry(abs_path, name, type, symlink_target, size, line_count,
-                mtime, depth, continuation, git, icons, cfg, widths);
+    print_entry(&root_entry, depth, ctx);
 
     free(symlink_target);
 
     /* Recurse if directory */
     if (type == FTYPE_DIR) {
-        print_tree_recursive(abs_path, depth, continuation, git, icons, cfg, widths);
+        print_tree_recursive(abs_path, depth, ctx);
     }
 }
 
@@ -1363,8 +1363,14 @@ int main(int argc, char **argv) {
         }
 
         /* Print tree */
-        print_tree(dir, 0, continuation, &git, &icons, &cfg,
-                   cfg.long_format ? &widths : NULL);
+        PrintContext ctx = {
+            .git = &git,
+            .icons = &icons,
+            .cfg = &cfg,
+            .widths = cfg.long_format ? &widths : NULL,
+            .continuation = continuation
+        };
+        print_tree(dir, 0, &ctx);
 
         git_cache_free(&git);
     }
