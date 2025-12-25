@@ -1320,7 +1320,13 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
                 long total_count = 0;
                 for (size_t j = 0; j < child->child_count; j++) {
                     total_size += child->children[j].entry.size;
-                    total_count += child->children[j].entry.file_count;
+                    FileType t = child->children[j].entry.type;
+                    if (t == FTYPE_FILE || t == FTYPE_EXEC ||
+                        t == FTYPE_SYMLINK || t == FTYPE_SYMLINK_EXEC) {
+                        total_count++;
+                    } else if (child->children[j].entry.file_count >= 0) {
+                        total_count += child->children[j].entry.file_count;
+                    }
                 }
                 child->entry.size = total_size;
                 child->entry.file_count = total_count;
@@ -1388,7 +1394,15 @@ static TreeNode *build_tree(const char *path, Column *cols,
             long total_count = 0;
             for (size_t i = 0; i < root->child_count; i++) {
                 total_size += root->children[i].entry.size;
-                total_count += root->children[i].entry.file_count;
+                FileType t = root->children[i].entry.type;
+                if (t == FTYPE_FILE || t == FTYPE_EXEC ||
+                    t == FTYPE_SYMLINK || t == FTYPE_SYMLINK_EXEC) {
+                    /* Count files directly */
+                    total_count++;
+                } else if (root->children[i].entry.file_count >= 0) {
+                    /* Add subdirectory file counts */
+                    total_count += root->children[i].entry.file_count;
+                }
             }
             root->entry.size = total_size;
             root->entry.file_count = total_count;
