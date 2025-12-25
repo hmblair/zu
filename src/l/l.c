@@ -58,6 +58,7 @@
 #define INITIAL_FILE_CAPACITY 64
 #define LINE_COUNT_LIMIT 10000
 #define LINE_COUNT_EXCEEDED -2
+#define READ_BUFFER_SIZE 65536
 
 /* Tree drawing characters (UTF-8) */
 #define TREE_VERT   "│  "
@@ -150,6 +151,7 @@ typedef struct {
     char symlink_broken[MAX_ICON_LEN];
     char directory[MAX_ICON_LEN];
     char current_dir[MAX_ICON_LEN];
+    char locked_dir[MAX_ICON_LEN];
     char executable[MAX_ICON_LEN];
     char file[MAX_ICON_LEN];
     char git_modified[MAX_ICON_LEN];
@@ -161,9 +163,22 @@ typedef struct {
     int ext_count;
 } Icons;
 
+/*
+ * FileEntry - Represents a file system entry.
+ *
+ * Ownership:
+ *   - path: Owned by this struct, freed by file_entry_free()
+ *   - name: Pointer into path, not separately freed
+ *   - symlink_target: Owned by this struct, freed by file_entry_free()
+ *
+ * Lifecycle:
+ *   - Created by read_directory() or build_tree()
+ *   - Freed by file_entry_free() or tree_node_free()
+ *   - When moving from FileList to TreeNode, ownership transfers (don't call file_list_free)
+ */
 struct FileEntry {
     char *path;              /* Full absolute path (owned) */
-    char *name;              /* Pointer to basename within path */
+    char *name;              /* Pointer to basename within path (not owned) */
     char *symlink_target;    /* Resolved symlink target (owned, NULL if not symlink) */
     mode_t mode;
     off_t size;
@@ -218,18 +233,21 @@ static void die(const char *msg) {
     exit(1);
 }
 
+/* Duplicate string, die on failure. Returns: Newly allocated string (caller must free). */
 static char *xstrdup(const char *s) {
     char *dup = strdup(s);
     if (!dup) die("Out of memory");
     return dup;
 }
 
+/* Allocate memory, die on failure. Returns: Newly allocated memory (caller must free). */
 static void *xmalloc(size_t size) {
     void *p = malloc(size);
     if (!p) die("Out of memory");
     return p;
 }
 
+/* Reallocate memory, die on failure. Returns: Reallocated memory (caller must free). */
 static void *xrealloc(void *ptr, size_t size) {
     void *p = realloc(ptr, size);
     if (!p) die("Out of memory");
@@ -411,20 +429,34 @@ static void columns_update_widths(Column *cols, const FileEntry *fe) {
     }
 }
 
-/* Calculate recursive directory size using OMP tasks for work stealing */
-static off_t get_dir_size_task(const char *path) {
+/* Directory statistics result */
+typedef struct {
+    off_t size;
+    long file_count;
+} DirStats;
+
+/* Check if entry is . or .. (efficient bitwise check) */
+static inline int is_dot_or_dotdot(const char *name) {
+    return name[0] == '.' &&
+           (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
+}
+
+/* Calculate recursive directory stats using OMP tasks for work stealing */
+static DirStats get_dir_stats_task(const char *path) {
+    DirStats result = {-1, -1};
     DIR *dir = opendir(path);
-    if (!dir) return -1;  /* Can't read directory */
+    if (!dir) return result;  /* Can't read directory */
 
     /* Collect entries first */
     char **subdirs = NULL;
     size_t subdir_count = 0;
     size_t subdir_cap = 0;
-    off_t file_total = 0;
+    off_t file_size_total = 0;
+    long file_count_total = 0;
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        if (is_dot_or_dotdot(entry->d_name))
             continue;
 
         char full_path[PATH_MAX];
@@ -439,134 +471,63 @@ static off_t get_dir_size_task(const char *path) {
                 }
                 subdirs[subdir_count++] = xstrdup(full_path);
             } else {
-                file_total += st.st_size;
+                file_size_total += st.st_size;
+                file_count_total++;
             }
         }
     }
     closedir(dir);
 
     /* Spawn tasks for subdirectories (check cache first) */
-    off_t *sizes = NULL;
+    DirStats *sub_stats = NULL;
     if (subdir_count > 0) {
-        sizes = xmalloc(subdir_count * sizeof(off_t));
+        sub_stats = xmalloc(subdir_count * sizeof(DirStats));
         for (size_t i = 0; i < subdir_count; i++) {
             /* Check cache before spawning task */
-            int64_t cached = cache_lookup(subdirs[i]);
-            if (cached >= 0) {
-                sizes[i] = (off_t)cached;
+            const CacheEntry *cached = cache_lookup_entry(subdirs[i]);
+            if (cached && cached->size >= 0 && cached->file_count >= 0) {
+                sub_stats[i].size = (off_t)cached->size;
+                sub_stats[i].file_count = (long)cached->file_count;
             } else {
-                #pragma omp task shared(sizes) firstprivate(i)
-                sizes[i] = get_dir_size_task(subdirs[i]);
+                #pragma omp task shared(sub_stats) firstprivate(i)
+                sub_stats[i] = get_dir_stats_task(subdirs[i]);
             }
         }
         #pragma omp taskwait
     }
 
     /* Sum results */
-    off_t dir_total = 0;
-    if (sizes) {
-        for (size_t i = 0; i < subdir_count; i++) {
-            dir_total += sizes[i];
-        }
-        free(sizes);
-    }
-    /* Always free subdirs */
+    off_t dir_size_total = 0;
+    long dir_count_total = 0;
     for (size_t i = 0; i < subdir_count; i++) {
+        if (sub_stats[i].size >= 0) dir_size_total += sub_stats[i].size;
+        if (sub_stats[i].file_count >= 0) dir_count_total += sub_stats[i].file_count;
         free(subdirs[i]);
     }
     free(subdirs);
+    free(sub_stats);
 
-    return file_total + dir_total;
+    result.size = file_size_total + dir_size_total;
+    result.file_count = file_count_total + dir_count_total;
+    return result;
 }
 
-static off_t get_dir_size(const char *path) {
+static DirStats get_dir_stats(const char *path) {
     /* Check cache first */
-    int64_t cached = cache_lookup(path);
-    if (cached >= 0) return (off_t)cached;
+    const CacheEntry *cached = cache_lookup_entry(path);
+    if (cached && cached->size >= 0 && cached->file_count >= 0) {
+        return (DirStats){(off_t)cached->size, (long)cached->file_count};
+    }
 
-    off_t result;
+    DirStats result;
     #pragma omp parallel
     #pragma omp single
     {
-        result = get_dir_size_task(path);
+        result = get_dir_stats_task(path);
     }
     return result;
 }
 
-/* Count files recursively using OMP tasks */
-static long get_file_count_task(const char *path) {
-    DIR *dir = opendir(path);
-    if (!dir) return -1;  /* Can't read directory */
-
-    char **subdirs = NULL;
-    size_t subdir_count = 0;
-    size_t subdir_cap = 0;
-    long file_count = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-
-        char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-
-        struct stat st;
-        if (lstat(full_path, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                if (subdir_count >= subdir_cap) {
-                    subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
-                    subdirs = xrealloc(subdirs, subdir_cap * sizeof(char *));
-                }
-                subdirs[subdir_count++] = xstrdup(full_path);
-            } else {
-                file_count++;
-            }
-        }
-    }
-    closedir(dir);
-
-    /* Spawn tasks for subdirectories (check cache first) */
-    long *counts = NULL;
-    if (subdir_count > 0) {
-        counts = xmalloc(subdir_count * sizeof(long));
-        for (size_t i = 0; i < subdir_count; i++) {
-            /* Check cache before spawning task */
-            int64_t cached = cache_lookup_count(subdirs[i]);
-            if (cached >= 0) {
-                counts[i] = (long)cached;
-            } else {
-                #pragma omp task shared(counts) firstprivate(i)
-                counts[i] = get_file_count_task(subdirs[i]);
-            }
-        }
-        #pragma omp taskwait
-    }
-
-    /* Sum results */
-    for (size_t i = 0; i < subdir_count; i++) {
-        file_count += counts[i];
-        free(subdirs[i]);
-    }
-    free(subdirs);
-    free(counts);
-
-    return file_count;
-}
-
-static long get_file_count(const char *path) {
-    /* Check cache first */
-    int64_t cached = cache_lookup_count(path);
-    if (cached >= 0) return (long)cached;
-
-    long result;
-    #pragma omp parallel
-    #pragma omp single
-    {
-        result = get_file_count_task(path);
-    }
-    return result;
-}
 
 /* ============================================================================
  * File List Management
@@ -736,7 +697,7 @@ static int count_file_lines(const char *path) {
     }
 
     int count = 0;
-    char buf[65536];
+    char buf[READ_BUFFER_SIZE];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
         for (size_t i = 0; i < n; i++) {
@@ -764,6 +725,7 @@ static void icons_init_defaults(Icons *icons) {
     strcpy(icons->symlink, "");
     strcpy(icons->directory, "");
     strcpy(icons->current_dir, "");
+    strcpy(icons->locked_dir, "󰉐");
     strcpy(icons->file, "");
     strcpy(icons->executable, "");
     strcpy(icons->symlink_dir, "");
@@ -855,6 +817,7 @@ static void icons_load(Icons *icons, const char *script_dir) {
             if (strcmp(key, "default") == 0) strcpy(icons->default_icon, value);
             else if (strcmp(key, "directory") == 0) strcpy(icons->directory, value);
             else if (strcmp(key, "current_dir") == 0) strcpy(icons->current_dir, value);
+            else if (strcmp(key, "locked_dir") == 0) strcpy(icons->locked_dir, value);
             else if (strcmp(key, "file") == 0) strcpy(icons->file, value);
             else if (strcmp(key, "executable") == 0) strcpy(icons->executable, value);
             else if (strcmp(key, "symlink") == 0) strcpy(icons->symlink, value);
@@ -887,9 +850,10 @@ static const char *get_ext_icon(const Icons *icons, const char *name) {
 }
 
 static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
-                            const char *name) {
+                            int is_unreadable, const char *name) {
     switch (type) {
         case FTYPE_DIR:
+            if (is_unreadable) return icons->locked_dir;
             return is_cwd ? icons->current_dir : icons->directory;
         case FTYPE_FILE: {
             const char *ext_icon = get_ext_icon(icons, name);
@@ -914,6 +878,38 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
 /* ============================================================================
  * Git Integration
  * ============================================================================ */
+
+/*
+ * Escape a path for safe use in shell single quotes: ' -> '\''
+ *
+ * Returns: Newly allocated string (caller must free).
+ */
+static char *shell_escape(const char *path) {
+    /* Count single quotes to determine buffer size */
+    size_t quotes = 0;
+    for (const char *p = path; *p; p++) {
+        if (*p == '\'') quotes++;
+    }
+
+    /* Allocate: original length + 3 extra chars per quote + null */
+    size_t len = strlen(path) + quotes * 3 + 1;
+    char *escaped = xmalloc(len);
+    char *out = escaped;
+
+    for (const char *p = path; *p; p++) {
+        if (*p == '\'') {
+            /* End quote, escaped quote, start quote: '\'' */
+            *out++ = '\'';
+            *out++ = '\\';
+            *out++ = '\'';
+            *out++ = '\'';
+        } else {
+            *out++ = *p;
+        }
+    }
+    *out = '\0';
+    return escaped;
+}
 
 static void git_cache_init(GitCache *cache) {
     memset(cache->buckets, 0, sizeof(cache->buckets));
@@ -960,8 +956,10 @@ static const char *git_cache_get(GitCache *cache, const char *path) {
 }
 
 static void git_detect_repo(GitCache *cache, const char *dir) {
-    char cmd[PATH_MAX + 64];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --show-toplevel 2>/dev/null", dir);
+    char *escaped = shell_escape(dir);
+    char cmd[PATH_MAX * 2 + 64];
+    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --show-toplevel 2>/dev/null", escaped);
+    free(escaped);
 
     FILE *fp = popen(cmd, "r");
     if (!fp) return;
@@ -981,8 +979,10 @@ static void git_detect_repo(GitCache *cache, const char *dir) {
 static void git_populate_status(GitCache *cache) {
     if (!cache->is_git_repo) return;
 
-    char cmd[PATH_MAX + 64];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored 2>/dev/null", cache->git_root);
+    char *escaped = shell_escape(cache->git_root);
+    char cmd[PATH_MAX * 2 + 64];
+    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored 2>/dev/null", escaped);
+    free(escaped);
 
     FILE *fp = popen(cmd, "r");
     if (!fp) return;
@@ -1111,7 +1111,7 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         /* Skip . and .. */
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        if (is_dot_or_dotdot(entry->d_name))
             continue;
 
         /* Skip hidden files unless -a flag */
@@ -1148,8 +1148,10 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         for (size_t i = 0; i < list->count; i++) {
             FileEntry *fe = &list->entries[i];
             if (fe->type == FTYPE_DIR) {
-                fe->size = get_dir_size(fe->path);
-                fe->file_count = get_file_count(fe->path);
+                /* Get size and count in single pass */
+                DirStats stats = get_dir_stats(fe->path);
+                fe->size = stats.size;
+                fe->file_count = stats.file_count;
             } else if (fe->type == FTYPE_FILE || fe->type == FTYPE_EXEC) {
                 fe->line_count = count_file_lines(fe->path);
             }
@@ -1241,7 +1243,7 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
 
     /* Icon */
     if (!ctx->cfg->no_icons) {
-        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, fe->name), COLOR_RESET);
+        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, is_unreadable, fe->name), COLOR_RESET);
     }
 
     /* Filename (full path in list mode) */
@@ -1284,6 +1286,13 @@ static void tree_node_free(TreeNode *node) {
     file_entry_free(&node->entry);
 }
 
+/*
+ * Build child nodes for a parent TreeNode.
+ *
+ * Ownership: FileEntry ownership transfers from FileList to TreeNode.
+ * The FileList's entries array is freed, but individual entries are NOT freed
+ * (they are now owned by the tree nodes).
+ */
 static void build_tree_children(TreeNode *parent, int depth, Column *cols,
                                  GitCache *git, const Config *cfg) {
     if (depth >= cfg->max_depth) return;
@@ -1375,8 +1384,9 @@ static TreeNode *build_tree(const char *path, Column *cols,
     root->entry.size = st.st_size;
     /* Size/count computed after children if show_hidden, else compute now */
     if (cfg->long_format && type == FTYPE_DIR && !cfg->show_hidden) {
-        root->entry.size = get_dir_size(abs_path);
-        root->entry.file_count = get_file_count(abs_path);
+        DirStats stats = get_dir_stats(abs_path);
+        root->entry.size = stats.size;
+        root->entry.file_count = stats.file_count;
     }
 
     /* Set is_ignored for root */

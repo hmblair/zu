@@ -9,12 +9,13 @@
 #include <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 static FSEventStreamRef g_stream = NULL;
 static CFRunLoopRef g_runloop = NULL;
 static watch_callback g_callback = NULL;
 static void *g_ctx = NULL;
-static volatile int g_running = 0;
+static volatile sig_atomic_t g_running = 0;
 
 static void fsevents_callback(
     ConstFSEventStreamRef streamRef,
@@ -80,10 +81,9 @@ void watch_run(void) {
 }
 
 void watch_stop(void) {
+    /* Only set the flag - async-signal-safe.
+     * The run loop will exit on next iteration (within 1 second). */
     g_running = 0;
-    if (g_runloop) {
-        CFRunLoopStop(g_runloop);
-    }
 }
 
 void watch_cleanup(void) {

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <signal.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -20,6 +21,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <limits.h>
+#include <stdatomic.h>
 
 #include "cache.h"
 #include "watch.h"
@@ -27,14 +29,36 @@
 #define UPDATE_INTERVAL 300  /* 5 minutes */
 #define DEPTH_THRESHOLD 3    /* Cache directories at depth <= this */
 #define MAX_DIRTY_PATHS 65536
+#define MAX_PROBE_DEPTH 32   /* Hash table probe limit */
 
 /* Dirty paths that need recalculation */
 static char *g_dirty_paths[MAX_DIRTY_PATHS];
 static size_t g_dirty_count = 0;
 static pthread_mutex_t g_dirty_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static volatile int g_shutdown = 0;
+/* Cache mutex for thread-safe access */
+static pthread_mutex_t g_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Use atomic for shutdown flag (async-signal-safe) */
+static atomic_int g_shutdown = 0;
 static char g_root[PATH_MAX];
+
+/* Logging helpers */
+static void log_msg(const char *level, const char *fmt, ...) {
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    fprintf(stderr, "[%02d:%02d:%02d] %s: ",
+            tm->tm_hour, tm->tm_min, tm->tm_sec, level);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+#define log_error(...) log_msg("ERROR", __VA_ARGS__)
+#define log_warn(...)  log_msg("WARN", __VA_ARGS__)
+#define log_info(...)  log_msg("INFO", __VA_ARGS__)
 
 /* Count slashes to determine depth */
 static int path_depth(const char *path, const char *root) {
@@ -73,7 +97,14 @@ static void mark_dirty(const char *path) {
     }
 
     if (g_dirty_count < MAX_DIRTY_PATHS) {
-        g_dirty_paths[g_dirty_count++] = strdup(path);
+        char *dup = strdup(path);
+        if (dup) {
+            g_dirty_paths[g_dirty_count++] = dup;
+        } else {
+            log_error("strdup failed for path: %s", path);
+        }
+    } else {
+        log_warn("dirty path list full, dropping: %s", path);
     }
 
     pthread_mutex_unlock(&g_dirty_lock);
@@ -158,50 +189,66 @@ static void process_dirty_paths(void) {
 
     pthread_mutex_unlock(&g_dirty_lock);
 
-    /* Process each path */
+    /* Process each path (stat/traverse without lock for better concurrency) */
+    off_t sizes[MAX_DIRTY_PATHS];
+    long counts[MAX_DIRTY_PATHS];
+    int valid[MAX_DIRTY_PATHS];
+
     for (size_t i = 0; i < count; i++) {
         struct stat st;
         if (stat(paths[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-            off_t size;
-            long file_count;
-            get_dir_stats(paths[i], &size, &file_count);
-            cache_store(paths[i], size, file_count);
+            get_dir_stats(paths[i], &sizes[i], &counts[i]);
+            valid[i] = 1;
+        } else {
+            valid[i] = 0;
+        }
+    }
+
+    /* Lock cache for batch update */
+    size_t stored = 0, failed = 0;
+    pthread_mutex_lock(&g_cache_lock);
+    for (size_t i = 0; i < count; i++) {
+        if (valid[i]) {
+            if (cache_store(paths[i], sizes[i], counts[i])) {
+                stored++;
+            } else {
+                failed++;
+            }
         }
         free(paths[i]);
     }
+    if (cache_save() != 0) {
+        log_error("failed to save cache to disk");
+    }
+    pthread_mutex_unlock(&g_cache_lock);
 
-    /* Save cache */
-    cache_save();
-
-    time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
-    fprintf(stderr, "[%02d:%02d:%02d] Processed %zu paths\n",
-            tm->tm_hour, tm->tm_min, tm->tm_sec, count);
+    log_info("processed %zu paths (stored: %zu, failed: %zu)", count, stored, failed);
 }
 
 /* Timer thread */
 static void *timer_thread(void *arg) {
     (void)arg;
 
-    while (!g_shutdown) {
+    while (!atomic_load(&g_shutdown)) {
         sleep(UPDATE_INTERVAL);
-        if (!g_shutdown) {
+        if (!atomic_load(&g_shutdown)) {
             process_dirty_paths();
         }
     }
     return NULL;
 }
 
-/* Signal handler */
+/* Signal handler - only uses async-signal-safe operations */
 static void handle_signal(int sig) {
     (void)sig;
-    g_shutdown = 1;
+    atomic_store(&g_shutdown, 1);
+    /* Note: watch_stop() should be async-signal-safe (just sets a flag) */
     watch_stop();
 }
 
 /* Initial scan to populate cache for cold start */
 static void initial_scan(const char *path, int depth) {
-    if (g_shutdown) return;
+    if (atomic_load(&g_shutdown)) return;
     if (depth > DEPTH_THRESHOLD) return;  /* Don't scan beyond threshold */
 
     DIR *dir = opendir(path);
@@ -222,12 +269,12 @@ static void initial_scan(const char *path, int depth) {
         if (lstat(full, &st) != 0) continue;
 
         if (S_ISDIR(st.st_mode)) {
-            /* Check if already cached */
+            /* Check if already cached (lock not needed - single-threaded at this point) */
             uint64_t h = fnv1a_hash(full);
             int found = 0;
             if (d_cache) {
                 uint32_t idx = h % CACHE_CAPACITY;
-                for (int i = 0; i < 32 && !found; i++) {
+                for (int i = 0; i < MAX_PROBE_DEPTH && !found; i++) {
                     CacheEntry *e = &d_cache->entries[(idx + i) % CACHE_CAPACITY];
                     if (e->size == -1) break;
                     if (e->path_hash == h) found = 1;
@@ -258,41 +305,45 @@ int main(int argc, char *argv[]) {
         root = argv[1];
     }
     if (!root) {
-        fprintf(stderr, "Error: No home directory\n");
+        log_error("no home directory");
         return 1;
     }
 
     /* Resolve to absolute path */
     if (!realpath(root, g_root)) {
-        perror("realpath");
+        log_error("realpath failed: %s", root);
         return 1;
     }
 
-    fprintf(stderr, "l-cached: watching %s\n", g_root);
+    log_info("watching %s", g_root);
 
     /* Initialize cache */
     if (cache_init() != 0) {
-        fprintf(stderr, "Error: Failed to initialize cache\n");
+        log_error("failed to initialize cache");
         return 1;
     }
 
     /* Initial scan to populate cache */
-    fprintf(stderr, "l-cached: scanning for uncached directories...\n");
+    log_info("scanning for uncached directories...");
     initial_scan(g_root, 0);
     if (g_dirty_count > 0) {
-        fprintf(stderr, "l-cached: found %zu uncached directories, processing...\n", g_dirty_count);
+        log_info("found %zu uncached directories, processing...", g_dirty_count);
         process_dirty_paths();
     } else {
-        fprintf(stderr, "l-cached: cache is up to date\n");
+        log_info("cache is up to date");
     }
 
-    /* Set up signal handlers */
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
+    /* Set up signal handlers using sigaction for portability */
+    struct sigaction sa;
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     /* Initialize watcher */
     if (watch_init(g_root, on_change, NULL) != 0) {
-        fprintf(stderr, "Error: Failed to initialize watcher\n");
+        log_error("failed to initialize watcher");
         cache_free();
         return 1;
     }
@@ -305,7 +356,7 @@ int main(int argc, char *argv[]) {
     watch_run();
 
     /* Cleanup */
-    g_shutdown = 1;
+    atomic_store(&g_shutdown, 1);
     pthread_join(timer, NULL);
 
     /* Final save */
@@ -314,6 +365,6 @@ int main(int argc, char *argv[]) {
     watch_cleanup();
     cache_free();
 
-    fprintf(stderr, "l-cached: shutdown complete\n");
+    log_info("shutdown complete");
     return 0;
 }

@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 
 #define EVENT_SIZE  (sizeof(struct inotify_event))
 #define BUF_LEN     (1024 * (EVENT_SIZE + NAME_MAX + 1))
@@ -21,7 +22,7 @@
 static int g_inotify_fd = -1;
 static watch_callback g_callback = NULL;
 static void *g_ctx = NULL;
-static volatile int g_running = 0;
+static volatile sig_atomic_t g_running = 0;
 
 /* Map watch descriptors to paths */
 static char *g_wd_to_path[MAX_WATCHES];
