@@ -454,13 +454,21 @@ static off_t get_dir_size_task(const char *path, off_t *global_total) {
     #pragma omp atomic
     *global_total += file_total;
 
-    /* Spawn tasks for subdirectories */
+    /* Spawn tasks for subdirectories (check cache first) */
     off_t *sizes = NULL;
     if (subdir_count > 0 && *global_total < SIZE_LIMIT) {
         sizes = xmalloc(subdir_count * sizeof(off_t));
         for (size_t i = 0; i < subdir_count; i++) {
-            #pragma omp task shared(sizes, global_total) firstprivate(i)
-            sizes[i] = get_dir_size_task(subdirs[i], global_total);
+            /* Check cache before spawning task */
+            int64_t cached = cache_lookup(subdirs[i]);
+            if (cached >= 0) {
+                sizes[i] = (off_t)cached;
+                #pragma omp atomic
+                *global_total += cached;
+            } else {
+                #pragma omp task shared(sizes, global_total) firstprivate(i)
+                sizes[i] = get_dir_size_task(subdirs[i], global_total);
+            }
         }
         #pragma omp taskwait
     }
