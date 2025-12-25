@@ -42,7 +42,8 @@ cmd_read() {
     [[ ! -f "$ENVS_FILE" ]] && return
     while IFS='=' read -r name value; do
         [[ -z "$name" || "$name" == \#* ]] && continue
-        echo "export $name='$value'"
+        # Use zsh (q) flag for safe shell quoting
+        echo "export $name=${(q)value}"
     done < "$ENVS_FILE"
 }
 
@@ -57,6 +58,11 @@ cmd_add() {
     # Validate name (alphanumeric and underscore only)
     if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
         error "Invalid variable name: $name"
+    fi
+
+    # Reject values with newlines (would corrupt file format)
+    if [[ "$value" == *$'\n'* ]]; then
+        error "Value cannot contain newlines"
     fi
 
     touch "$ENVS_FILE"

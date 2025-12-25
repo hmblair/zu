@@ -89,6 +89,12 @@ cmd_add() {
             continue
         fi
 
+        # Reject paths with newlines (would corrupt file format)
+        if [[ "$resolved" == *$'\n'* ]]; then
+            echo "${RED}Error:${NC} Path cannot contain newlines"
+            continue
+        fi
+
         echo "Select a group for '$resolved':"
         local groups=("$PATH_DIR"/*(N))
         local group_names=()
