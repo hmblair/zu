@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <limits.h>
 
@@ -38,11 +40,18 @@ static inline int ds_is_dot_or_dotdot(const char *name) {
            (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
 }
 
-/* Internal: recursive task function */
+/* Internal: recursive task function using directory fd for efficiency */
 static DirStats ds_get_stats_task(const char *path, dir_stats_cache_fn cache_fn) {
     DirStats result = {-1, -1};
-    DIR *dir = opendir(path);
-    if (!dir) return result;
+
+    int dirfd = open(path, O_RDONLY | O_DIRECTORY);
+    if (dirfd < 0) return result;
+
+    DIR *dir = fdopendir(dirfd);
+    if (!dir) {
+        close(dirfd);
+        return result;
+    }
 
     /* Collect entries first (sequential phase) */
     char **subdirs = NULL;
@@ -56,39 +65,67 @@ static DirStats ds_get_stats_task(const char *path, dir_stats_cache_fn cache_fn)
         if (ds_is_dot_or_dotdot(entry->d_name))
             continue;
 
-        char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        int is_dir = 0;
+        int need_stat = 0;
 
-        struct stat st;
-        if (lstat(full_path, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                if (subdir_count >= subdir_cap) {
-                    subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
-                    char **new_subdirs = realloc(subdirs, subdir_cap * sizeof(char *));
-                    if (!new_subdirs) {
-                        /* Out of memory - clean up and return error */
-                        for (size_t i = 0; i < subdir_count; i++) free(subdirs[i]);
-                        free(subdirs);
-                        closedir(dir);
-                        return result;
-                    }
-                    subdirs = new_subdirs;
+#ifdef DT_DIR
+        /* Use d_type if available (avoids stat for type check) */
+        if (entry->d_type == DT_DIR) {
+            is_dir = 1;
+        } else if (entry->d_type == DT_REG) {
+            /* Regular file - still need stat for size */
+            need_stat = 1;
+        } else if (entry->d_type == DT_UNKNOWN) {
+            /* Filesystem doesn't support d_type, fall back to stat */
+            need_stat = 1;
+        }
+        /* Skip symlinks, devices, etc. */
+#else
+        need_stat = 1;
+#endif
+
+        if (need_stat) {
+            struct stat st;
+            if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISDIR(st.st_mode)) {
+                    is_dir = 1;
+                } else if (S_ISREG(st.st_mode)) {
+                    file_size_total += st.st_size;
+                    file_count_total++;
                 }
-                subdirs[subdir_count] = strdup(full_path);
-                if (!subdirs[subdir_count]) {
+                /* Skip symlinks, devices, etc. */
+            }
+        }
+
+        if (is_dir) {
+            if (subdir_count >= subdir_cap) {
+                subdir_cap = subdir_cap ? subdir_cap * 2 : 16;
+                char **new_subdirs = realloc(subdirs, subdir_cap * sizeof(char *));
+                if (!new_subdirs) {
                     for (size_t i = 0; i < subdir_count; i++) free(subdirs[i]);
                     free(subdirs);
                     closedir(dir);
                     return result;
                 }
-                subdir_count++;
-            } else {
-                file_size_total += st.st_size;
-                file_count_total++;
+                subdirs = new_subdirs;
             }
+            /* Build full path for subdirectory (needed for recursion and cache lookup) */
+            size_t path_len = strlen(path);
+            size_t name_len = strlen(entry->d_name);
+            char *subpath = malloc(path_len + 1 + name_len + 1);
+            if (!subpath) {
+                for (size_t i = 0; i < subdir_count; i++) free(subdirs[i]);
+                free(subdirs);
+                closedir(dir);
+                return result;
+            }
+            memcpy(subpath, path, path_len);
+            subpath[path_len] = '/';
+            memcpy(subpath + path_len + 1, entry->d_name, name_len + 1);
+            subdirs[subdir_count++] = subpath;
         }
     }
-    closedir(dir);
+    closedir(dir);  /* Also closes dirfd */
 
     /* Process subdirectories (parallel phase with OMP tasks) */
     DirStats *sub_stats = NULL;

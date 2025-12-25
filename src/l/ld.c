@@ -32,9 +32,10 @@
 #endif
 
 #define UPDATE_INTERVAL 300  /* 5 minutes */
-#define DEPTH_THRESHOLD 3    /* Cache directories at depth <= this */
+#define FILE_COUNT_THRESHOLD 1000  /* Cache directories with >= this many files */
 #define MAX_DIRTY_PATHS 65536
 #define MAX_PROBE_DEPTH 32   /* Hash table probe limit */
+#define MAX_ROOTS 8          /* Maximum watched directories */
 
 /* Dirty paths that need recalculation */
 static char *g_dirty_paths[MAX_DIRTY_PATHS];
@@ -46,7 +47,8 @@ static pthread_mutex_t g_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Use atomic for shutdown flag (async-signal-safe) */
 static atomic_int g_shutdown = 0;
-static char g_root[PATH_MAX];
+static char g_roots[MAX_ROOTS][PATH_MAX];
+static int g_root_count = 0;
 
 /* Logging helpers */
 static void log_msg(const char *level, const char *fmt, ...) {
@@ -65,18 +67,29 @@ static void log_msg(const char *level, const char *fmt, ...) {
 #define log_warn(...)  log_msg("WARN", __VA_ARGS__)
 #define log_info(...)  log_msg("INFO", __VA_ARGS__)
 
-/* Count slashes to determine depth */
-static int path_depth(const char *path, const char *root) {
-    size_t root_len = strlen(root);
-    if (strncmp(path, root, root_len) != 0) return -1;
-
-    const char *rest = path + root_len;
-    int depth = 0;
-    while (*rest) {
-        if (*rest == '/') depth++;
-        rest++;
+/* Check if path is under any watched root */
+static int is_under_root(const char *path) {
+    for (int i = 0; i < g_root_count; i++) {
+        size_t root_len = strlen(g_roots[i]);
+        if (strncmp(path, g_roots[i], root_len) == 0 &&
+            (path[root_len] == '/' || path[root_len] == '\0')) {
+            return 1;
+        }
     }
-    return depth;
+    return 0;
+}
+
+/* Check if path is cached (has entry in cache) */
+static int is_cached(const char *path) {
+    if (!d_cache) return 0;
+    uint64_t h = fnv1a_hash(path);
+    uint32_t idx = h % CACHE_CAPACITY;
+    for (int i = 0; i < MAX_PROBE_DEPTH; i++) {
+        CacheEntry *e = &d_cache->entries[(idx + i) % CACHE_CAPACITY];
+        if (e->size < 0 && e->path_hash == 0) break;  /* Empty slot */
+        if (e->path_hash == h) return 1;
+    }
+    return 0;
 }
 
 /* Get parent directory path */
@@ -119,15 +132,14 @@ static void mark_dirty(const char *path) {
 static void on_change(const char *path, void *ctx) {
     (void)ctx;
 
-    /* Mark all ancestors at depth <= DEPTH_THRESHOLD as dirty */
+    /* Mark cached ancestors as dirty */
     char buf[PATH_MAX];
     strncpy(buf, path, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
     /* Walk up to root, marking cached ancestors as dirty */
-    int depth;
-    while ((depth = path_depth(buf, g_root)) > 0) {
-        if (depth <= DEPTH_THRESHOLD) {
+    while (is_under_root(buf) && strlen(buf) > 1) {
+        if (is_cached(buf)) {
             mark_dirty(buf);
         }
         parent_path(buf, buf, sizeof(buf));
@@ -171,14 +183,19 @@ static void process_dirty_paths(void) {
     }
 
     /* Lock cache for batch update */
-    size_t stored = 0, failed = 0;
+    size_t stored = 0, skipped = 0, failed = 0;
     pthread_mutex_lock(&g_cache_lock);
     for (size_t i = 0; i < count; i++) {
         if (valid[i]) {
-            if (cache_store(paths[i], sizes[i], counts[i])) {
-                stored++;
+            /* Only cache directories with >= FILE_COUNT_THRESHOLD files */
+            if (counts[i] >= FILE_COUNT_THRESHOLD) {
+                if (cache_store(paths[i], sizes[i], counts[i])) {
+                    stored++;
+                } else {
+                    failed++;
+                }
             } else {
-                failed++;
+                skipped++;
             }
         }
         free(paths[i]);
@@ -188,7 +205,8 @@ static void process_dirty_paths(void) {
     }
     pthread_mutex_unlock(&g_cache_lock);
 
-    log_info("processed %zu paths (stored: %zu, failed: %zu)", count, stored, failed);
+    log_info("processed %zu paths (stored: %zu, skipped: %zu, failed: %zu)",
+             count, stored, skipped, failed);
 }
 
 /* Timer thread */
@@ -212,52 +230,112 @@ static void handle_signal(int sig) {
     watch_stop();
 }
 
-/* Initial scan to populate cache for cold start */
-static void initial_scan(const char *path, int depth) {
-    if (atomic_load(&g_shutdown)) return;
-    if (depth > DEPTH_THRESHOLD) return;  /* Don't scan beyond threshold */
+/* Initial scan - single bottom-up pass that computes and caches in one traversal */
+static DirStats initial_scan(const char *path) {
+    DirStats result = {0, 0};
+    if (atomic_load(&g_shutdown)) return result;
 
-    DIR *dir = opendir(path);
-    if (!dir) return;
+    int dirfd = open(path, O_RDONLY | O_DIRECTORY);
+    if (dirfd < 0) return (DirStats){-1, -1};
+
+    DIR *dir = fdopendir(dirfd);
+    if (!dir) {
+        close(dirfd);
+        return (DirStats){-1, -1};
+    }
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
+        if (atomic_load(&g_shutdown)) break;
+
         if (entry->d_name[0] == '.' &&
             (entry->d_name[1] == '\0' ||
              (entry->d_name[1] == '.' && entry->d_name[2] == '\0'))) {
             continue;
         }
 
-        char full[PATH_MAX];
-        snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+        int is_dir = 0;
+        int is_file = 0;
+        off_t file_size = 0;
 
+#ifdef DT_DIR
+        if (entry->d_type == DT_DIR) {
+            is_dir = 1;
+        } else if (entry->d_type == DT_REG) {
+            is_file = 1;
+        } else if (entry->d_type == DT_UNKNOWN) {
+            struct stat st;
+            if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                is_dir = S_ISDIR(st.st_mode);
+                is_file = S_ISREG(st.st_mode);
+                file_size = st.st_size;
+            }
+        }
+#else
         struct stat st;
-        if (lstat(full, &st) != 0) continue;
+        if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            is_dir = S_ISDIR(st.st_mode);
+            is_file = S_ISREG(st.st_mode);
+            file_size = st.st_size;
+        }
+#endif
 
-        if (S_ISDIR(st.st_mode)) {
-            /* Check if already cached (lock not needed - single-threaded at this point) */
-            uint64_t h = fnv1a_hash(full);
-            int found = 0;
-            if (d_cache) {
-                uint32_t idx = h % CACHE_CAPACITY;
-                for (int i = 0; i < MAX_PROBE_DEPTH && !found; i++) {
-                    CacheEntry *e = &d_cache->entries[(idx + i) % CACHE_CAPACITY];
-                    if (e->size == -1) break;
-                    if (e->path_hash == h) found = 1;
+        if (is_file) {
+            /* Need size for regular files */
+            if (file_size == 0) {
+                struct stat st;
+                if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                    file_size = st.st_size;
                 }
             }
-            if (!found) {
-                mark_dirty(full);
-            }
-            initial_scan(full, depth + 1);
+            result.size += file_size;
+            result.file_count++;
+        } else if (is_dir) {
+            char full[PATH_MAX];
+            snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+            DirStats sub = initial_scan(full);
+            if (sub.size >= 0) result.size += sub.size;
+            if (sub.file_count >= 0) result.file_count += sub.file_count;
         }
     }
     closedir(dir);
+
+    /* Cache if meets threshold */
+    if (result.file_count >= FILE_COUNT_THRESHOLD) {
+        pthread_mutex_lock(&g_cache_lock);
+        if (cache_store(path, result.size, result.file_count)) {
+            log_info("cached %s (%ld files)", path, result.file_count);
+        }
+        pthread_mutex_unlock(&g_cache_lock);
+    }
+
+    return result;
 }
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [root]\n", prog);
-    fprintf(stderr, "  root: Directory to watch (default: $HOME)\n");
+    fprintf(stderr, "Usage: %s [root...]\n", prog);
+    fprintf(stderr, "  root: Directories to watch (default: / and $HOME)\n");
+}
+
+/* Add a root directory to watch */
+static int add_root(const char *path) {
+    if (g_root_count >= MAX_ROOTS) {
+        log_error("too many roots (max %d)", MAX_ROOTS);
+        return -1;
+    }
+    if (!realpath(path, g_roots[g_root_count])) {
+        log_warn("realpath failed for %s, skipping", path);
+        return -1;
+    }
+    /* Check for duplicates */
+    for (int i = 0; i < g_root_count; i++) {
+        if (strcmp(g_roots[i], g_roots[g_root_count]) == 0) {
+            return 0;  /* Already added */
+        }
+    }
+    log_info("adding root: %s", g_roots[g_root_count]);
+    g_root_count++;
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -266,27 +344,28 @@ int main(int argc, char *argv[]) {
     omp_set_num_threads(1);
     #endif
 
-    /* Determine root directory */
-    const char *root = getenv("HOME");
+    /* Parse arguments */
+    if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        usage(argv[0]);
+        return 0;
+    }
+
+    /* Add roots from arguments, or use defaults */
     if (argc > 1) {
-        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
-            usage(argv[0]);
-            return 0;
+        for (int i = 1; i < argc; i++) {
+            add_root(argv[i]);
         }
-        root = argv[1];
-    }
-    if (!root) {
-        log_error("no home directory");
-        return 1;
-    }
-
-    /* Resolve to absolute path */
-    if (!realpath(root, g_root)) {
-        log_error("realpath failed: %s", root);
-        return 1;
+    } else {
+        /* Default: / and $HOME */
+        add_root("/");
+        const char *home = getenv("HOME");
+        if (home) add_root(home);
     }
 
-    log_info("watching %s", g_root);
+    if (g_root_count == 0) {
+        log_error("no valid roots to watch");
+        return 1;
+    }
 
     /* Initialize cache */
     if (cache_init() != 0) {
@@ -294,14 +373,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Initial scan to populate cache */
-    log_info("scanning for uncached directories...");
-    initial_scan(g_root, 0);
-    if (g_dirty_count > 0) {
-        log_info("found %zu uncached directories, processing...", g_dirty_count);
-        process_dirty_paths();
-    } else {
-        log_info("cache is up to date");
+    /* Initial scan of all roots */
+    log_info("scanning for large directories (>=%d files)...", FILE_COUNT_THRESHOLD);
+    for (int i = 0; i < g_root_count; i++) {
+        log_info("scanning %s...", g_roots[i]);
+        DirStats stats = initial_scan(g_roots[i]);
+        log_info("  %s: %ld files, %lld bytes", g_roots[i], stats.file_count, (long long)stats.size);
+    }
+    log_info("initial scan complete");
+    if (cache_save() != 0) {
+        log_error("failed to save cache");
     }
 
     /* Set up signal handlers using sigaction for portability */
@@ -312,8 +393,11 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    /* Initialize watcher */
-    if (watch_init(g_root, on_change, NULL) != 0) {
+    /* Initialize watcher for first root (typically HOME for most activity) */
+    /* Note: watching / would generate too many events, so we only watch HOME */
+    const char *watch_root = g_root_count > 1 ? g_roots[1] : g_roots[0];
+    log_info("watching %s for changes", watch_root);
+    if (watch_init(watch_root, on_change, NULL) != 0) {
         log_error("failed to initialize watcher");
         cache_free();
         return 1;
