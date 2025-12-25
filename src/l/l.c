@@ -528,9 +528,10 @@ static FileType detect_file_type(const char *path, struct stat *st,
 
             *symlink_target = xstrdup(abs_target);
 
-            /* Check target type */
+            /* Check target type and use target's stat for display */
             struct stat target_st;
             if (stat(path, &target_st) == 0) {
+                *st = target_st;  /* Use target's stats for size display */
                 if (S_ISDIR(target_st.st_mode)) {
                     return FTYPE_SYMLINK_DIR;
                 } else if (target_st.st_mode & S_IXUSR) {
@@ -1071,12 +1072,14 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         #pragma omp parallel for schedule(dynamic)
         for (size_t i = 0; i < list->count; i++) {
             FileEntry *fe = &list->entries[i];
-            if (fe->type == FTYPE_DIR) {
-                /* Get size and count in single pass */
+            if (fe->type == FTYPE_DIR || fe->type == FTYPE_SYMLINK_DIR) {
+                /* Get size and count in single pass (stat follows symlinks) */
                 DirStats stats = get_dir_stats(fe->path);
                 fe->size = stats.size;
                 fe->file_count = stats.file_count;
-            } else if (fe->type == FTYPE_FILE || fe->type == FTYPE_EXEC) {
+            } else if (fe->type == FTYPE_FILE || fe->type == FTYPE_EXEC ||
+                       fe->type == FTYPE_SYMLINK || fe->type == FTYPE_SYMLINK_EXEC) {
+                /* Count lines in file (stat follows symlinks for size) */
                 fe->line_count = count_file_lines(fe->path);
             }
         }
@@ -1301,13 +1304,14 @@ static TreeNode *build_tree(const char *path, Column *cols,
     root->entry.line_count = -1;
     root->entry.file_count = -1;
 
-    if (cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC)) {
+    if (cfg->long_format && (type == FTYPE_FILE || type == FTYPE_EXEC ||
+                             type == FTYPE_SYMLINK || type == FTYPE_SYMLINK_EXEC)) {
         root->entry.line_count = count_file_lines(abs_path);
     }
 
     root->entry.size = st.st_size;
     /* Size/count computed after children if show_hidden, else compute now */
-    if (cfg->long_format && type == FTYPE_DIR && !cfg->show_hidden) {
+    if (cfg->long_format && (type == FTYPE_DIR || type == FTYPE_SYMLINK_DIR) && !cfg->show_hidden) {
         DirStats stats = get_dir_stats(abs_path);
         root->entry.size = stats.size;
         root->entry.file_count = stats.file_count;
