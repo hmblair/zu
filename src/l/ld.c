@@ -220,7 +220,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    fprintf(stderr, "ld: watching %s\n", g_root);
+    fprintf(stderr, "l-cached: watching %s\n", g_root);
 
     /* Initialize cache */
     if (cache_init() != 0) {
@@ -256,6 +256,6 @@ int main(int argc, char *argv[]) {
     watch_cleanup();
     cache_free();
 
-    fprintf(stderr, "ld: shutdown complete\n");
+    fprintf(stderr, "l-cached: shutdown complete\n");
     return 0;
 }

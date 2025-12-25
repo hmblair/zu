@@ -14,15 +14,19 @@ else
     WATCH_LIBS = -lpthread
 endif
 
-all: l ld
+all: l l-cached link-l-cache
 
 l: l.c cache.h
 	$(CC) $(CFLAGS) $(OMPFLAGS) -o $(BINDIR)/l l.c
 
-ld: ld.c cache.h watch.h $(WATCH_SRC)
-	$(CC) $(CFLAGS) -o $(BINDIR)/ld ld.c $(WATCH_SRC) $(WATCH_LIBS) -lpthread
+l-cached: ld.c cache.h watch.h $(WATCH_SRC)
+	$(CC) $(CFLAGS) -o $(BINDIR)/l-cached ld.c $(WATCH_SRC) $(WATCH_LIBS) -lpthread
+
+link-l-cache:
+	chmod +x l-cache
+	ln -sf ../src/l/l-cache $(BINDIR)/l-cache
 
 clean:
-	rm -f $(BINDIR)/l $(BINDIR)/ld
+	rm -f $(BINDIR)/l $(BINDIR)/l-cached $(BINDIR)/l-cache
 
-.PHONY: all clean
+.PHONY: all clean link-l-cache
