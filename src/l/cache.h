@@ -19,14 +19,11 @@
 #define CACHE_VERSION  1
 #define CACHE_CAPACITY 16384       /* ~512KB file */
 
-#define FLAG_STALE     (1 << 0)
-
 typedef struct {
     uint64_t path_hash;    /* FNV-1a hash of absolute path */
     int64_t  size;         /* Cached size (-1 = empty) */
+    int64_t  file_count;   /* Cached file count (-1 = not computed) */
     int64_t  timestamp;    /* Unix time when computed */
-    uint32_t flags;        /* FLAG_STALE, etc. */
-    uint32_t _reserved;    /* Alignment padding */
 } CacheEntry;              /* 32 bytes */
 
 typedef struct {
@@ -101,7 +98,7 @@ static inline void cache_unload(void) {
     }
 }
 
-/* Lookup a path in the cache. Returns size or -1 if not found/stale. */
+/* Lookup size for a path in the cache. Returns size or -1 if not found. */
 static inline int64_t cache_lookup(const char *path) {
     if (!g_cache) return -1;
 
@@ -112,8 +109,26 @@ static inline int64_t cache_lookup(const char *path) {
     for (int i = 0; i < 32; i++) {
         const CacheEntry *e = &g_cache->entries[(idx + i) % CACHE_CAPACITY];
         if (e->size == -1) return -1;  /* Empty slot = not found */
-        if (e->path_hash == h && !(e->flags & FLAG_STALE)) {
+        if (e->path_hash == h) {
             return e->size;
+        }
+    }
+    return -1;
+}
+
+/* Lookup file count for a path in the cache. Returns count or -1 if not found. */
+static inline int64_t cache_lookup_count(const char *path) {
+    if (!g_cache) return -1;
+
+    uint64_t h = fnv1a_hash(path);
+    uint32_t idx = h % CACHE_CAPACITY;
+
+    /* Linear probe up to 32 slots */
+    for (int i = 0; i < 32; i++) {
+        const CacheEntry *e = &g_cache->entries[(idx + i) % CACHE_CAPACITY];
+        if (e->size == -1) return -1;  /* Empty slot = not found */
+        if (e->path_hash == h) {
+            return e->file_count;
         }
     }
     return -1;
@@ -163,6 +178,7 @@ static inline int cache_init(void) {
     /* Initialize all entries as empty */
     for (uint32_t i = 0; i < CACHE_CAPACITY; i++) {
         d_cache->entries[i].size = -1;
+        d_cache->entries[i].file_count = -1;
     }
 
     return 0;
@@ -174,7 +190,7 @@ static inline void cache_free(void) {
 }
 
 /* Store or update a cache entry */
-static inline void cache_store(const char *path, int64_t size) {
+static inline void cache_store(const char *path, int64_t size, int64_t file_count) {
     if (!d_cache) return;
 
     uint64_t h = fnv1a_hash(path);
@@ -187,8 +203,8 @@ static inline void cache_store(const char *path, int64_t size) {
             if (e->size == -1) d_cache->count++;
             e->path_hash = h;
             e->size = size;
+            e->file_count = file_count;
             e->timestamp = time(NULL);
-            e->flags = 0;
             return;
         }
     }

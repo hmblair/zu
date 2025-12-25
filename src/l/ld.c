@@ -94,12 +94,17 @@ static void on_change(const char *path, void *ctx) {
     }
 }
 
-/* Simple recursive directory size calculation (no parallelization) */
-static off_t get_dir_size(const char *path) {
+/* Compute both size and file count in one pass */
+static void get_dir_stats(const char *path, off_t *size_out, long *count_out) {
     DIR *dir = opendir(path);
-    if (!dir) return 0;
+    if (!dir) {
+        *size_out = 0;
+        *count_out = 0;
+        return;
+    }
 
-    off_t total = 0;
+    off_t total_size = 0;
+    long total_count = 0;
     struct dirent *entry;
 
     while ((entry = readdir(dir)) != NULL) {
@@ -116,14 +121,20 @@ static off_t get_dir_size(const char *path) {
         if (lstat(full, &st) != 0) continue;
 
         if (S_ISDIR(st.st_mode)) {
-            total += get_dir_size(full);
+            off_t sub_size;
+            long sub_count;
+            get_dir_stats(full, &sub_size, &sub_count);
+            total_size += sub_size;
+            total_count += sub_count;
         } else {
-            total += st.st_size;
+            total_size += st.st_size;
+            total_count++;
         }
     }
 
     closedir(dir);
-    return total;
+    *size_out = total_size;
+    *count_out = total_count;
 }
 
 /* Process dirty paths and update cache */
@@ -147,8 +158,10 @@ static void process_dirty_paths(void) {
     for (size_t i = 0; i < count; i++) {
         struct stat st;
         if (stat(paths[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-            off_t size = get_dir_size(paths[i]);
-            cache_store(paths[i], size);
+            off_t size;
+            long file_count;
+            get_dir_stats(paths[i], &size, &file_count);
+            cache_store(paths[i], size, file_count);
         }
         free(paths[i]);
     }

@@ -525,13 +525,19 @@ static long get_file_count_task(const char *path) {
     }
     closedir(dir);
 
-    /* Spawn tasks for subdirectories */
+    /* Spawn tasks for subdirectories (check cache first) */
     long *counts = NULL;
     if (subdir_count > 0) {
         counts = xmalloc(subdir_count * sizeof(long));
         for (size_t i = 0; i < subdir_count; i++) {
-            #pragma omp task shared(counts) firstprivate(i)
-            counts[i] = get_file_count_task(subdirs[i]);
+            /* Check cache before spawning task */
+            int64_t cached = cache_lookup_count(subdirs[i]);
+            if (cached >= 0) {
+                counts[i] = (long)cached;
+            } else {
+                #pragma omp task shared(counts) firstprivate(i)
+                counts[i] = get_file_count_task(subdirs[i]);
+            }
         }
         #pragma omp taskwait
     }
@@ -548,6 +554,10 @@ static long get_file_count_task(const char *path) {
 }
 
 static long get_file_count(const char *path) {
+    /* Check cache first */
+    int64_t cached = cache_lookup_count(path);
+    if (cached >= 0) return (long)cached;
+
     long result;
     #pragma omp parallel
     #pragma omp single
