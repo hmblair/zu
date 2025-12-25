@@ -686,6 +686,10 @@ static int is_binary_file(FILE *f) {
 static int count_file_lines(const char *path) {
     if (has_binary_extension(path)) return -1;
 
+    /* Skip non-regular files (devices, sockets, etc.) - stat follows symlinks */
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+
     FILE *f = fopen(path, "r");
     if (!f) return -1;
 
