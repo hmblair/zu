@@ -1258,8 +1258,8 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
             columns_update_widths(cols, &child->entry);
         }
 
-        /* Recurse into directories */
-        if (child->entry.type == FTYPE_DIR &&
+        /* Recurse into directories (including symlinks to directories) */
+        if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
             build_tree_children(child, depth + 1, cols, git, cfg);
 
@@ -1327,8 +1327,8 @@ static TreeNode *build_tree(const char *path, Column *cols,
         columns_update_widths(cols, &root->entry);
     }
 
-    /* Build children if directory */
-    if (type == FTYPE_DIR) {
+    /* Build children if directory (including symlinks to directories) */
+    if (type == FTYPE_DIR || type == FTYPE_SYMLINK_DIR) {
         build_tree_children(root, 0, cols, git, cfg);
 
         /* Sum children's sizes/counts to get root's total (only if showing all) */
