@@ -14,7 +14,7 @@ _l() {
         '-a[Show hidden files]' \
         '-l[Long format (size, lines, time)]' \
         '(-t --tree)'{-t,--tree}'[Show full tree]' \
-        '--depth[Limit tree depth]:depth:' \
+        '(-d --depth)'{-d,--depth}'[Limit tree depth]:depth:' \
         '--expand-all[Expand all directories (ignore NO_EXPAND list)]' \
         '--list[Flat list output (no tree structure)]' \
         '--no-icons[Hide file/folder/git icons]' \

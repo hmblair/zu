@@ -1488,7 +1488,7 @@ static void print_usage(void) {
     printf("  -a              Show hidden files\n");
     printf("  -s, --short     Short format (no size, lines, time)\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
-    printf("  --depth INT     Limit tree depth\n");
+    printf("  -d, --depth INT Limit tree depth\n");
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
     printf("  --list          Flat list output (no tree structure)\n");
     printf("  --no-icons      Hide file/folder/git icons\n");
@@ -1522,10 +1522,13 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 cfg->long_format = 0;
             } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
                 cfg->max_depth = MAX_DEPTH;
-            } else if (strcmp(arg, "--depth") == 0) {
-                if (i + 1 >= argc) die("--depth requires an argument");
+            } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--depth") == 0) {
+                if (i + 1 >= argc) die("-d/--depth requires an argument");
                 cfg->max_depth = atoi(argv[++i]);
-                if (cfg->max_depth <= 0) die("--depth requires a positive integer");
+                if (cfg->max_depth <= 0) die("-d/--depth requires a positive integer");
+            } else if (strncmp(arg, "-d", 2) == 0 && arg[2] >= '0' && arg[2] <= '9') {
+                cfg->max_depth = atoi(arg + 2);
+                if (cfg->max_depth <= 0) die("-d requires a positive integer");
             } else if (strncmp(arg, "--depth=", 8) == 0) {
                 cfg->max_depth = atoi(arg + 8);
                 if (cfg->max_depth <= 0) die("--depth requires a positive integer");
