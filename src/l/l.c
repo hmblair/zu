@@ -55,6 +55,8 @@
 #define MAX_EXT_ICONS 256
 #define HASH_SIZE 4096
 #define INITIAL_FILE_CAPACITY 64
+#define LINE_COUNT_LIMIT 10000
+#define LINE_COUNT_EXCEEDED -2
 
 /* Tree drawing characters (UTF-8) */
 #define TREE_VERT   "│  "
@@ -356,7 +358,9 @@ static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
 }
 
 static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
-    if (fe->line_count >= 0) {
+    if (fe->line_count == LINE_COUNT_EXCEEDED) {
+        snprintf(buf, len, ">10K");
+    } else if (fe->line_count >= 0) {
         snprintf(buf, len, "%d", fe->line_count);
     } else {
         snprintf(buf, len, "-");
@@ -564,7 +568,13 @@ static int count_file_lines(const char *path) {
     int count = 0;
     int ch;
     while ((ch = fgetc(f)) != EOF) {
-        if (ch == '\n') count++;
+        if (ch == '\n') {
+            count++;
+            if (count > LINE_COUNT_LIMIT) {
+                fclose(f);
+                return LINE_COUNT_EXCEEDED;
+            }
+        }
     }
     fclose(f);
     return count;
