@@ -21,8 +21,8 @@ usage() {
     echo "  status      Show daemon status and cache info"
     echo "  clear       Clear the cache file"
     echo ""
-    echo "The daemon watches ~/ for changes and caches directory sizes"
-    echo "for directories at depth >= 4. Cache is updated every 5 minutes."
+    echo "The daemon scans / and ~/ for large directories (>=2500 files),"
+    echo "watches ~/ for changes, and updates the cache every 5 minutes."
 }
 
 cmd_install() {
@@ -35,13 +35,14 @@ cmd_install() {
     mkdir -p "$CACHE_DIR"
 
     zu_service_create "$PLIST_LABEL" "$DAEMON_PATH" \
-        --args "$HOME" \
+        --args "/" "$HOME" \
         --type "keep_alive" \
         --log "$LOG_FILE" \
         --env "HOME=$HOME" "USER=$USER"
     zu_service_load "$PLIST_LABEL"
 
     success "Daemon installed and started"
+    echo "Scanning: / and $HOME (initial scan may be slow)"
     echo "Watching: $HOME"
     echo "Log: $LOG_FILE"
 }

@@ -565,24 +565,31 @@ static FileType detect_file_type(const char *path, struct stat *st,
         if (len > 0) {
             target[len] = '\0';
 
-            /* Resolve to absolute path */
+            /* Resolve to absolute path and normalize */
             char abs_target[PATH_MAX];
-            if (target[0] != '/') {
-                char dir[PATH_MAX];
-                strncpy(dir, path, PATH_MAX - 1);
-                char *slash = strrchr(dir, '/');
-                if (slash) {
-                    slash[1] = '\0';
-                    snprintf(abs_target, PATH_MAX, "%s%s", dir, target);
+            if (realpath(path, abs_target) != NULL) {
+                /* realpath resolves the symlink to its final target */
+                *symlink_target = xstrdup(abs_target);
+            } else {
+                /* Fallback: manually build absolute path */
+                if (target[0] != '/') {
+                    char dir[PATH_MAX];
+                    strncpy(dir, path, PATH_MAX - 1);
+                    dir[PATH_MAX - 1] = '\0';
+                    char *slash = strrchr(dir, '/');
+                    if (slash) {
+                        slash[1] = '\0';
+                        snprintf(abs_target, PATH_MAX, "%s%s", dir, target);
+                    } else {
+                        strncpy(abs_target, target, PATH_MAX - 1);
+                        abs_target[PATH_MAX - 1] = '\0';
+                    }
                 } else {
                     strncpy(abs_target, target, PATH_MAX - 1);
+                    abs_target[PATH_MAX - 1] = '\0';
                 }
-            } else {
-                strncpy(abs_target, target, PATH_MAX - 1);
+                *symlink_target = xstrdup(abs_target);
             }
-            abs_target[PATH_MAX - 1] = '\0';
-
-            *symlink_target = xstrdup(abs_target);
 
             /* Check target type and use target's stat for display */
             struct stat target_st;
