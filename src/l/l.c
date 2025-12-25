@@ -57,6 +57,7 @@
 #define INITIAL_FILE_CAPACITY 64
 #define LINE_COUNT_LIMIT 10000
 #define LINE_COUNT_EXCEEDED -2
+#define SIZE_LIMIT (1LL << 30)  /* 1GB */
 
 /* Tree drawing characters (UTF-8) */
 #define TREE_VERT   "│  "
@@ -365,6 +366,8 @@ static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
         } else {
             snprintf(buf, len, "%ld", fe->file_count);
         }
+    } else if (fe->size >= SIZE_LIMIT) {
+        snprintf(buf, len, ">1G");
     } else {
         format_size(fe->size, buf, len);
     }
@@ -410,7 +413,10 @@ static void columns_update_widths(Column *cols, const FileEntry *fe) {
 }
 
 /* Calculate recursive directory size using OMP tasks for work stealing */
-static off_t get_dir_size_task(const char *path) {
+static off_t get_dir_size_task(const char *path, off_t *global_total) {
+    /* Check if we've already exceeded the limit */
+    if (*global_total >= SIZE_LIMIT) return 0;
+
     DIR *dir = opendir(path);
     if (!dir) return 0;
 
@@ -443,36 +449,48 @@ static off_t get_dir_size_task(const char *path) {
     }
     closedir(dir);
 
+    /* Update global total with files */
+    #pragma omp atomic
+    *global_total += file_total;
+
     /* Spawn tasks for subdirectories */
     off_t *sizes = NULL;
-    if (subdir_count > 0) {
+    if (subdir_count > 0 && *global_total < SIZE_LIMIT) {
         sizes = xmalloc(subdir_count * sizeof(off_t));
         for (size_t i = 0; i < subdir_count; i++) {
-            #pragma omp task shared(sizes) firstprivate(i)
-            sizes[i] = get_dir_size_task(subdirs[i]);
+            #pragma omp task shared(sizes, global_total) firstprivate(i)
+            sizes[i] = get_dir_size_task(subdirs[i], global_total);
         }
         #pragma omp taskwait
     }
 
     /* Sum results */
     off_t dir_total = 0;
+    if (sizes) {
+        for (size_t i = 0; i < subdir_count; i++) {
+            dir_total += sizes[i];
+        }
+        free(sizes);
+    }
+    /* Always free subdirs */
     for (size_t i = 0; i < subdir_count; i++) {
-        dir_total += sizes[i];
         free(subdirs[i]);
     }
     free(subdirs);
-    free(sizes);
 
     return file_total + dir_total;
 }
 
 static off_t get_dir_size(const char *path) {
     off_t result;
+    off_t global_total = 0;
     #pragma omp parallel
     #pragma omp single
     {
-        result = get_dir_size_task(path);
+        result = get_dir_size_task(path, &global_total);
     }
+    /* Cap at SIZE_LIMIT */
+    if (result >= SIZE_LIMIT) result = SIZE_LIMIT;
     return result;
 }
 
