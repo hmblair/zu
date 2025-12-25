@@ -32,7 +32,7 @@
 #endif
 
 #define UPDATE_INTERVAL 300  /* 5 minutes */
-#define FILE_COUNT_THRESHOLD 2500  /* Cache directories with >= this many files */
+#define FILE_COUNT_THRESHOLD 1000  /* Cache directories with >= this many files */
 #define MAX_DIRTY_PATHS 65536
 #define MAX_PROBE_DEPTH 32   /* Hash table probe limit */
 #define MAX_ROOTS 8          /* Maximum watched directories */
@@ -238,7 +238,7 @@ static int is_git_dir(const char *path) {
 }
 
 /* Initial scan - single bottom-up pass that computes and caches in one traversal */
-static DirStats initial_scan(const char *path) {
+static DirStats initial_scan_impl(const char *path, dev_t root_dev) {
     DirStats result = {0, 0};
     if (atomic_load(&g_shutdown)) return result;
 
@@ -247,6 +247,20 @@ static DirStats initial_scan(const char *path) {
 
     int dirfd = open(path, O_RDONLY | O_DIRECTORY);
     if (dirfd < 0) return (DirStats){-1, -1};
+
+    /* Get device ID to detect filesystem boundaries */
+    struct stat dir_st;
+    if (fstat(dirfd, &dir_st) != 0) {
+        close(dirfd);
+        return (DirStats){-1, -1};
+    }
+    if (root_dev == 0) {
+        root_dev = dir_st.st_dev;
+    } else if (dir_st.st_dev != root_dev) {
+        /* Different filesystem - skip to avoid double-counting */
+        close(dirfd);
+        return (DirStats){0, 0};
+    }
 
     DIR *dir = fdopendir(dirfd);
     if (!dir) {
@@ -303,7 +317,7 @@ static DirStats initial_scan(const char *path) {
         } else if (is_dir) {
             char full[PATH_MAX];
             snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
-            DirStats sub = initial_scan(full);
+            DirStats sub = initial_scan_impl(full, root_dev);
             if (sub.size >= 0) result.size += sub.size;
             if (sub.file_count >= 0 && !skip_file_count) result.file_count += sub.file_count;
         }
@@ -322,6 +336,11 @@ static DirStats initial_scan(const char *path) {
     }
 
     return result;
+}
+
+/* Public wrapper - starts with root_dev=0 to determine filesystem from path */
+static DirStats initial_scan(const char *path) {
+    return initial_scan_impl(path, 0);
 }
 
 static void usage(const char *prog) {
