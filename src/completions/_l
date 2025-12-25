@@ -1,5 +1,14 @@
 #compdef l
 
+_l_files() {
+    # If -a is on the command line, complete hidden files too
+    # Match -a alone or combined flags like -at, -asl, etc.
+    if [[ ${words[(I)-*a*]} -gt 0 ]]; then
+        setopt localoptions GLOB_DOTS
+    fi
+    _files
+}
+
 _l() {
     _arguments -s \
         '-a[Show hidden files]' \
@@ -15,7 +24,7 @@ _l() {
         '-N[Sort by name (alphabetical)]' \
         '-r[Reverse sort order]' \
         '(-h --help)'{-h,--help}'[Show help message]' \
-        '*:file or directory:_files'
+        '*:file or directory:_l_files'
 }
 
 _l "$@"
