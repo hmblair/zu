@@ -26,7 +26,6 @@
 
 #define UPDATE_INTERVAL 300  /* 5 minutes */
 #define DEPTH_THRESHOLD 4
-#define SIZE_LIMIT (1LL << 30)  /* 1GB - stop calculating beyond this */
 #define MAX_DIRTY_PATHS 8192
 
 /* Dirty paths that need recalculation */
@@ -96,9 +95,7 @@ static void on_change(const char *path, void *ctx) {
 }
 
 /* Simple recursive directory size calculation (no parallelization) */
-static off_t calc_dir_size(const char *path, off_t *running_total) {
-    if (*running_total >= SIZE_LIMIT) return 0;
-
+static off_t get_dir_size(const char *path) {
     DIR *dir = opendir(path);
     if (!dir) return 0;
 
@@ -119,23 +116,14 @@ static off_t calc_dir_size(const char *path, off_t *running_total) {
         if (lstat(full, &st) != 0) continue;
 
         if (S_ISDIR(st.st_mode)) {
-            total += calc_dir_size(full, running_total);
+            total += get_dir_size(full);
         } else {
             total += st.st_size;
-            *running_total += st.st_size;
         }
-
-        if (*running_total >= SIZE_LIMIT) break;
     }
 
     closedir(dir);
     return total;
-}
-
-static off_t get_dir_size(const char *path) {
-    off_t running = 0;
-    off_t size = calc_dir_size(path, &running);
-    return (size >= SIZE_LIMIT) ? SIZE_LIMIT : size;
 }
 
 /* Process dirty paths and update cache */
