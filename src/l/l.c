@@ -280,13 +280,54 @@ static int get_realpath(const char *path, char *resolved, const Config *cfg) {
     return 0;
 }
 
-/* Get absolute path WITHOUT resolving symlinks */
+/* Get absolute path WITHOUT resolving symlinks, but normalize . and .. */
 static void get_abspath(const char *path, char *resolved, const Config *cfg) {
+    char tmp[PATH_MAX];
+
+    /* Make absolute */
     if (path[0] == '/') {
-        strncpy(resolved, path, PATH_MAX - 1);
-        resolved[PATH_MAX - 1] = '\0';
+        strncpy(tmp, path, PATH_MAX - 1);
+        tmp[PATH_MAX - 1] = '\0';
     } else {
-        snprintf(resolved, PATH_MAX, "%s/%s", cfg->cwd, path);
+        snprintf(tmp, PATH_MAX, "%s/%s", cfg->cwd, path);
+    }
+
+    /* Normalize . and .. components */
+    char *components[PATH_MAX / 2];
+    int depth = 0;
+
+    char *p = tmp;
+    while (*p) {
+        while (*p == '/') p++;  /* Skip slashes */
+        if (*p == '\0') break;
+
+        char *start = p;
+        while (*p && *p != '/') p++;  /* Find end of component */
+
+        size_t len = (size_t)(p - start);
+        if (len == 1 && start[0] == '.') {
+            /* Skip . */
+            continue;
+        } else if (len == 2 && start[0] == '.' && start[1] == '.') {
+            /* Go up for .. */
+            if (depth > 0) depth--;
+        } else {
+            /* Save component */
+            components[depth] = start;
+            if (*p) *p++ = '\0';  /* Null-terminate */
+            depth++;
+        }
+    }
+
+    /* Rebuild path */
+    if (depth == 0) {
+        strcpy(resolved, "/");
+    } else {
+        resolved[0] = '\0';
+        for (int i = 0; i < depth; i++) {
+            strcat(resolved, "/");
+            strcat(resolved, components[i]);
+        }
     }
 }
 
