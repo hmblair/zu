@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -61,6 +62,7 @@
 #define LINE_COUNT_EXCEEDED -2
 #define READ_BUFFER_SIZE 65536
 #define BINARY_CHECK_SIZE 512
+#define TOML_LINE_MAX 256
 
 /* Tree drawing characters (UTF-8) */
 #define TREE_VERT   "│  "
@@ -77,11 +79,16 @@ static const char *COLOR_RED        = "\033[0;31m";
 static const char *COLOR_GREEN      = "\033[0;32m";
 static const char *COLOR_YELLOW     = "\033[0;33m";
 static const char *COLOR_BLUE       = "\033[0;34m";
+static const char *COLOR_MAGENTA    = "\033[0;35m";
 static const char *COLOR_CYAN       = "\033[0;36m";
 static const char *COLOR_GREY       = "\033[90m";
 static const char *COLOR_WHITE      = "\033[0;37m";
 static const char *COLOR_YELLOW_BOLD = "\033[1;33m";
 static const char *STYLE_ITALIC     = "\033[3m";
+
+/* Helper macros for conditional coloring */
+#define CLR(cfg, c) ((cfg)->is_tty ? (c) : "")
+#define RST(cfg)    ((cfg)->is_tty ? COLOR_RESET : "")
 
 /* ============================================================================
  * Data Structures
@@ -99,9 +106,15 @@ typedef enum {
     FTYPE_DIR,
     FTYPE_FILE,
     FTYPE_EXEC,
+    FTYPE_DEVICE,
+    FTYPE_SOCKET,
+    FTYPE_FIFO,
     FTYPE_SYMLINK,
     FTYPE_SYMLINK_DIR,
     FTYPE_SYMLINK_EXEC,
+    FTYPE_SYMLINK_DEVICE,
+    FTYPE_SYMLINK_SOCKET,
+    FTYPE_SYMLINK_FIFO,
     FTYPE_SYMLINK_BROKEN
 } FileType;
 
@@ -155,6 +168,9 @@ typedef struct {
     char current_dir[MAX_ICON_LEN];
     char locked_dir[MAX_ICON_LEN];
     char executable[MAX_ICON_LEN];
+    char device[MAX_ICON_LEN];
+    char socket[MAX_ICON_LEN];
+    char fifo[MAX_ICON_LEN];
     char file[MAX_ICON_LEN];
     char git_modified[MAX_ICON_LEN];
     char git_untracked[MAX_ICON_LEN];
@@ -604,8 +620,16 @@ static FileType detect_file_type(const char *path, struct stat *st,
                 *st = target_st;  /* Use target's stats for size display */
                 if (S_ISDIR(target_st.st_mode)) {
                     return FTYPE_SYMLINK_DIR;
-                } else if (target_st.st_mode & S_IXUSR) {
+                } else if (S_ISCHR(target_st.st_mode) || S_ISBLK(target_st.st_mode)) {
+                    return FTYPE_SYMLINK_DEVICE;
+                } else if (S_ISSOCK(target_st.st_mode)) {
+                    return FTYPE_SYMLINK_SOCKET;
+                } else if (S_ISFIFO(target_st.st_mode)) {
+                    return FTYPE_SYMLINK_FIFO;
+                } else if (S_ISREG(target_st.st_mode) && (target_st.st_mode & S_IXUSR)) {
                     return FTYPE_SYMLINK_EXEC;
+                } else if (S_ISREG(target_st.st_mode)) {
+                    return FTYPE_SYMLINK;
                 } else {
                     return FTYPE_SYMLINK;
                 }
@@ -617,8 +641,13 @@ static FileType detect_file_type(const char *path, struct stat *st,
         }
     } else if (S_ISDIR(lst.st_mode)) {
         return FTYPE_DIR;
+    } else if (S_ISCHR(lst.st_mode) || S_ISBLK(lst.st_mode)) {
+        return FTYPE_DEVICE;
+    } else if (S_ISSOCK(lst.st_mode)) {
+        return FTYPE_SOCKET;
+    } else if (S_ISFIFO(lst.st_mode)) {
+        return FTYPE_FIFO;
     } else if (!S_ISREG(lst.st_mode)) {
-        /* Device files, sockets, FIFOs, etc. */
         return FTYPE_UNKNOWN;
     } else if (lst.st_mode & S_IXUSR) {
         return FTYPE_EXEC;
@@ -636,13 +665,19 @@ static const char *get_file_color(FileType type, int is_cwd, int is_ignored,
     if (is_ignored) return COLOR_GREY;
 
     switch (type) {
-        case FTYPE_DIR:           return COLOR_BLUE;
-        case FTYPE_EXEC:          return COLOR_GREEN;
-        case FTYPE_SYMLINK:       return COLOR_WHITE;
-        case FTYPE_SYMLINK_DIR:   return COLOR_CYAN;
-        case FTYPE_SYMLINK_EXEC:  return COLOR_GREEN;
+        case FTYPE_DIR:            return COLOR_BLUE;
+        case FTYPE_EXEC:           return COLOR_GREEN;
+        case FTYPE_DEVICE:         return COLOR_YELLOW;
+        case FTYPE_SOCKET:         return COLOR_MAGENTA;
+        case FTYPE_FIFO:           return COLOR_MAGENTA;
+        case FTYPE_SYMLINK:        return COLOR_WHITE;
+        case FTYPE_SYMLINK_DIR:    return COLOR_CYAN;
+        case FTYPE_SYMLINK_EXEC:   return COLOR_GREEN;
+        case FTYPE_SYMLINK_DEVICE: return COLOR_YELLOW;
+        case FTYPE_SYMLINK_SOCKET: return COLOR_MAGENTA;
+        case FTYPE_SYMLINK_FIFO:   return COLOR_MAGENTA;
         case FTYPE_SYMLINK_BROKEN: return COLOR_RED;
-        default:                  return COLOR_WHITE;
+        default:                   return COLOR_WHITE;
     }
 }
 
@@ -686,10 +721,6 @@ static int is_binary_file(FILE *f) {
 static int count_file_lines(const char *path) {
     if (has_binary_extension(path)) return -1;
 
-    /* Skip non-regular files (devices, sockets, etc.) - stat follows symlinks */
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
-
     FILE *f = fopen(path, "r");
     if (!f) return -1;
 
@@ -722,24 +753,41 @@ static int count_file_lines(const char *path) {
 
 static void icons_init_defaults(Icons *icons) {
     memset(icons, 0, sizeof(Icons));
-    /* Default icons (Nerd Font) */
-    strcpy(icons->default_icon, "");
-    strcpy(icons->symlink, "");
-    strcpy(icons->directory, "");
-    strcpy(icons->current_dir, "");
-    strcpy(icons->locked_dir, "󰉐");
-    strcpy(icons->file, "");
-    strcpy(icons->executable, "");
-    strcpy(icons->symlink_dir, "");
-    strcpy(icons->symlink_exec, "");
-    strcpy(icons->symlink_file, "");
-    strcpy(icons->symlink_broken, "");
-    strcpy(icons->git_modified, "");
-    strcpy(icons->git_untracked, "󰛑");
-    strcpy(icons->git_staged, "");
-    strcpy(icons->git_deleted, "");
-    strcpy(icons->readonly, "");
-    icons->ext_count = 0;
+}
+
+/* Lookup table for icon key -> struct offset mapping */
+static const struct { const char *key; size_t offset; } icon_keys[] = {
+    { "default",        offsetof(Icons, default_icon) },
+    { "directory",      offsetof(Icons, directory) },
+    { "current_dir",    offsetof(Icons, current_dir) },
+    { "locked_dir",     offsetof(Icons, locked_dir) },
+    { "file",           offsetof(Icons, file) },
+    { "executable",     offsetof(Icons, executable) },
+    { "device",         offsetof(Icons, device) },
+    { "socket",         offsetof(Icons, socket) },
+    { "fifo",           offsetof(Icons, fifo) },
+    { "symlink",        offsetof(Icons, symlink) },
+    { "symlink_dir",    offsetof(Icons, symlink_dir) },
+    { "symlink_exec",   offsetof(Icons, symlink_exec) },
+    { "symlink_file",   offsetof(Icons, symlink_file) },
+    { "symlink_broken", offsetof(Icons, symlink_broken) },
+    { "git_modified",   offsetof(Icons, git_modified) },
+    { "git_untracked",  offsetof(Icons, git_untracked) },
+    { "git_staged",     offsetof(Icons, git_staged) },
+    { "git_deleted",    offsetof(Icons, git_deleted) },
+    { "readonly",       offsetof(Icons, readonly) },
+    { NULL, 0 }
+};
+
+static void icons_set(Icons *icons, const char *key, const char *value) {
+    for (int i = 0; icon_keys[i].key; i++) {
+        if (strcmp(key, icon_keys[i].key) == 0) {
+            char *dest = (char *)icons + icon_keys[i].offset;
+            strncpy(dest, value, MAX_ICON_LEN - 1);
+            dest[MAX_ICON_LEN - 1] = '\0';
+            return;
+        }
+    }
 }
 
 static int parse_toml_line(const char *line, char *key, size_t key_len,
@@ -790,7 +838,7 @@ static void icons_load(Icons *icons, const char *script_dir) {
     FILE *f = fopen(path, "r");
     if (!f) return;
 
-    char line[256];
+    char line[TOML_LINE_MAX];
     char key[64], value[MAX_ICON_LEN];
     int in_extensions = 0;
 
@@ -816,22 +864,7 @@ static void icons_load(Icons *icons, const char *script_dir) {
                 icons->ext_count++;
             }
         } else {
-            if (strcmp(key, "default") == 0) strcpy(icons->default_icon, value);
-            else if (strcmp(key, "directory") == 0) strcpy(icons->directory, value);
-            else if (strcmp(key, "current_dir") == 0) strcpy(icons->current_dir, value);
-            else if (strcmp(key, "locked_dir") == 0) strcpy(icons->locked_dir, value);
-            else if (strcmp(key, "file") == 0) strcpy(icons->file, value);
-            else if (strcmp(key, "executable") == 0) strcpy(icons->executable, value);
-            else if (strcmp(key, "symlink") == 0) strcpy(icons->symlink, value);
-            else if (strcmp(key, "symlink_dir") == 0) strcpy(icons->symlink_dir, value);
-            else if (strcmp(key, "symlink_exec") == 0) strcpy(icons->symlink_exec, value);
-            else if (strcmp(key, "symlink_file") == 0) strcpy(icons->symlink_file, value);
-            else if (strcmp(key, "symlink_broken") == 0) strcpy(icons->symlink_broken, value);
-            else if (strcmp(key, "git_modified") == 0) strcpy(icons->git_modified, value);
-            else if (strcmp(key, "git_untracked") == 0) strcpy(icons->git_untracked, value);
-            else if (strcmp(key, "git_staged") == 0) strcpy(icons->git_staged, value);
-            else if (strcmp(key, "git_deleted") == 0) strcpy(icons->git_deleted, value);
-            else if (strcmp(key, "readonly") == 0) strcpy(icons->readonly, value);
+            icons_set(icons, key, value);
         }
     }
 
@@ -852,10 +885,10 @@ static const char *get_ext_icon(const Icons *icons, const char *name) {
 }
 
 static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
-                            int is_unreadable, const char *name) {
+                            int is_locked, const char *name) {
     switch (type) {
         case FTYPE_DIR:
-            if (is_unreadable) return icons->locked_dir;
+            if (is_locked) return icons->locked_dir;
             return is_cwd ? icons->current_dir : icons->directory;
         case FTYPE_FILE: {
             const char *ext_icon = get_ext_icon(icons, name);
@@ -863,12 +896,24 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
         }
         case FTYPE_EXEC:
             return icons->executable;
+        case FTYPE_DEVICE:
+            return icons->device;
+        case FTYPE_SOCKET:
+            return icons->socket;
+        case FTYPE_FIFO:
+            return icons->fifo;
         case FTYPE_SYMLINK:
             return icons->symlink_file[0] ? icons->symlink_file : icons->symlink;
         case FTYPE_SYMLINK_DIR:
             return icons->symlink_dir[0] ? icons->symlink_dir : icons->symlink;
         case FTYPE_SYMLINK_EXEC:
             return icons->symlink_exec[0] ? icons->symlink_exec : icons->symlink;
+        case FTYPE_SYMLINK_DEVICE:
+            return icons->device;
+        case FTYPE_SYMLINK_SOCKET:
+            return icons->socket;
+        case FTYPE_SYMLINK_FIFO:
+            return icons->fifo;
         case FTYPE_SYMLINK_BROKEN:
             return icons->symlink_broken[0] ? icons->symlink_broken : icons->symlink;
         case FTYPE_UNKNOWN:
@@ -1033,23 +1078,19 @@ static const char *get_git_indicator(GitCache *cache, const char *path,
         return indicator;
     } else if (strcmp(status, "??") == 0) {
         snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 cfg->is_tty ? COLOR_RED : "", icons->git_untracked,
-                 cfg->is_tty ? COLOR_RESET : "");
+                 CLR(cfg, COLOR_RED), icons->git_untracked, RST(cfg));
     } else if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
         /* Staged */
         snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 cfg->is_tty ? COLOR_YELLOW : "", icons->git_staged,
-                 cfg->is_tty ? COLOR_RESET : "");
+                 CLR(cfg, COLOR_YELLOW), icons->git_staged, RST(cfg));
     } else if (status[1] == 'M') {
         /* Modified */
         snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 cfg->is_tty ? COLOR_RED : "", icons->git_modified,
-                 cfg->is_tty ? COLOR_RESET : "");
+                 CLR(cfg, COLOR_RED), icons->git_modified, RST(cfg));
     } else if (status[1] == 'D') {
         /* Deleted */
         snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 cfg->is_tty ? COLOR_RED : "", icons->git_deleted,
-                 cfg->is_tty ? COLOR_RESET : "");
+                 CLR(cfg, COLOR_RED), icons->git_deleted, RST(cfg));
     }
 
     return indicator;
@@ -1225,19 +1266,18 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
         char buf[32];
         for (int i = 0; i < NUM_COLUMNS; i++) {
             ctx->columns[i].format(fe, buf, sizeof(buf));
-            printf("%s%*s%s  ", ctx->cfg->is_tty ? COLOR_GREY : "",
-                   ctx->columns[i].width, buf,
-                   ctx->cfg->is_tty ? COLOR_RESET : "");
+            printf("%s%*s%s  ", CLR(ctx->cfg, COLOR_GREY), ctx->columns[i].width, buf, RST(ctx->cfg));
         }
     }
 
     /* Print tree prefix */
     print_prefix(depth, ctx->continuation, ctx->cfg);
 
-    /* Readonly indicator */
-    if (!ctx->cfg->no_icons && access(fe->path, W_OK) != 0 && access(fe->path, R_OK) == 0) {
-        printf("%s%s%s ", ctx->cfg->is_tty ? COLOR_YELLOW : "",
-               ctx->icons->readonly, ctx->cfg->is_tty ? COLOR_RESET : "");
+    /* Readonly indicator (files only - directories use locked_dir icon) */
+    int is_readonly = (access(fe->path, W_OK) != 0 && access(fe->path, R_OK) == 0);
+    int is_dir = (fe->type == FTYPE_DIR || fe->type == FTYPE_SYMLINK_DIR);
+    if (!ctx->cfg->no_icons && is_readonly && !is_dir) {
+        printf("%s%s%s ", CLR(ctx->cfg, COLOR_YELLOW), ctx->icons->readonly, RST(ctx->cfg));
     }
 
     /* Git indicator */
@@ -1245,31 +1285,30 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
     printf("%s", git_ind);
 
     /* Color and style */
-    int is_unreadable = (fe->type == FTYPE_DIR && fe->size < 0);
-    const char *color = is_unreadable && ctx->cfg->is_tty ? COLOR_RED :
+    int is_locked = (fe->type == FTYPE_DIR && (fe->size < 0 || is_readonly));
+    const char *color = (fe->type == FTYPE_DIR && fe->size < 0) ? CLR(ctx->cfg, COLOR_RED) :
                         get_file_color(fe->type, is_cwd, fe->is_ignored, ctx->cfg);
-    const char *style = (is_hidden && ctx->cfg->is_tty) ? STYLE_ITALIC : "";
+    const char *style = is_hidden ? CLR(ctx->cfg, STYLE_ITALIC) : "";
 
     /* Icon */
     if (!ctx->cfg->no_icons) {
-        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, is_unreadable, fe->name), COLOR_RESET);
+        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, is_locked, fe->name), RST(ctx->cfg));
     }
 
     /* Filename (full path in list mode) */
     if (ctx->cfg->list_mode) {
         char abbrev[PATH_MAX];
         abbreviate_home(abs_path, abbrev, sizeof(abbrev), ctx->cfg);
-        printf("%s%s%s%s", color, style, abbrev, ctx->cfg->is_tty ? COLOR_RESET : "");
+        printf("%s%s%s%s", color, style, abbrev, RST(ctx->cfg));
     } else {
-        printf("%s%s%s%s", color, style, fe->name, ctx->cfg->is_tty ? COLOR_RESET : "");
+        printf("%s%s%s%s", color, style, fe->name, RST(ctx->cfg));
     }
 
     /* Symlink target */
     if (fe->symlink_target) {
         char abbrev[PATH_MAX];
         abbreviate_home(fe->symlink_target, abbrev, sizeof(abbrev), ctx->cfg);
-        printf(" %s %s%s%s",
-               ctx->icons->symlink, color, abbrev, ctx->cfg->is_tty ? COLOR_RESET : "");
+        printf(" %s %s%s%s", ctx->icons->symlink, color, abbrev, RST(ctx->cfg));
     }
 
     printf("\n");
@@ -1579,13 +1618,13 @@ static void parse_args(int argc, char **argv, Config *cfg,
                         case 'h': print_usage(); exit(0);
                         default:
                             fprintf(stderr, "%sError:%s Unknown option: -%c\n",
-                                    cfg->is_tty ? COLOR_RED : "", cfg->is_tty ? COLOR_RESET : "", arg[j]);
+                                    CLR(cfg, COLOR_RED), RST(cfg), arg[j]);
                             exit(1);
                     }
                 }
             } else {
                 fprintf(stderr, "%sError:%s Unknown option: %s\n",
-                        cfg->is_tty ? COLOR_RED : "", cfg->is_tty ? COLOR_RESET : "", arg);
+                        CLR(cfg, COLOR_RED), RST(cfg), arg);
                 exit(1);
             }
         } else {
@@ -1642,7 +1681,7 @@ int main(int argc, char **argv) {
     char *cwd_check = getcwd(NULL, 0);
     if (cwd_check == NULL) {
         fprintf(stderr, "%sError:%s Current directory no longer exists\n",
-                cfg.is_tty ? COLOR_RED : "", cfg.is_tty ? COLOR_RESET : "");
+                CLR(&cfg, COLOR_RED), RST(&cfg));
         return 1;
     }
     free(cwd_check);
@@ -1665,8 +1704,7 @@ int main(int argc, char **argv) {
         struct stat st;
         if (stat(dirs[i], &st) != 0) {
             fprintf(stderr, "%sError:%s '%s' does not exist\n",
-                    cfg.is_tty ? COLOR_RED : "", cfg.is_tty ? COLOR_RESET : "",
-                    dirs[i]);
+                    CLR(&cfg, COLOR_RED), RST(&cfg), dirs[i]);
             return 1;
         }
     }
