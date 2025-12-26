@@ -284,6 +284,19 @@ static inline void cache_free(void) {
     d_cache = NULL;
 }
 
+/* Lookup a cache entry in daemon's in-memory cache. Returns pointer or NULL. */
+static inline const CacheEntry *dcache_lookup_entry(const char *path) {
+    if (!d_cache) return NULL;
+    uint64_t h = fnv1a_hash(path);
+    uint32_t idx = h % CACHE_CAPACITY;
+    for (int i = 0; i < MAX_PROBE_DEPTH; i++) {
+        const CacheEntry *e = &d_cache->entries[(idx + i) % CACHE_CAPACITY];
+        if (e->size == -1) return NULL;
+        if (e->path_hash == h) return e;
+    }
+    return NULL;
+}
+
 /* Store or update a cache entry. Returns 0 on success, -1 if table full. */
 static inline int cache_store(const char *path, int64_t size, int64_t file_count) {
     if (!d_cache) return -1;

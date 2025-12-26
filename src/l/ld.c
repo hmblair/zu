@@ -363,9 +363,22 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev, int root_idx
             } else {
                 snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
             }
-            /* Skip paths that cause double-counting (macOS firmlinks or other roots) */
+            /* Skip paths that cause double-counting (macOS firmlinks) */
             if (ds_skip_path(full)) continue;
-            if (is_other_root(full, root_idx)) continue;
+
+            /* For other roots, use cached size instead of re-scanning */
+            if (is_other_root(full, root_idx)) {
+                pthread_mutex_lock(&g_cache_lock);
+                const CacheEntry *cached = dcache_lookup_entry(full);
+                if (cached && cached->size >= 0) {
+                    result.size += cached->size;
+                    if (!skip_file_count && cached->file_count >= 0)
+                        result.file_count += cached->file_count;
+                }
+                pthread_mutex_unlock(&g_cache_lock);
+                continue;
+            }
+
             DirStats sub = initial_scan_impl(full, root_dev, root_idx);
             if (sub.size >= 0) result.size += sub.size;
             if (sub.file_count >= 0 && !skip_file_count) result.file_count += sub.file_count;
@@ -453,9 +466,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Initial scan of all roots */
+    /* Initial scan of all roots (reverse order so home is cached before root) */
     log_info("scanning for large directories (>=%d files)...", FILE_COUNT_THRESHOLD);
-    for (int i = 0; i < g_root_count; i++) {
+    for (int i = g_root_count - 1; i >= 0; i--) {
         log_info("scanning %s...", g_roots[i]);
         DirStats stats = initial_scan(g_roots[i], i);
         log_info("  %s: %ld files, %lld bytes", g_roots[i], stats.file_count, (long long)stats.size);

@@ -50,11 +50,12 @@ static inline int ds_is_git_dir(const char *path) {
 /* Check if path should be skipped to avoid double-counting.
  * On macOS APFS, firmlinks share the same st_dev, so we must check paths explicitly. */
 static inline int ds_skip_path(const char *path) {
-    /* /System/Volumes contains Data, Preboot, VM - causes double-counting via firmlinks */
-    if (strncmp(path, "/System/Volumes", 15) == 0 &&
-        (path[15] == '/' || path[15] == '\0')) return 1;
-    if (strncmp(path, "//System/Volumes", 16) == 0 &&
-        (path[16] == '/' || path[16] == '\0')) return 1;
+    /* Only skip /System/Volumes/Data - it's firmlinked and would cause double-counting.
+     * Other volumes like Preboot, VM, Update are real storage and should be counted. */
+    if (strncmp(path, "/System/Volumes/Data", 20) == 0 &&
+        (path[20] == '/' || path[20] == '\0')) return 1;
+    if (strncmp(path, "//System/Volumes/Data", 21) == 0 &&
+        (path[21] == '/' || path[21] == '\0')) return 1;
     return 0;
 }
 
