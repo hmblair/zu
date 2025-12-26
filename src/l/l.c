@@ -458,18 +458,22 @@ static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
     if (fe->file_count >= 0) {
         /* Directory: show file count */
         if (fe->file_count >= 1000000) {
-            snprintf(buf, len, "%.1fM", fe->file_count / 1000000.0);
+            double m = fe->file_count / 1000000.0;
+            snprintf(buf, len, m < 10 ? "%.1fM" : "%.0fM", m);
         } else if (fe->file_count >= 1000) {
-            snprintf(buf, len, "%.1fK", fe->file_count / 1000.0);
+            double k = fe->file_count / 1000.0;
+            snprintf(buf, len, k < 10 ? "%.1fK" : "%.0fK", k);
         } else {
             snprintf(buf, len, "%ld", fe->file_count);
         }
     } else if (fe->line_count == LINE_COUNT_EXCEEDED) {
         snprintf(buf, len, ">1M");
     } else if (fe->line_count >= 1000000) {
-        snprintf(buf, len, "%.1fM", fe->line_count / 1000000.0);
+        double m = fe->line_count / 1000000.0;
+        snprintf(buf, len, m < 10 ? "%.1fM" : "%.0fM", m);
     } else if (fe->line_count >= 1000) {
-        snprintf(buf, len, "%.1fK", fe->line_count / 1000.0);
+        double k = fe->line_count / 1000.0;
+        snprintf(buf, len, k < 10 ? "%.1fK" : "%.0fK", k);
     } else if (fe->line_count >= 0) {
         snprintf(buf, len, "%d", fe->line_count);
     } else {
