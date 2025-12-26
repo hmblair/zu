@@ -1,5 +1,5 @@
 CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -std=c99
+CFLAGS ?= -O2 -Wall -Wextra -std=c99 -Wno-unknown-warning-option -Wno-format-truncation -Wno-stringop-truncation
 OMPFLAGS ?= -fopenmp
 BINDIR ?= ../../bin
 
