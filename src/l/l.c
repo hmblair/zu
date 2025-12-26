@@ -172,6 +172,7 @@ typedef struct {
     char socket[MAX_ICON_LEN];
     char fifo[MAX_ICON_LEN];
     char file[MAX_ICON_LEN];
+    char binary[MAX_ICON_LEN];
     char git_modified[MAX_ICON_LEN];
     char git_untracked[MAX_ICON_LEN];
     char git_staged[MAX_ICON_LEN];
@@ -777,6 +778,7 @@ static const struct { const char *key; size_t offset; } icon_keys[] = {
     { "current_dir",    offsetof(Icons, current_dir) },
     { "locked_dir",     offsetof(Icons, locked_dir) },
     { "file",           offsetof(Icons, file) },
+    { "binary",         offsetof(Icons, binary) },
     { "executable",     offsetof(Icons, executable) },
     { "device",         offsetof(Icons, device) },
     { "socket",         offsetof(Icons, socket) },
@@ -900,14 +902,16 @@ static const char *get_ext_icon(const Icons *icons, const char *name) {
 }
 
 static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
-                            int is_locked, const char *name) {
+                            int is_locked, int is_binary, const char *name) {
     switch (type) {
         case FTYPE_DIR:
             if (is_locked) return icons->locked_dir;
             return is_cwd ? icons->current_dir : icons->directory;
         case FTYPE_FILE: {
             const char *ext_icon = get_ext_icon(icons, name);
-            return ext_icon ? ext_icon : icons->file;
+            if (ext_icon) return ext_icon;
+            if (is_binary && icons->binary[0]) return icons->binary;
+            return icons->file;
         }
         case FTYPE_EXEC:
             return icons->executable;
@@ -1307,7 +1311,8 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
 
     /* Icon */
     if (!ctx->cfg->no_icons) {
-        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, is_locked, fe->name), RST(ctx->cfg));
+        int is_binary = (fe->file_count < 0 && fe->line_count == -1);
+        printf("%s%s%s ", color, get_icon(ctx->icons, fe->type, is_cwd, is_locked, is_binary, fe->name), RST(ctx->cfg));
     }
 
     /* Filename (full path in list mode) */
