@@ -5,6 +5,10 @@
  * With OMP_NUM_THREADS=1 or omp_set_num_threads(1), runs single-threaded.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  /* For O_DIRECTORY, fdopendir, fstatat on Linux */
+#endif
+
 #ifndef DIR_STATS_H
 #define DIR_STATS_H
 

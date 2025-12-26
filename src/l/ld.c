@@ -5,6 +5,7 @@
  * Uses directory mtime to skip unchanged subtrees efficiently.
  */
 
+#define _GNU_SOURCE   /* For O_DIRECTORY, fdopendir, fstatat on Linux */
 #define CACHE_DAEMON  /* Enable daemon-side cache functions */
 
 #include <stdio.h>

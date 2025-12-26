@@ -11,6 +11,7 @@
  * Platform Detection & Includes
  * ============================================================================ */
 
+#define _GNU_SOURCE      /* For O_DIRECTORY, fdopendir, fstatat on Linux */
 #define _DEFAULT_SOURCE  /* For DT_* constants on Linux */
 #define _BSD_SOURCE      /* For compatibility */
 
