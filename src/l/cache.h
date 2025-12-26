@@ -122,17 +122,10 @@ static sqlite3 *d_db = NULL;
 static sqlite3_stmt *d_insert_stmt = NULL;
 static sqlite3_stmt *d_lookup_stmt = NULL;
 
-/* Initialize cache for daemon (read-write) */
-static inline int cache_init(void) {
-    char path[PATH_MAX];
-    cache_path(path, sizeof(path));
-
-    /* Ensure directory exists */
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s/.cache/l", getenv("HOME") ?: "/tmp");
-    mkdir(dir, 0755);
-
+/* Internal: try to open and initialize the database */
+static inline int cache_init_internal(const char *path) {
     if (sqlite3_open(path, &d_db) != SQLITE_OK) {
+        d_db = NULL;
         return -1;
     }
 
@@ -140,6 +133,21 @@ static inline int cache_init(void) {
     sqlite3_exec(d_db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     sqlite3_exec(d_db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
     sqlite3_exec(d_db, "PRAGMA busy_timeout=5000", NULL, NULL, NULL);
+
+    /* Verify database integrity */
+    sqlite3_stmt *check;
+    if (sqlite3_prepare_v2(d_db, "PRAGMA integrity_check", -1, &check, NULL) == SQLITE_OK) {
+        if (sqlite3_step(check) == SQLITE_ROW) {
+            const char *result = (const char *)sqlite3_column_text(check, 0);
+            if (result && strcmp(result, "ok") != 0) {
+                sqlite3_finalize(check);
+                sqlite3_close(d_db);
+                d_db = NULL;
+                return -1;  /* Database is corrupt */
+            }
+        }
+        sqlite3_finalize(check);
+    }
 
     /* Create table if not exists */
     const char *create_sql =
@@ -174,6 +182,33 @@ static inline int cache_init(void) {
     }
 
     return 0;
+}
+
+/* Initialize cache for daemon (read-write) with error recovery */
+static inline int cache_init(void) {
+    char path[PATH_MAX];
+    cache_path(path, sizeof(path));
+
+    /* Ensure directory exists */
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/.cache/l", getenv("HOME") ?: "/tmp");
+    mkdir(dir, 0755);
+
+    /* Try to open existing database */
+    if (cache_init_internal(path) == 0) {
+        return 0;
+    }
+
+    /* Failed - delete corrupt database and retry */
+    char wal_path[PATH_MAX], shm_path[PATH_MAX];
+    snprintf(wal_path, sizeof(wal_path), "%s-wal", path);
+    snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
+    unlink(path);
+    unlink(wal_path);
+    unlink(shm_path);
+
+    /* Try again with fresh database */
+    return cache_init_internal(path);
 }
 
 /* Store a cache entry */
@@ -227,6 +262,55 @@ static inline int cache_count(void) {
         sqlite3_finalize(stmt);
     }
     return count;
+}
+
+/* Remove cache entries for paths that no longer exist */
+static inline int cache_prune_stale(void) {
+    if (!d_db) return 0;
+
+    sqlite3_stmt *select_stmt;
+    const char *select_sql = "SELECT path FROM sizes";
+    if (sqlite3_prepare_v2(d_db, select_sql, -1, &select_stmt, NULL) != SQLITE_OK) {
+        return -1;
+    }
+
+    /* Collect stale paths */
+    char **stale = NULL;
+    int stale_count = 0;
+    int stale_cap = 0;
+
+    while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(select_stmt, 0);
+        struct stat st;
+        if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            /* Path no longer exists or is not a directory */
+            if (stale_count >= stale_cap) {
+                stale_cap = stale_cap ? stale_cap * 2 : 64;
+                stale = realloc(stale, stale_cap * sizeof(char *));
+                if (!stale) break;
+            }
+            stale[stale_count++] = strdup(path);
+        }
+    }
+    sqlite3_finalize(select_stmt);
+
+    /* Delete stale entries */
+    if (stale_count > 0) {
+        sqlite3_stmt *delete_stmt;
+        const char *delete_sql = "DELETE FROM sizes WHERE path = ?";
+        if (sqlite3_prepare_v2(d_db, delete_sql, -1, &delete_stmt, NULL) == SQLITE_OK) {
+            for (int i = 0; i < stale_count; i++) {
+                sqlite3_reset(delete_stmt);
+                sqlite3_bind_text(delete_stmt, 1, stale[i], -1, SQLITE_STATIC);
+                sqlite3_step(delete_stmt);
+                free(stale[i]);
+            }
+            sqlite3_finalize(delete_stmt);
+        }
+        free(stale);
+    }
+
+    return stale_count;
 }
 
 /* Free cache resources */

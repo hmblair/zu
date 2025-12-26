@@ -24,6 +24,7 @@
 #define SCAN_INTERVAL 1800         /* 30 minutes between scans */
 #define FILE_COUNT_THRESHOLD 1000  /* Cache directories with >= this many files */
 #define MAX_ROOTS 8
+#define MAX_LOG_LINES 10000        /* Truncate log if exceeds this */
 
 static volatile sig_atomic_t g_shutdown = 0;
 static char g_roots[MAX_ROOTS][PATH_MAX];
@@ -44,6 +45,7 @@ static void log_msg(const char *level, const char *fmt, ...) {
 
 #define log_error(...) log_msg("ERROR", __VA_ARGS__)
 #define log_info(...)  log_msg("INFO", __VA_ARGS__)
+
 
 /* Check if path is or ends with .git */
 static int is_git_dir(const char *path) {
@@ -250,11 +252,16 @@ int main(int argc, char *argv[]) {
                      g_roots[i], r.file_count, (long long)r.size);
         }
 
+        /* Prune stale entries (paths that no longer exist) */
+        int pruned = cache_prune_stale();
+        if (pruned > 0)
+            log_info("pruned %d stale entries", pruned);
+
         if (cache_save() != 0)
             log_error("cache save failed");
 
         time_t elapsed = time(NULL) - start;
-        log_info("scan complete (%lds)", elapsed);
+        log_info("scan complete (%lds, %d cached)", elapsed, cache_count());
 
         /* Interruptible sleep */
         for (int i = 0; i < SCAN_INTERVAL && !g_shutdown; i++)
