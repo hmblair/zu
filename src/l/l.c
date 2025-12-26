@@ -466,6 +466,10 @@ static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
         }
     } else if (fe->line_count == LINE_COUNT_EXCEEDED) {
         snprintf(buf, len, ">1M");
+    } else if (fe->line_count >= 1000000) {
+        snprintf(buf, len, "%.1fM", fe->line_count / 1000000.0);
+    } else if (fe->line_count >= 1000) {
+        snprintf(buf, len, "%.1fK", fe->line_count / 1000.0);
     } else if (fe->line_count >= 0) {
         snprintf(buf, len, "%d", fe->line_count);
     } else {
