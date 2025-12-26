@@ -1,8 +1,8 @@
 #!/usr/bin/env zsh
 
 # l-cache - Size caching daemon manager for l
-# Manages the l-cached daemon that watches for filesystem changes
-# and maintains a cache of directory sizes.
+# Manages the l-cached daemon that periodically scans directories
+# and maintains a cache of sizes for directories with >=1000 files.
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/../common"
@@ -21,8 +21,8 @@ usage() {
     echo "  status      Show daemon status and cache info"
     echo "  clear       Clear the cache file"
     echo ""
-    echo "The daemon scans / and ~/ for large directories (>=2500 files),"
-    echo "watches ~/ for changes, and updates the cache every 5 minutes."
+    echo "The daemon scans / and ~/ for large directories (>=1000 files)"
+    echo "every 30 minutes. Uses directory mtime to skip unchanged dirs."
 }
 
 cmd_install() {
@@ -42,8 +42,8 @@ cmd_install() {
     zu_service_load "$PLIST_LABEL"
 
     success "Daemon installed and started"
-    echo "Scanning: / and $HOME (initial scan may be slow)"
-    echo "Watching: $HOME"
+    echo "Scanning: / and $HOME (initial scan takes ~1 min)"
+    echo "Rescan interval: 30 minutes"
     echo "Log: $LOG_FILE"
 }
 
@@ -75,32 +75,14 @@ cmd_status() {
         return
     fi
 
-    # Cache info
-    local cache_file="$CACHE_DIR/sizes.bin"
+    # Cache info (SQLite database)
+    local cache_file="$CACHE_DIR/sizes.db"
     if [[ -f "$cache_file" ]]; then
         local mtime=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$cache_file")
-        # Read header: magic(4) version(4) count(4) capacity(4)
-        local header=$(xxd -l 16 -p "$cache_file" 2>/dev/null)
-        if [[ -n "$header" ]]; then
-            # Parse little-endian uint32 values (bytes 8-11 = count, 12-15 = capacity)
-            local count_hex="${header:22:2}${header:20:2}${header:18:2}${header:16:2}"
-            local cap_hex="${header:30:2}${header:28:2}${header:26:2}${header:24:2}"
-            local count=$((16#$count_hex))
-            local capacity=$((16#$cap_hex))
-            local pct=$((count * 100 / capacity))
-
-            if (( pct >= 95 )); then
-                echo "Cache: ${RED}$count/$capacity entries ($pct% full)${NC} - ${RED}NEARLY FULL${NC}"
-            elif (( pct >= 80 )); then
-                echo "Cache: ${YELLOW}$count/$capacity entries ($pct% full)${NC}"
-            else
-                echo "Cache: ${GREEN}$count/$capacity entries ($pct% full)${NC}"
-            fi
-            echo "       updated $mtime"
-        else
-            local size=$(du -h "$cache_file" | cut -f1)
-            echo "Cache: ${GREEN}$size${NC} (updated $mtime)"
-        fi
+        local count=$(sqlite3 "$cache_file" "SELECT COUNT(*) FROM sizes" 2>/dev/null || echo 0)
+        local size=$(du -h "$cache_file" | cut -f1)
+        echo "Cache: ${GREEN}$count entries${NC} ($size)"
+        echo "       updated $mtime"
     else
         echo "Cache: ${GREY}not created yet${NC}"
     fi
@@ -116,9 +98,9 @@ cmd_status() {
 }
 
 cmd_clear() {
-    local cache_file="$CACHE_DIR/sizes.bin"
+    local cache_file="$CACHE_DIR/sizes.db"
     if [[ -f "$cache_file" ]]; then
-        rm "$cache_file"
+        rm -f "$cache_file" "$cache_file-wal" "$cache_file-shm"
         success "Cache cleared"
     else
         echo "No cache file found"

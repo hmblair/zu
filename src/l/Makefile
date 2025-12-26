@@ -3,24 +3,13 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c99
 OMPFLAGS ?= -fopenmp
 BINDIR ?= ../../bin
 
-# Detect platform
-UNAME := $(shell uname)
-
-ifeq ($(UNAME), Darwin)
-    WATCH_SRC = watch_macos.c
-    WATCH_LIBS = -framework CoreServices
-else
-    WATCH_SRC = watch_linux.c
-    WATCH_LIBS = -lpthread
-endif
-
 all: l l-cached link-l-cache
 
 l: l.c cache.h dir_stats.h
-	$(CC) $(CFLAGS) $(OMPFLAGS) -o $(BINDIR)/l l.c
+	$(CC) $(CFLAGS) $(OMPFLAGS) -o $(BINDIR)/l l.c -lsqlite3
 
-l-cached: ld.c cache.h dir_stats.h watch.h $(WATCH_SRC)
-	$(CC) $(CFLAGS) $(OMPFLAGS) -o $(BINDIR)/l-cached ld.c $(WATCH_SRC) $(WATCH_LIBS) -lpthread
+l-cached: ld.c cache.h
+	$(CC) $(CFLAGS) -o $(BINDIR)/l-cached ld.c -lsqlite3
 
 link-l-cache:
 	chmod +x l-cache
