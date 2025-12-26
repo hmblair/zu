@@ -31,7 +31,8 @@
 #include <omp.h>
 #endif
 
-#define UPDATE_INTERVAL 300  /* 5 minutes */
+#define UPDATE_INTERVAL 300       /* 5 minutes - home rescan */
+#define ROOT_RESCAN_INTERVAL 86400 /* 24 hours - root rescan */
 #define FILE_COUNT_THRESHOLD 1000  /* Cache directories with >= this many files */
 #define MAX_DIRTY_PATHS 65536
 #define MAX_PROBE_DEPTH 32   /* Hash table probe limit */
@@ -49,6 +50,9 @@ static pthread_mutex_t g_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int g_shutdown = 0;
 static char g_roots[MAX_ROOTS][PATH_MAX];
 static int g_root_count = 0;
+
+/* Forward declarations */
+static DirStats initial_scan(const char *path, int root_idx);
 
 /* Logging helpers */
 static void log_msg(const char *level, const char *fmt, ...) {
@@ -73,6 +77,17 @@ static int is_under_root(const char *path) {
         size_t root_len = strlen(g_roots[i]);
         if (strncmp(path, g_roots[i], root_len) == 0 &&
             (path[root_len] == '/' || path[root_len] == '\0')) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Check if path exactly matches a root other than current_root_idx */
+static int is_other_root(const char *path, int current_root_idx) {
+    for (int i = 0; i < g_root_count; i++) {
+        if (i == current_root_idx) continue;
+        if (strcmp(path, g_roots[i]) == 0) {
             return 1;
         }
     }
@@ -212,11 +227,36 @@ static void process_dirty_paths(void) {
 /* Timer thread */
 static void *timer_thread(void *arg) {
     (void)arg;
+    time_t last_home_rescan = time(NULL);
+    time_t last_root_rescan = time(NULL);
 
     while (!atomic_load(&g_shutdown)) {
-        sleep(UPDATE_INTERVAL);
-        if (!atomic_load(&g_shutdown)) {
-            process_dirty_paths();
+        sleep(60);  /* Check every minute */
+        if (atomic_load(&g_shutdown)) break;
+
+        time_t now = time(NULL);
+
+        /* Process dirty paths from FSEvents */
+        process_dirty_paths();
+
+        /* Periodic home rescan (every 5 minutes) */
+        if (g_root_count > 1 && (now - last_home_rescan) >= UPDATE_INTERVAL) {
+            log_info("periodic rescan of %s", g_roots[1]);
+            initial_scan(g_roots[1], 1);
+            pthread_mutex_lock(&g_cache_lock);
+            cache_save();
+            pthread_mutex_unlock(&g_cache_lock);
+            last_home_rescan = now;
+        }
+
+        /* Periodic root rescan (every 24 hours) */
+        if (g_root_count > 0 && (now - last_root_rescan) >= ROOT_RESCAN_INTERVAL) {
+            log_info("periodic rescan of %s", g_roots[0]);
+            initial_scan(g_roots[0], 0);
+            pthread_mutex_lock(&g_cache_lock);
+            cache_save();
+            pthread_mutex_unlock(&g_cache_lock);
+            last_root_rescan = now;
         }
     }
     return NULL;
@@ -238,7 +278,7 @@ static int is_git_dir(const char *path) {
 }
 
 /* Initial scan - single bottom-up pass that computes and caches in one traversal */
-static DirStats initial_scan_impl(const char *path, dev_t root_dev) {
+static DirStats initial_scan_impl(const char *path, dev_t root_dev, int root_idx) {
     DirStats result = {0, 0};
     if (atomic_load(&g_shutdown)) return result;
 
@@ -323,9 +363,10 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev) {
             } else {
                 snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
             }
-            /* Skip paths that cause double-counting (macOS firmlinks) */
+            /* Skip paths that cause double-counting (macOS firmlinks or other roots) */
             if (ds_skip_path(full)) continue;
-            DirStats sub = initial_scan_impl(full, root_dev);
+            if (is_other_root(full, root_idx)) continue;
+            DirStats sub = initial_scan_impl(full, root_dev, root_idx);
             if (sub.size >= 0) result.size += sub.size;
             if (sub.file_count >= 0 && !skip_file_count) result.file_count += sub.file_count;
         }
@@ -347,8 +388,8 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev) {
 }
 
 /* Public wrapper - starts with root_dev=0 to determine filesystem from path */
-static DirStats initial_scan(const char *path) {
-    return initial_scan_impl(path, 0);
+static DirStats initial_scan(const char *path, int root_idx) {
+    return initial_scan_impl(path, 0, root_idx);
 }
 
 static void usage(const char *prog) {
@@ -416,7 +457,7 @@ int main(int argc, char *argv[]) {
     log_info("scanning for large directories (>=%d files)...", FILE_COUNT_THRESHOLD);
     for (int i = 0; i < g_root_count; i++) {
         log_info("scanning %s...", g_roots[i]);
-        DirStats stats = initial_scan(g_roots[i]);
+        DirStats stats = initial_scan(g_roots[i], i);
         log_info("  %s: %ld files, %lld bytes", g_roots[i], stats.file_count, (long long)stats.size);
     }
     log_info("initial scan complete");
