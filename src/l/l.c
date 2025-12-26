@@ -58,7 +58,7 @@
 #define MAX_EXT_ICONS 256
 #define HASH_SIZE 4096
 #define INITIAL_FILE_CAPACITY 64
-#define LINE_COUNT_LIMIT 10000
+#define LINE_COUNT_LIMIT 1000000
 #define LINE_COUNT_EXCEEDED -2
 #define READ_BUFFER_SIZE 65536
 #define BINARY_CHECK_SIZE 512
@@ -465,7 +465,7 @@ static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
             snprintf(buf, len, "%ld", fe->file_count);
         }
     } else if (fe->line_count == LINE_COUNT_EXCEEDED) {
-        snprintf(buf, len, ">10K");
+        snprintf(buf, len, ">1M");
     } else if (fe->line_count >= 0) {
         snprintf(buf, len, "%d", fe->line_count);
     } else {
