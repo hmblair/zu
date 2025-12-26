@@ -27,6 +27,11 @@
 #include <limits.h>
 #include <ctype.h>
 #include <time.h>
+#ifdef __linux__
+#include <sys/vfs.h>
+#else
+#include <sys/mount.h>
+#endif
 #include <omp.h>
 #include "cache.h"
 #include "dir_stats.h"
@@ -48,6 +53,37 @@
 #ifndef PATH_MAX
     #define PATH_MAX 4096
 #endif
+
+/* Network filesystem detection (for auto-disabling slow operations) */
+#ifdef __linux__
+    #define NFS_SUPER_MAGIC     0x6969
+    #define LUSTRE_SUPER_MAGIC  0x0BD00BD0
+    #define GPFS_SUPER_MAGIC    0x47504653
+    #define CIFS_MAGIC_NUMBER   0xFF534D42
+    #define SMB_SUPER_MAGIC     0x517B
+    #define CEPH_SUPER_MAGIC    0x00C36400
+    #define AFS_SUPER_MAGIC     0x5346414F
+#endif
+
+static int is_network_fs(const char *path) {
+#ifdef __linux__
+    struct statfs st;
+    if (statfs(path, &st) != 0) return 0;
+    switch ((unsigned long)st.f_type) {
+        case NFS_SUPER_MAGIC:
+        case LUSTRE_SUPER_MAGIC:
+        case GPFS_SUPER_MAGIC:
+        case CIFS_MAGIC_NUMBER:
+        case SMB_SUPER_MAGIC:
+        case CEPH_SUPER_MAGIC:
+        case AFS_SUPER_MAGIC:
+            return 1;
+    }
+#else
+    (void)path;  /* macOS/BSD: assume local (cache daemon handles slow dirs) */
+#endif
+    return 0;
+}
 
 /* ============================================================================
  * Constants
@@ -123,6 +159,7 @@ typedef struct {
     int max_depth;
     int show_hidden;
     int long_format;
+    int long_format_explicit;  /* User explicitly set -l or -s */
     int expand_all;
     int list_mode;
     int no_icons;
@@ -1565,7 +1602,9 @@ static void print_usage(void) {
     printf("\n");
     printf("Options:\n");
     printf("  -a              Show hidden files\n");
+    printf("  -l, --long      Long format with size, lines, time (default)\n");
     printf("  -s, --short     Short format (no size, lines, time)\n");
+    printf("                  Auto-enabled on network filesystems\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", MAX_DEPTH);
     printf("  -d, --depth INT Limit tree depth\n");
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
@@ -1599,6 +1638,10 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 cfg->show_hidden = 1;
             } else if (strcmp(arg, "-s") == 0 || strcmp(arg, "--short") == 0) {
                 cfg->long_format = 0;
+                cfg->long_format_explicit = 1;
+            } else if (strcmp(arg, "-l") == 0 || strcmp(arg, "--long") == 0) {
+                cfg->long_format = 1;
+                cfg->long_format_explicit = 1;
             } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
                 cfg->max_depth = MAX_DEPTH;
             } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--depth") == 0) {
@@ -1630,7 +1673,8 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 for (int j = 1; arg[j]; j++) {
                     switch (arg[j]) {
                         case 'a': cfg->show_hidden = 1; break;
-                        case 's': cfg->long_format = 0; break;
+                        case 's': cfg->long_format = 0; cfg->long_format_explicit = 1; break;
+                        case 'l': cfg->long_format = 1; cfg->long_format_explicit = 1; break;
                         case 't': cfg->max_depth = MAX_DEPTH; break;
                         case 'S': cfg->sort_by = SORT_SIZE; break;
                         case 'T': cfg->sort_by = SORT_TIME; break;
@@ -1673,6 +1717,7 @@ int main(int argc, char **argv) {
         .max_depth = 1,
         .show_hidden = 0,
         .long_format = 1,
+        .long_format_explicit = 0,
         .expand_all = 0,
         .list_mode = 0,
         .no_icons = 0,
@@ -1711,6 +1756,14 @@ int main(int argc, char **argv) {
     char **dirs;
     int dir_count;
     parse_args(argc, argv, &cfg, &dirs, &dir_count);
+
+    /* Auto-disable long format on network filesystems (slow without cache) */
+    if (cfg.long_format && !cfg.long_format_explicit) {
+        const char *check_path = (dir_count > 0) ? dirs[0] : cfg.cwd;
+        if (is_network_fs(check_path)) {
+            cfg.long_format = 0;
+        }
+    }
 
     /* Load icons */
     Icons icons;
