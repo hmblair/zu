@@ -37,11 +37,19 @@
 #define MAX_DIRTY_PATHS 65536
 #define MAX_PROBE_DEPTH 32   /* Hash table probe limit */
 #define MAX_ROOTS 8          /* Maximum watched directories */
+#define DIRTY_HASH_SIZE 4096 /* Hash buckets for dirty paths */
 
-/* Dirty paths that need recalculation */
-static char *g_dirty_paths[MAX_DIRTY_PATHS];
+/* Hash set node for dirty paths */
+typedef struct DirtyNode {
+    char *path;
+    struct DirtyNode *next;
+} DirtyNode;
+
+/* Dirty paths hash set for O(1) lookup */
+static DirtyNode *g_dirty_buckets[DIRTY_HASH_SIZE];
 static size_t g_dirty_count = 0;
 static pthread_mutex_t g_dirty_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_dirty_cond = PTHREAD_COND_INITIALIZER;
 
 /* Cache mutex for thread-safe access */
 static pthread_mutex_t g_cache_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -117,28 +125,47 @@ static void parent_path(const char *path, char *out, size_t len) {
     }
 }
 
-/* Add a path to the dirty list */
+/* Add a path to the dirty set (O(1) average) */
 static void mark_dirty(const char *path) {
     pthread_mutex_lock(&g_dirty_lock);
 
-    /* Check if already in list */
-    for (size_t i = 0; i < g_dirty_count; i++) {
-        if (strcmp(g_dirty_paths[i], path) == 0) {
+    uint64_t h = fnv1a_hash(path);
+    uint32_t idx = h % DIRTY_HASH_SIZE;
+
+    /* Check if already in bucket chain */
+    for (DirtyNode *n = g_dirty_buckets[idx]; n; n = n->next) {
+        if (strcmp(n->path, path) == 0) {
             pthread_mutex_unlock(&g_dirty_lock);
             return;
         }
     }
 
-    if (g_dirty_count < MAX_DIRTY_PATHS) {
-        char *dup = strdup(path);
-        if (dup) {
-            g_dirty_paths[g_dirty_count++] = dup;
-        } else {
-            log_error("strdup failed for path: %s", path);
-        }
-    } else {
-        log_warn("dirty path list full, dropping: %s", path);
+    if (g_dirty_count >= MAX_DIRTY_PATHS) {
+        log_warn("dirty path set full, dropping: %s", path);
+        pthread_mutex_unlock(&g_dirty_lock);
+        return;
     }
+
+    /* Add new node to front of bucket chain */
+    DirtyNode *node = malloc(sizeof(DirtyNode));
+    if (!node) {
+        log_error("malloc failed for dirty node");
+        pthread_mutex_unlock(&g_dirty_lock);
+        return;
+    }
+    node->path = strdup(path);
+    if (!node->path) {
+        free(node);
+        log_error("strdup failed for path: %s", path);
+        pthread_mutex_unlock(&g_dirty_lock);
+        return;
+    }
+    node->next = g_dirty_buckets[idx];
+    g_dirty_buckets[idx] = node;
+    g_dirty_count++;
+
+    /* Signal timer thread that new work is available */
+    pthread_cond_signal(&g_dirty_cond);
 
     pthread_mutex_unlock(&g_dirty_lock);
 }
@@ -161,6 +188,53 @@ static void on_change(const char *path, void *ctx) {
     }
 }
 
+/* Check if ancestor is a prefix of path (proper ancestor) */
+static int is_ancestor_of(const char *ancestor, const char *path) {
+    size_t alen = strlen(ancestor);
+    if (strncmp(ancestor, path, alen) != 0) return 0;
+    /* ancestor="/a", path="/a/b" -> path[alen]='/' -> true */
+    /* ancestor="/a", path="/a"   -> path[alen]='\0' -> false (same path) */
+    return path[alen] == '/';
+}
+
+/* Compare paths by length for qsort (shorter first) */
+static int cmp_path_len(const void *a, const void *b) {
+    const char *pa = *(const char **)a;
+    const char *pb = *(const char **)b;
+    size_t la = strlen(pa);
+    size_t lb = strlen(pb);
+    return (la > lb) - (la < lb);
+}
+
+/* Coalesce paths: if ancestor is dirty, skip descendants.
+ * Returns new count after removing duplicates. */
+static size_t coalesce_paths(char **paths, size_t count) {
+    if (count <= 1) return count;
+
+    /* Sort by path length (shorter = higher in tree) */
+    qsort(paths, count, sizeof(char *), cmp_path_len);
+
+    /* Mark descendants of earlier (shorter) paths for removal */
+    for (size_t i = 0; i < count; i++) {
+        if (!paths[i]) continue;
+        for (size_t j = i + 1; j < count; j++) {
+            if (paths[j] && is_ancestor_of(paths[i], paths[j])) {
+                free(paths[j]);
+                paths[j] = NULL;
+            }
+        }
+    }
+
+    /* Compact array */
+    size_t out = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (paths[i]) {
+            paths[out++] = paths[i];
+        }
+    }
+    return out;
+}
+
 
 /* Process dirty paths and update cache */
 static void process_dirty_paths(void) {
@@ -171,17 +245,34 @@ static void process_dirty_paths(void) {
         return;
     }
 
-    /* Swap out the dirty list */
+    /* Drain all paths from hash set */
     char *paths[MAX_DIRTY_PATHS];
-    size_t count = g_dirty_count;
-    memcpy(paths, g_dirty_paths, count * sizeof(char *));
+    size_t count = 0;
+    for (uint32_t i = 0; i < DIRTY_HASH_SIZE; i++) {
+        DirtyNode *n = g_dirty_buckets[i];
+        while (n && count < MAX_DIRTY_PATHS) {
+            DirtyNode *next = n->next;
+            paths[count++] = n->path;  /* Transfer ownership */
+            free(n);
+            n = next;
+        }
+        g_dirty_buckets[i] = NULL;
+    }
     g_dirty_count = 0;
 
     pthread_mutex_unlock(&g_dirty_lock);
 
+    /* Coalesce: if ancestor is dirty, skip descendants */
+    size_t orig_count = count;
+    count = coalesce_paths(paths, count);
+    if (count < orig_count) {
+        log_info("coalesced %zu -> %zu paths", orig_count, count);
+    }
+
     /* Process each path (stat/traverse without lock for better concurrency) */
     off_t sizes[MAX_DIRTY_PATHS];
     long counts[MAX_DIRTY_PATHS];
+    time_t mtimes[MAX_DIRTY_PATHS];
     int valid[MAX_DIRTY_PATHS];
 
     for (size_t i = 0; i < count; i++) {
@@ -191,6 +282,7 @@ static void process_dirty_paths(void) {
             DirStats ds = dir_stats_get(paths[i], NULL);
             sizes[i] = ds.size;
             counts[i] = ds.file_count;
+            mtimes[i] = st.st_mtime;
             valid[i] = 1;
         } else {
             valid[i] = 0;
@@ -204,7 +296,7 @@ static void process_dirty_paths(void) {
         if (valid[i]) {
             /* Only cache directories with >= FILE_COUNT_THRESHOLD files */
             if (counts[i] >= FILE_COUNT_THRESHOLD) {
-                if (cache_store(paths[i], sizes[i], counts[i]) == 0) {
+                if (cache_store(paths[i], sizes[i], counts[i], mtimes[i]) == 0) {
                     stored++;
                 } else {
                     failed++;
@@ -224,38 +316,67 @@ static void process_dirty_paths(void) {
              count, stored, skipped, failed);
 }
 
-/* Timer thread */
+/* Adaptive timer constants */
+#define BATCH_WAIT_SEC 2       /* Wait for more events after first */
+#define MAX_BATCH_SEC 10       /* Max total batching time */
+#define IDLE_WAIT_SEC 60       /* Wait when no events pending */
+
+/* Timer thread with adaptive timing */
 static void *timer_thread(void *arg) {
     (void)arg;
-    time_t last_home_rescan = time(NULL);
     time_t last_root_rescan = time(NULL);
+    time_t last_event_time = 0;
 
     while (!atomic_load(&g_shutdown)) {
-        sleep(60);  /* Check every minute */
+        pthread_mutex_lock(&g_dirty_lock);
+
+        if (g_dirty_count == 0) {
+            /* No pending work - wait up to IDLE_WAIT_SEC for first event */
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += IDLE_WAIT_SEC;
+            pthread_cond_timedwait(&g_dirty_cond, &g_dirty_lock, &ts);
+            pthread_mutex_unlock(&g_dirty_lock);
+        } else {
+            /* Have pending work - batch events for up to MAX_BATCH_SEC */
+            time_t batch_start = time(NULL);
+            time_t batch_deadline = batch_start + MAX_BATCH_SEC;
+
+            while (!atomic_load(&g_shutdown)) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_sec += BATCH_WAIT_SEC;
+
+                size_t prev_count = g_dirty_count;
+                pthread_cond_timedwait(&g_dirty_cond, &g_dirty_lock, &ts);
+
+                time_t now = time(NULL);
+                /* Stop batching if no new events or deadline reached */
+                if (g_dirty_count == prev_count || now >= batch_deadline) {
+                    break;
+                }
+            }
+            last_event_time = time(NULL);
+            pthread_mutex_unlock(&g_dirty_lock);
+
+            /* Process all batched dirty paths */
+            process_dirty_paths();
+        }
+
         if (atomic_load(&g_shutdown)) break;
 
         time_t now = time(NULL);
 
-        /* Process dirty paths from FSEvents */
-        process_dirty_paths();
-
-        /* Periodic home rescan (every 5 minutes) */
-        if (g_root_count > 1 && (now - last_home_rescan) >= UPDATE_INTERVAL) {
-            log_info("periodic rescan of %s", g_roots[1]);
-            initial_scan(g_roots[1], 1);
-            pthread_mutex_lock(&g_cache_lock);
-            cache_save();
-            pthread_mutex_unlock(&g_cache_lock);
-            last_home_rescan = now;
-        }
-
-        /* Periodic root rescan (every 24 hours) */
+        /* Periodic root rescan only if idle for 24+ hours */
         if (g_root_count > 0 && (now - last_root_rescan) >= ROOT_RESCAN_INTERVAL) {
-            log_info("periodic rescan of %s", g_roots[0]);
-            initial_scan(g_roots[0], 0);
-            pthread_mutex_lock(&g_cache_lock);
-            cache_save();
-            pthread_mutex_unlock(&g_cache_lock);
+            /* Only rescan if no recent activity (FSEvents handles home) */
+            if (last_event_time == 0 || (now - last_event_time) >= ROOT_RESCAN_INTERVAL) {
+                log_info("periodic rescan of %s (idle)", g_roots[0]);
+                initial_scan(g_roots[0], 0);
+                pthread_mutex_lock(&g_cache_lock);
+                cache_save();
+                pthread_mutex_unlock(&g_cache_lock);
+            }
             last_root_rescan = now;
         }
     }
@@ -327,6 +448,10 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev, int root_idx
             is_dir = 1;
         } else if (entry->d_type == DT_REG) {
             is_file = 1;
+            struct stat st;
+            if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                file_size = st.st_size;
+            }
         } else if (entry->d_type == DT_UNKNOWN) {
             struct stat st;
             if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
@@ -345,13 +470,6 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev, int root_idx
 #endif
 
         if (is_file) {
-            /* Need size for regular files */
-            if (file_size == 0) {
-                struct stat st;
-                if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-                    file_size = st.st_size;
-                }
-            }
             result.size += file_size;
             if (!skip_file_count) result.file_count++;
         } else if (is_dir) {
@@ -391,7 +509,7 @@ static DirStats initial_scan_impl(const char *path, dev_t root_dev, int root_idx
         result.file_count = -1;
     } else if (result.file_count >= FILE_COUNT_THRESHOLD) {
         pthread_mutex_lock(&g_cache_lock);
-        if (cache_store(path, result.size, result.file_count) == 0) {
+        if (cache_store(path, result.size, result.file_count, dir_st.st_mtime) == 0) {
             log_info("cached %s (%ld files)", path, result.file_count);
         }
         pthread_mutex_unlock(&g_cache_lock);

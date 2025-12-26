@@ -18,8 +18,8 @@
 #include <sys/stat.h>
 
 #define CACHE_MAGIC      0x4C53495A  /* "LSIZ" */
-#define CACHE_VERSION    3           /* Bumped for checksum support */
-#define CACHE_CAPACITY   262144      /* ~8MB file */
+#define CACHE_VERSION    4           /* Bumped for dir_mtime support */
+#define CACHE_CAPACITY   262144      /* ~10MB file */
 #define MAX_PROBE_DEPTH  32          /* Max slots to probe in hash table */
 
 typedef struct {
@@ -27,7 +27,8 @@ typedef struct {
     int64_t  size;         /* Cached size (-1 = empty) */
     int64_t  file_count;   /* Cached file count (-1 = not computed) */
     int64_t  timestamp;    /* Unix time when computed */
-} CacheEntry;              /* 32 bytes */
+    int64_t  dir_mtime;    /* Directory mtime when scanned (for validation) */
+} CacheEntry;              /* 40 bytes */
 
 typedef struct {
     uint32_t magic;
@@ -298,7 +299,7 @@ static inline const CacheEntry *dcache_lookup_entry(const char *path) {
 }
 
 /* Store or update a cache entry. Returns 0 on success, -1 if table full. */
-static inline int cache_store(const char *path, int64_t size, int64_t file_count) {
+static inline int cache_store(const char *path, int64_t size, int64_t file_count, int64_t dir_mtime) {
     if (!d_cache) return -1;
 
     uint64_t h = fnv1a_hash(path);
@@ -313,6 +314,7 @@ static inline int cache_store(const char *path, int64_t size, int64_t file_count
             e->size = size;
             e->file_count = file_count;
             e->timestamp = time(NULL);
+            e->dir_mtime = dir_mtime;
             return 0;
         }
     }

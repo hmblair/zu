@@ -502,10 +502,17 @@ static void columns_update_widths(Column *cols, const FileEntry *fe) {
     }
 }
 
-/* Cache lookup wrapper for dir_stats.h */
+/* Cache lookup wrapper for dir_stats.h with mtime validation */
 static int cache_lookup_wrapper(const char *path, off_t *size, long *count) {
     const CacheEntry *cached = cache_lookup_entry(path);
     if (cached && cached->size >= 0 && cached->file_count >= 0) {
+        /* Validate mtime if available (skip if dir_mtime is 0 = not set) */
+        if (cached->dir_mtime > 0) {
+            struct stat st;
+            if (stat(path, &st) == 0 && st.st_mtime != cached->dir_mtime) {
+                return 0;  /* mtime changed, cache is stale */
+            }
+        }
         *size = (off_t)cached->size;
         *count = (long)cached->file_count;
         return 1;
