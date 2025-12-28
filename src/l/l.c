@@ -282,6 +282,7 @@ typedef struct GitStatusNode {
 
 typedef struct {
     GitStatusNode *buckets[HASH_SIZE];
+    omp_lock_t lock;
 } GitCache;
 
 typedef struct {
@@ -1041,6 +1042,7 @@ static char *shell_escape(const char *path) {
 
 static void git_cache_init(GitCache *cache) {
     memset(cache->buckets, 0, sizeof(cache->buckets));
+    omp_init_lock(&cache->lock);
 }
 
 static void git_cache_free(GitCache *cache) {
@@ -1054,15 +1056,19 @@ static void git_cache_free(GitCache *cache) {
         }
         cache->buckets[i] = NULL;
     }
+    omp_destroy_lock(&cache->lock);
 }
 
 static void git_cache_add(GitCache *cache, const char *path, const char *status) {
     unsigned int h = hash_string(path);
 
+    omp_set_lock(&cache->lock);
+
     /* Check if already exists - skip duplicates */
     GitStatusNode *existing = cache->buckets[h];
     while (existing) {
         if (strcmp(existing->path, path) == 0) {
+            omp_unset_lock(&cache->lock);
             return;  /* Already in cache */
         }
         existing = existing->next;
@@ -1074,6 +1080,8 @@ static void git_cache_add(GitCache *cache, const char *path, const char *status)
     node->status[2] = '\0';
     node->next = cache->buckets[h];
     cache->buckets[h] = node;
+
+    omp_unset_lock(&cache->lock);
 }
 
 static const char *git_cache_get(GitCache *cache, const char *path) {
@@ -1508,12 +1516,34 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
     parent->children = xmalloc(list.count * sizeof(TreeNode));
     parent->child_count = list.count;
 
+    /* Phase 1: Transfer entries and detect nested git repos */
+    char **git_repos = NULL;
+    size_t git_repo_count = 0;
+
     for (size_t i = 0; i < list.count; i++) {
         TreeNode *child = &parent->children[i];
         memset(child, 0, sizeof(TreeNode));
-
-        /* Move entry from list to tree node (transfer ownership) */
         child->entry = list.entries[i];
+
+        /* Check if this directory is a git repo root */
+        if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
+            strcmp(child->entry.name, ".git") != 0 &&
+            is_git_root(child->entry.path)) {
+            git_repos = xrealloc(git_repos, (git_repo_count + 1) * sizeof(char *));
+            git_repos[git_repo_count++] = child->entry.path;
+        }
+    }
+
+    /* Phase 2: Populate git caches in parallel */
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < git_repo_count; i++) {
+        git_populate_repo(git, git_repos[i]);
+    }
+    free(git_repos);
+
+    /* Phase 3: Set is_ignored, update columns, and recurse */
+    for (size_t i = 0; i < list.count; i++) {
+        TreeNode *child = &parent->children[i];
 
         /* Set is_ignored */
         const char *git_status = git_cache_get(git, child->entry.path);
@@ -1528,10 +1558,6 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
         /* Recurse into directories (including symlinks to directories) */
         if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
-            /* Detect nested git repos and populate their status */
-            if (is_git_root(child->entry.path)) {
-                git_populate_repo(git, child->entry.path);
-            }
             build_tree_children(child, depth + 1, cols, git, cfg, icons);
 
             /* Sum children's sizes instead of using get_dir_size result (only if showing all) */
