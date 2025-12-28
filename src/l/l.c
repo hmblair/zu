@@ -1987,13 +1987,13 @@ static void parse_args(int argc, char **argv, Config *cfg,
             } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--depth") == 0) {
                 if (i + 1 >= argc) die("-d/--depth requires an argument");
                 cfg->max_depth = atoi(argv[++i]);
-                if (cfg->max_depth <= 0) die("-d/--depth requires a positive integer");
+                if (cfg->max_depth < 0) die("-d/--depth requires a non-negative integer");
             } else if (strncmp(arg, "-d", 2) == 0 && arg[2] >= '0' && arg[2] <= '9') {
                 cfg->max_depth = atoi(arg + 2);
-                if (cfg->max_depth <= 0) die("-d requires a positive integer");
+                if (cfg->max_depth < 0) die("-d requires a non-negative integer");
             } else if (strncmp(arg, "--depth=", 8) == 0) {
                 cfg->max_depth = atoi(arg + 8);
-                if (cfg->max_depth <= 0) die("--depth requires a positive integer");
+                if (cfg->max_depth < 0) die("--depth requires a non-negative integer");
             } else if (strcmp(arg, "--expand-all") == 0) {
                 cfg->expand_all = 1;
             } else if (strcmp(arg, "--list") == 0) {
