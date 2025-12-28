@@ -1408,9 +1408,25 @@ static void print_entry(const FileEntry *fe, int depth, int has_visible_children
         printf("%s%s%s ", CLR(ctx->cfg, COLOR_YELLOW), ctx->icons->readonly, RST(ctx->cfg));
     }
 
-    /* Git indicator */
-    const char *git_ind = get_git_indicator(ctx->git, abs_path, ctx->icons, ctx->cfg);
-    printf("%s", git_ind);
+    /* Git indicator (for files) or summary (for unexpanded directories) */
+    if (is_dir && !has_visible_children && !ctx->cfg->no_icons) {
+        GitSummary gs = get_git_dir_summary(ctx->git, abs_path);
+        if (gs.modified) {
+            printf("%s%d %s%s ", CLR(ctx->cfg, COLOR_RED), gs.modified, ctx->icons->git_modified, RST(ctx->cfg));
+        }
+        if (gs.untracked) {
+            printf("%s%d %s%s ", CLR(ctx->cfg, COLOR_RED), gs.untracked, ctx->icons->git_untracked, RST(ctx->cfg));
+        }
+        if (gs.staged) {
+            printf("%s%d %s%s ", CLR(ctx->cfg, COLOR_YELLOW), gs.staged, ctx->icons->git_staged, RST(ctx->cfg));
+        }
+        if (gs.deleted) {
+            printf("%s%d %s%s ", CLR(ctx->cfg, COLOR_RED), gs.deleted, ctx->icons->git_deleted, RST(ctx->cfg));
+        }
+    } else {
+        const char *git_ind = get_git_indicator(ctx->git, abs_path, ctx->icons, ctx->cfg);
+        printf("%s", git_ind);
+    }
 
     /* Color and style */
     int is_locked = (fe->type == FTYPE_DIR && (fe->size < 0 || is_readonly));
@@ -1438,34 +1454,6 @@ static void print_entry(const FileEntry *fe, int depth, int has_visible_children
         char abbrev[PATH_MAX];
         abbreviate_home(fe->symlink_target, abbrev, sizeof(abbrev), ctx->cfg);
         printf(" %s %s%s%s", ctx->icons->symlink, color, abbrev, RST(ctx->cfg));
-    }
-
-    /* Git summary for unexpanded directories */
-    if (is_dir && !has_visible_children && !ctx->cfg->no_icons) {
-        GitSummary gs = get_git_dir_summary(ctx->git, abs_path);
-        if (gs.modified || gs.untracked || gs.staged || gs.deleted) {
-            printf(" %s(", CLR(ctx->cfg, COLOR_GREY));
-            int need_space = 0;
-            if (gs.modified) {
-                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_RED), gs.modified, ctx->icons->git_modified, RST(ctx->cfg));
-                need_space = 1;
-            }
-            if (gs.untracked) {
-                if (need_space) printf(" ");
-                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_RED), gs.untracked, ctx->icons->git_untracked, RST(ctx->cfg));
-                need_space = 1;
-            }
-            if (gs.staged) {
-                if (need_space) printf(" ");
-                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_YELLOW), gs.staged, ctx->icons->git_staged, RST(ctx->cfg));
-                need_space = 1;
-            }
-            if (gs.deleted) {
-                if (need_space) printf(" ");
-                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_RED), gs.deleted, ctx->icons->git_deleted, RST(ctx->cfg));
-            }
-            printf("%s)%s", CLR(ctx->cfg, COLOR_GREY), RST(ctx->cfg));
-        }
     }
 
     printf("\n");
