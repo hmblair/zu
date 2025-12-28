@@ -115,11 +115,14 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
         } else if (entry->d_type == DT_REG) {
             /* Regular file - still need stat for size */
             need_stat = 1;
+        } else if (entry->d_type == DT_LNK) {
+            /* Symlink - count it (size is negligible) */
+            file_count_total++;
         } else if (entry->d_type == DT_UNKNOWN) {
             /* Filesystem doesn't support d_type, fall back to stat */
             need_stat = 1;
         }
-        /* Skip symlinks, devices, etc. */
+        /* Skip devices, sockets, etc. */
 #else
         need_stat = 1;
 #endif
@@ -132,8 +135,11 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
                 } else if (S_ISREG(st.st_mode)) {
                     file_size_total += st.st_size;
                     file_count_total++;
+                } else if (S_ISLNK(st.st_mode)) {
+                    /* Symlink - count it (size is negligible) */
+                    file_count_total++;
                 }
-                /* Skip symlinks, devices, etc. */
+                /* Skip devices, sockets, etc. */
             }
         }
 
