@@ -1205,9 +1205,11 @@ static void git_populate_repo(GitCache *cache, const char *repo_path) {
             status[1] = '?';
         }
 
-        /* Build absolute path */
+        /* Build absolute path and remove trailing slash (directories end with /) */
         char full_path[PATH_MAX];
         path_join(full_path, sizeof(full_path), repo_path, path);
+        size_t len = strlen(full_path);
+        if (len > 0 && full_path[len - 1] == '/') full_path[len - 1] = '\0';
 
         git_cache_add(cache, full_path, status);
     }
