@@ -272,8 +272,6 @@ typedef struct GitStatusNode {
 
 typedef struct {
     GitStatusNode *buckets[HASH_SIZE];
-    char *git_root;
-    int is_git_repo;
 } GitCache;
 
 typedef struct {
@@ -1038,8 +1036,6 @@ static char *shell_escape(const char *path) {
 
 static void git_cache_init(GitCache *cache) {
     memset(cache->buckets, 0, sizeof(cache->buckets));
-    cache->git_root = NULL;
-    cache->is_git_repo = 0;
 }
 
 static void git_cache_free(GitCache *cache) {
@@ -1053,9 +1049,6 @@ static void git_cache_free(GitCache *cache) {
         }
         cache->buckets[i] = NULL;
     }
-    free(cache->git_root);
-    cache->git_root = NULL;
-    cache->is_git_repo = 0;
 }
 
 static void git_cache_add(GitCache *cache, const char *path, const char *status) {
@@ -1080,31 +1073,17 @@ static const char *git_cache_get(GitCache *cache, const char *path) {
     return NULL;
 }
 
-static void git_detect_repo(GitCache *cache, const char *dir) {
-    char *escaped = shell_escape(dir);
-    char cmd[PATH_MAX * 2 + 64];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --show-toplevel 2>/dev/null", escaped);
-    free(escaped);
-
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return;
-
-    char root[PATH_MAX];
-    if (fgets(root, sizeof(root), fp)) {
-        /* Remove trailing newline */
-        size_t len = strlen(root);
-        if (len > 0 && root[len - 1] == '\n') root[len - 1] = '\0';
-        cache->git_root = xstrdup(root);
-        cache->is_git_repo = 1;
-    }
-
-    pclose(fp);
+/* Check if directory is a git repository root (contains .git) */
+static int is_git_root(const char *path) {
+    char git_path[PATH_MAX];
+    snprintf(git_path, sizeof(git_path), "%s/.git", path);
+    struct stat st;
+    return stat(git_path, &st) == 0;
 }
 
-static void git_populate_status(GitCache *cache) {
-    if (!cache->is_git_repo) return;
-
-    char *escaped = shell_escape(cache->git_root);
+/* Populate git status for a specific repository into the cache */
+static void git_populate_repo(GitCache *cache, const char *repo_path) {
+    char *escaped = shell_escape(repo_path);
     char cmd[PATH_MAX * 2 + 64];
     snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored -uall 2>/dev/null", escaped);
     free(escaped);
@@ -1114,10 +1093,8 @@ static void git_populate_status(GitCache *cache) {
 
     char line[PATH_MAX + 8];
     while (fgets(line, sizeof(line), fp)) {
-        /* Remove trailing newline */
         size_t len = strlen(line);
         if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
-
         if (len < 4) continue;  /* Need at least "XY path" */
 
         char status[3] = {line[0], line[1], '\0'};
@@ -1125,13 +1102,11 @@ static void git_populate_status(GitCache *cache) {
 
         /* Handle renamed files: "R  old -> new" */
         const char *arrow = strstr(path, " -> ");
-        if (arrow) {
-            path = arrow + 4;
-        }
+        if (arrow) path = arrow + 4;
 
-        /* Remove trailing slash from directories */
+        /* Build absolute path and remove trailing slash */
         char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", cache->git_root, path);
+        snprintf(full_path, sizeof(full_path), "%s/%s", repo_path, path);
         len = strlen(full_path);
         if (len > 0 && full_path[len - 1] == '/') full_path[len - 1] = '\0';
 
@@ -1146,7 +1121,7 @@ static const char *get_git_indicator(GitCache *cache, const char *path,
     static char indicator[32];
     indicator[0] = '\0';
 
-    if (!cache->is_git_repo || cfg->no_icons) return indicator;
+    if (cfg->no_icons) return indicator;
 
     const char *status = git_cache_get(cache, path);
     if (!status) return indicator;
@@ -1184,8 +1159,6 @@ typedef struct {
 
 static GitSummary get_git_dir_summary(GitCache *cache, const char *dir_path) {
     GitSummary summary = {0, 0, 0, 0};
-    if (!cache->is_git_repo) return summary;
-
     size_t dir_len = strlen(dir_path);
 
     /* Iterate through all buckets */
@@ -1527,6 +1500,10 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
         /* Recurse into directories (including symlinks to directories) */
         if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
+            /* Detect nested git repos and populate their status */
+            if (is_git_root(child->entry.path)) {
+                git_populate_repo(git, child->entry.path);
+            }
             build_tree_children(child, depth + 1, cols, git, cfg, icons);
 
             /* Sum children's sizes instead of using get_dir_size result (only if showing all) */
@@ -1557,6 +1534,11 @@ static TreeNode *build_tree(const char *path, Column *cols,
                             GitCache *git, const Config *cfg, const Icons *icons) {
     char abs_path[PATH_MAX];
     get_abspath(path, abs_path, cfg);  /* Don't resolve symlinks for root */
+
+    /* Detect and populate git status if this is a repo root */
+    if (is_git_root(abs_path)) {
+        git_populate_repo(git, abs_path);
+    }
 
     struct stat st;
     char *symlink_target = NULL;
@@ -1876,16 +1858,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < dir_count; i++) {
         const char *dir = dirs[i];
 
-        /* Initialize git cache (skip if --no-icons since we won't show indicators) */
+        /* Initialize git cache (populated during tree building) */
         GitCache git;
         git_cache_init(&git);
-
-        if (!cfg.no_icons) {
-            char abs_dir[PATH_MAX];
-            get_realpath(dir, abs_dir, &cfg);
-            git_detect_repo(&git, abs_dir);
-            git_populate_status(&git);
-        }
 
         /* Initialize columns for long format */
         Column cols[NUM_COLUMNS];
