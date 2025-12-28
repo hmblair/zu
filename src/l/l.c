@@ -1174,6 +1174,46 @@ static const char *get_git_indicator(GitCache *cache, const char *path,
     return indicator;
 }
 
+/* Git status summary for directories */
+typedef struct {
+    int modified;
+    int untracked;
+    int staged;
+    int deleted;
+} GitSummary;
+
+static GitSummary get_git_dir_summary(GitCache *cache, const char *dir_path) {
+    GitSummary summary = {0, 0, 0, 0};
+    if (!cache->is_git_repo) return summary;
+
+    size_t dir_len = strlen(dir_path);
+
+    /* Iterate through all buckets */
+    for (int i = 0; i < HASH_SIZE; i++) {
+        GitStatusNode *node = cache->buckets[i];
+        while (node) {
+            /* Check if this path is under dir_path */
+            if (strncmp(node->path, dir_path, dir_len) == 0 &&
+                node->path[dir_len] == '/') {
+                const char *status = node->status;
+                if (strcmp(status, "!!") == 0) {
+                    /* Ignored - skip */
+                } else if (strcmp(status, "??") == 0) {
+                    summary.untracked++;
+                } else if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
+                    summary.staged++;
+                } else if (status[1] == 'M') {
+                    summary.modified++;
+                } else if (status[1] == 'D') {
+                    summary.deleted++;
+                }
+            }
+            node = node->next;
+        }
+    }
+    return summary;
+}
+
 /* ============================================================================
  * Directory Reading
  * ============================================================================ */
@@ -1332,7 +1372,7 @@ static void print_prefix(int depth, int *continuation, const Config *cfg) {
     printf("%s", COLOR_RESET);
 }
 
-static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx) {
+static void print_entry(const FileEntry *fe, int depth, int has_visible_children, const PrintContext *ctx) {
     char abs_path[PATH_MAX];
     get_realpath(fe->path, abs_path, ctx->cfg);
 
@@ -1398,6 +1438,34 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
         char abbrev[PATH_MAX];
         abbreviate_home(fe->symlink_target, abbrev, sizeof(abbrev), ctx->cfg);
         printf(" %s %s%s%s", ctx->icons->symlink, color, abbrev, RST(ctx->cfg));
+    }
+
+    /* Git summary for unexpanded directories */
+    if (is_dir && !has_visible_children && !ctx->cfg->no_icons) {
+        GitSummary gs = get_git_dir_summary(ctx->git, abs_path);
+        if (gs.modified || gs.untracked || gs.staged || gs.deleted) {
+            printf(" %s(", CLR(ctx->cfg, COLOR_GREY));
+            int need_space = 0;
+            if (gs.modified) {
+                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_RED), gs.modified, ctx->icons->git_modified, RST(ctx->cfg));
+                need_space = 1;
+            }
+            if (gs.untracked) {
+                if (need_space) printf(" ");
+                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_RED), gs.untracked, ctx->icons->git_untracked, RST(ctx->cfg));
+                need_space = 1;
+            }
+            if (gs.staged) {
+                if (need_space) printf(" ");
+                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_YELLOW), gs.staged, ctx->icons->git_staged, RST(ctx->cfg));
+                need_space = 1;
+            }
+            if (gs.deleted) {
+                if (need_space) printf(" ");
+                printf("%s%d%s%s", CLR(ctx->cfg, COLOR_RED), gs.deleted, ctx->icons->git_deleted, RST(ctx->cfg));
+            }
+            printf("%s)%s", CLR(ctx->cfg, COLOR_GREY), RST(ctx->cfg));
+        }
     }
 
     printf("\n");
@@ -1588,7 +1656,7 @@ static void print_tree_children(const TreeNode *parent, int depth, PrintContext 
 
         ctx->continuation[depth] = !is_last;
 
-        print_entry(&child->entry, depth + 1, ctx);
+        print_entry(&child->entry, depth + 1, child->child_count > 0, ctx);
 
         /* Recurse into directories that have children */
         if (child->child_count > 0) {
@@ -1606,7 +1674,7 @@ static void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx) 
             int is_last = (i == node->child_count - 1);
             ctx->continuation[depth - 1] = !is_last;
 
-            print_entry(&child->entry, depth, ctx);
+            print_entry(&child->entry, depth, child->child_count > 0, ctx);
 
             if (child->child_count > 0) {
                 print_tree_children(child, depth, ctx);
@@ -1616,7 +1684,7 @@ static void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx) 
     }
 
     /* Print root entry */
-    print_entry(&node->entry, depth, ctx);
+    print_entry(&node->entry, depth, node->child_count > 0, ctx);
 
     /* Print children */
     if (node->child_count > 0) {
