@@ -1125,19 +1125,13 @@ static void git_parse_status_output(FILE *fp, GitCache *cache, const char *repo_
 static void git_populate_repo(GitCache *cache, const char *repo_path) {
     char *escaped = shell_escape(repo_path);
     char cmd[PATH_MAX * 2 + 64];
-    FILE *fp;
 
-    /* First: get directory-level ignored entries */
-    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored 2>/dev/null", escaped);
-    fp = popen(cmd, "r");
-    if (fp) {
-        git_parse_status_output(fp, cache, repo_path);
-        pclose(fp);
-    }
-
-    /* Second: get file-level status with -uall for untracked files */
-    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain -uall 2>/dev/null", escaped);
-    fp = popen(cmd, "r");
+    /* Get all status in one call:
+     * -uall: show individual untracked files (not just directories)
+     * --ignored=matching: show ignored directories (not their contents) */
+    snprintf(cmd, sizeof(cmd),
+             "git -C '%s' status --porcelain -uall --ignored=matching 2>/dev/null", escaped);
+    FILE *fp = popen(cmd, "r");
     if (fp) {
         git_parse_status_output(fp, cache, repo_path);
         pclose(fp);
