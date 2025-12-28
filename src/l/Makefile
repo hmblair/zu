@@ -20,7 +20,8 @@ l-cached: ld.c cache.h
 
 link-l-cache:
 	chmod +x l-cache
-	ln -sfn ../src/l/l-cache $(BINDIR)/l-cache
+	rm -f $(BINDIR)/l-cache
+	ln -sn ../src/l/l-cache $(BINDIR)/l-cache
 
 clean:
 	rm -f $(BINDIR)/l $(BINDIR)/l-cached $(BINDIR)/l-cache
