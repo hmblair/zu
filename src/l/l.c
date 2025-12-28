@@ -175,8 +175,11 @@ typedef struct {
 /* Forward declaration for Column formatter */
 typedef struct FileEntry FileEntry;
 
+/* Forward declaration for Icons */
+typedef struct Icons Icons;
+
 /* Column definition for long format output */
-typedef void (*ColumnFormatter)(const FileEntry *fe, char *buf, size_t len);
+typedef void (*ColumnFormatter)(const FileEntry *fe, const Icons *icons, char *buf, size_t len);
 
 typedef struct {
     const char *name;        /* Column identifier */
@@ -195,7 +198,7 @@ typedef struct {
     char icon[MAX_ICON_LEN];
 } ExtIcon;
 
-typedef struct {
+struct Icons {
     char default_icon[MAX_ICON_LEN];
     char symlink[MAX_ICON_LEN];
     char symlink_dir[MAX_ICON_LEN];
@@ -216,9 +219,11 @@ typedef struct {
     char git_staged[MAX_ICON_LEN];
     char git_deleted[MAX_ICON_LEN];
     char readonly[MAX_ICON_LEN];
+    char count_files[MAX_ICON_LEN];
+    char count_lines[MAX_ICON_LEN];
     ExtIcon ext_icons[MAX_EXT_ICONS];
     int ext_count;
-} Icons;
+};
 
 /*
  * FileEntry - Represents a file system entry.
@@ -485,7 +490,8 @@ static void format_relative_time(time_t mtime, char *buf, size_t len) {
  * Column Formatters
  * ============================================================================ */
 
-static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
+static void col_format_size(const FileEntry *fe, const Icons *icons, char *buf, size_t len) {
+    (void)icons;  /* unused */
     if (fe->size < 0) {
         snprintf(buf, len, "-");
     } else {
@@ -493,7 +499,9 @@ static void col_format_size(const FileEntry *fe, char *buf, size_t len) {
     }
 }
 
-static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
+static void col_format_lines(const FileEntry *fe, const Icons *icons, char *buf, size_t len) {
+    (void)icons;  /* icon printed separately for alignment */
+
     if (fe->file_count >= 0) {
         /* Directory: show file count */
         if (fe->file_count >= 1000000) {
@@ -520,7 +528,18 @@ static void col_format_lines(const FileEntry *fe, char *buf, size_t len) {
     }
 }
 
-static void col_format_time(const FileEntry *fe, char *buf, size_t len) {
+/* Get the count type icon for a file entry */
+static const char *get_count_icon(const FileEntry *fe, const Icons *icons) {
+    if (fe->file_count >= 0) {
+        return icons->count_files;
+    } else if (fe->line_count >= 0 || fe->line_count == LINE_COUNT_EXCEEDED) {
+        return icons->count_lines;
+    }
+    return "";
+}
+
+static void col_format_time(const FileEntry *fe, const Icons *icons, char *buf, size_t len) {
+    (void)icons;  /* unused */
     format_relative_time(fe->mtime, buf, len);
 }
 
@@ -540,10 +559,10 @@ static void columns_init(Column *cols) {
 }
 
 /* Update column widths from a file entry */
-static void columns_update_widths(Column *cols, const FileEntry *fe) {
+static void columns_update_widths(Column *cols, const FileEntry *fe, const Icons *icons) {
     char buf[32];
     for (int i = 0; i < NUM_COLUMNS; i++) {
-        cols[i].format(fe, buf, sizeof(buf));
+        cols[i].format(fe, icons, buf, sizeof(buf));
         int len = (int)strlen(buf);
         if (len > cols[i].width) cols[i].width = len;
     }
@@ -831,6 +850,8 @@ static const struct { const char *key; size_t offset; } icon_keys[] = {
     { "git_staged",     offsetof(Icons, git_staged) },
     { "git_deleted",    offsetof(Icons, git_deleted) },
     { "readonly",       offsetof(Icons, readonly) },
+    { "count_files",    offsetof(Icons, count_files) },
+    { "count_lines",    offsetof(Icons, count_lines) },
     { NULL, 0 }
 };
 
@@ -1322,8 +1343,18 @@ static void print_entry(const FileEntry *fe, int depth, const PrintContext *ctx)
     if (ctx->cfg->long_format && ctx->columns) {
         char buf[32];
         for (int i = 0; i < NUM_COLUMNS; i++) {
-            ctx->columns[i].format(fe, buf, sizeof(buf));
-            printf("%s%*s%s  ", CLR(ctx->cfg, COLOR_GREY), ctx->columns[i].width, buf, RST(ctx->cfg));
+            ctx->columns[i].format(fe, ctx->icons, buf, sizeof(buf));
+            printf("%s%*s%s", CLR(ctx->cfg, COLOR_GREY), ctx->columns[i].width, buf, RST(ctx->cfg));
+            /* Print count icon after lines column */
+            if (i == COL_LINES) {
+                const char *count_icon = get_count_icon(fe, ctx->icons);
+                if (count_icon[0]) {
+                    printf(" %s%s%s", CLR(ctx->cfg, COLOR_GREY), count_icon, RST(ctx->cfg));
+                } else {
+                    printf("  ");  /* maintain spacing when no icon */
+                }
+            }
+            printf("  ");
         }
     }
 
@@ -1400,7 +1431,7 @@ static void tree_node_free(TreeNode *node) {
  * (they are now owned by the tree nodes).
  */
 static void build_tree_children(TreeNode *parent, int depth, Column *cols,
-                                 GitCache *git, const Config *cfg) {
+                                 GitCache *git, const Config *cfg, const Icons *icons) {
     if (depth >= cfg->max_depth) return;
     if (access(parent->entry.path, R_OK) != 0) return;
 
@@ -1434,13 +1465,13 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
 
         /* Update column widths */
         if (cfg->long_format && cols) {
-            columns_update_widths(cols, &child->entry);
+            columns_update_widths(cols, &child->entry, icons);
         }
 
         /* Recurse into directories (including symlinks to directories) */
         if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
-            build_tree_children(child, depth + 1, cols, git, cfg);
+            build_tree_children(child, depth + 1, cols, git, cfg, icons);
 
             /* Sum children's sizes instead of using get_dir_size result (only if showing all) */
             if (cfg->long_format && cfg->show_hidden && child->child_count > 0) {
@@ -1467,7 +1498,7 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
 }
 
 static TreeNode *build_tree(const char *path, Column *cols,
-                            GitCache *git, const Config *cfg) {
+                            GitCache *git, const Config *cfg, const Icons *icons) {
     char abs_path[PATH_MAX];
     get_abspath(path, abs_path, cfg);  /* Don't resolve symlinks for root */
 
@@ -1509,12 +1540,12 @@ static TreeNode *build_tree(const char *path, Column *cols,
 
     /* Update column widths from root */
     if (cfg->long_format && cols) {
-        columns_update_widths(cols, &root->entry);
+        columns_update_widths(cols, &root->entry, icons);
     }
 
     /* Build children if directory (including symlinks to directories) */
     if (type == FTYPE_DIR || type == FTYPE_SYMLINK_DIR) {
-        build_tree_children(root, 0, cols, git, cfg);
+        build_tree_children(root, 0, cols, git, cfg, icons);
 
         /* Sum children's sizes/counts to get root's total (only if showing all) */
         if (cfg->long_format && cfg->show_hidden) {
@@ -1536,7 +1567,7 @@ static TreeNode *build_tree(const char *path, Column *cols,
             root->entry.file_count = total_count;
             /* Update column widths now that we have the real value */
             if (cols) {
-                columns_update_widths(cols, &root->entry);
+                columns_update_widths(cols, &root->entry, icons);
             }
         }
     }
@@ -1805,7 +1836,7 @@ int main(int argc, char **argv) {
         columns_init(cols);
 
         /* Build tree and compute column widths in single pass */
-        TreeNode *tree = build_tree(dir, cfg.long_format ? cols : NULL, &git, &cfg);
+        TreeNode *tree = build_tree(dir, cfg.long_format ? cols : NULL, &git, &cfg, &icons);
 
         /* Print tree */
         PrintContext ctx = {
