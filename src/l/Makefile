@@ -1,5 +1,5 @@
 CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -std=c99 -Wno-unknown-warning-option -Wno-format-truncation -Wno-stringop-truncation
+CFLAGS ?= -O2 -Wall -Wextra -std=c99 -Wno-unknown-warning-option
 OMPFLAGS ?= -fopenmp
 BINDIR ?= ../../bin
 
@@ -20,10 +20,13 @@ l-cached: ld.c cache.h
 
 link-l-cache:
 	chmod +x l-cache
-	rm -f $(BINDIR)/l-cache
-	ln -sn ../src/l/l-cache $(BINDIR)/l-cache
+	ln -sfn ../src/l/l-cache $(BINDIR)/l-cache
+
+# Debug build with sanitizers (use: make debug)
+debug: CFLAGS := -g -O1 -Wall -Wextra -std=c99 -fsanitize=address,undefined -fno-omit-frame-pointer
+debug: all
 
 clean:
 	rm -f $(BINDIR)/l $(BINDIR)/l-cached $(BINDIR)/l-cache
 
-.PHONY: all clean link-l-cache
+.PHONY: all clean link-l-cache debug

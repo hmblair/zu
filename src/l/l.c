@@ -57,6 +57,15 @@
     #define PATH_MAX 4096
 #endif
 
+/* Noreturn attribute for functions that never return */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+    #define NORETURN _Noreturn
+#elif defined(__GNUC__) || defined(__clang__)
+    #define NORETURN __attribute__((noreturn))
+#else
+    #define NORETURN
+#endif
+
 /* Time constants for relative time formatting */
 #define SECONDS_PER_MINUTE  60
 #define SECONDS_PER_HOUR    3600
@@ -109,6 +118,10 @@ static int is_network_fs(const char *path) {
 #define READ_BUFFER_SIZE 65536
 #define BINARY_CHECK_SIZE 512
 #define TOML_LINE_MAX 256
+#define GIT_HEAD_BUF_SIZE 256
+#define GIT_STATUS_LINE_MAX (PATH_MAX + 8)
+#define SHELL_CMD_BUF_SIZE (PATH_MAX * 2 + 64)
+#define GIT_INDICATOR_SIZE 64
 
 /* Tree drawing characters (UTF-8) */
 #define TREE_VERT   "│  "
@@ -300,7 +313,7 @@ typedef struct {
  * Utility Functions
  * ============================================================================ */
 
-static void die(const char *msg) {
+NORETURN static void die(const char *msg) {
     int tty = isatty(STDERR_FILENO);
     fprintf(stderr, "%sError:%s %s\n",
             tty ? COLOR_RED : "", tty ? COLOR_RESET : "", msg);
@@ -440,7 +453,8 @@ static void resolve_source_dir(const char *argv0, char *src_dir, size_t len) {
         char *path_env = getenv("PATH");
         if (path_env) {
             char *path_copy = xstrdup(path_env);
-            char *dir = strtok(path_copy, ":");
+            char *saveptr;
+            char *dir = strtok_r(path_copy, ":", &saveptr);
             while (dir) {
                 char try_path[PATH_MAX];
                 snprintf(try_path, sizeof(try_path), "%s/%s", dir, argv0);
@@ -448,7 +462,7 @@ static void resolve_source_dir(const char *argv0, char *src_dir, size_t len) {
                     found = 1;
                     break;
                 }
-                dir = strtok(NULL, ":");
+                dir = strtok_r(NULL, ":", &saveptr);
             }
             free(path_copy);
         }
@@ -1015,17 +1029,23 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
 /*
  * Escape a path for safe use in shell single quotes: ' -> '\''
  *
- * Returns: Newly allocated string (caller must free).
+ * Returns: Newly allocated string (caller must free), or NULL on overflow.
  */
 static char *shell_escape(const char *path) {
     /* Count single quotes to determine buffer size */
     size_t quotes = 0;
+    size_t path_len = strlen(path);
     for (const char *p = path; *p; p++) {
         if (*p == '\'') quotes++;
     }
 
+    /* Check for integer overflow: need path_len + quotes*3 + 1 bytes */
+    if (quotes > (SIZE_MAX - path_len - 1) / 3) {
+        return NULL;  /* Would overflow */
+    }
+
     /* Allocate: original length + 3 extra chars per quote + null */
-    size_t len = strlen(path) + quotes * 3 + 1;
+    size_t len = path_len + quotes * 3 + 1;
     char *escaped = xmalloc(len);
     char *out = escaped;
 
@@ -1118,7 +1138,7 @@ static char *get_git_branch(const char *repo_path) {
     FILE *f = fopen(head_path, "r");
     if (!f) return NULL;
 
-    char buf[256];
+    char buf[GIT_HEAD_BUF_SIZE];
     char *branch = NULL;
     if (fgets(buf, sizeof(buf), f)) {
         /* Format: "ref: refs/heads/branch-name\n" */
@@ -1248,7 +1268,9 @@ static void git_parse_status_output(FILE *fp, GitCache *cache, const char *repo_
 
 static void git_populate_repo(GitCache *cache, const char *repo_path) {
     char *escaped = shell_escape(repo_path);
-    char cmd[PATH_MAX * 2 + 64];
+    if (!escaped) return;  /* Path too long or malformed */
+
+    char cmd[SHELL_CMD_BUF_SIZE];
 
     /* Get all status in one call:
      * -uall: show individual untracked files (not just directories)
@@ -1276,7 +1298,7 @@ static char *append_git_icon(char *buf, size_t *remaining,
 
 static const char *get_git_indicator(GitCache *cache, const char *path,
                                       const Icons *icons, const Config *cfg) {
-    static char indicator[64];
+    static __thread char indicator[GIT_INDICATOR_SIZE];  /* Thread-local for OpenMP safety */
     indicator[0] = '\0';
 
     if (cfg->no_icons) return indicator;
@@ -1742,7 +1764,9 @@ static int find_git_root(const char *path, char *root, size_t root_len) {
 
 static int find_git_root(const char *path, char *root, size_t root_len) {
     char *escaped = shell_escape(path);
-    char cmd[PATH_MAX * 2 + 64];
+    if (!escaped) return 0;  /* Path too long or malformed */
+
+    char cmd[SHELL_CMD_BUF_SIZE];
     snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --show-toplevel 2>/dev/null", escaped);
     free(escaped);
 
@@ -2006,12 +2030,23 @@ static void parse_args(int argc, char **argv, Config *cfg,
 }
 
 /* ============================================================================
+ * Cleanup
+ * ============================================================================ */
+
+#ifdef HAVE_LIBGIT2
+static void cleanup_libgit2(void) {
+    git_libgit2_shutdown();
+}
+#endif
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
 int main(int argc, char **argv) {
 #ifdef HAVE_LIBGIT2
     git_libgit2_init();
+    atexit(cleanup_libgit2);
 #endif
 
     /* Initialize config with defaults */
@@ -2119,8 +2154,6 @@ int main(int argc, char **argv) {
     }
 
     cache_unload();
-#ifdef HAVE_LIBGIT2
-    git_libgit2_shutdown();
-#endif
+    /* libgit2 cleanup handled by atexit() */
     return 0;
 }

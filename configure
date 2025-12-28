@@ -29,8 +29,7 @@ for script in "$SRC_DIR"/*/*; do
     name="${script:t}"
     [[ "$dir" == "completions" ]] && continue
     [[ "$name" != "$dir" ]] && continue
-    rm -f "$BIN_DIR/$name" 2>/dev/null
-    ln -sn "../src/$dir/$name" "$BIN_DIR/$name"
+    ln -sfn "../src/$dir/$name" "$BIN_DIR/$name"
 done
 
 # Link root-level executables in src/ (excluding special files)
@@ -39,8 +38,7 @@ for script in "$SRC_DIR"/*; do
     [[ ! -x "$script" ]] && continue
     name="${script:t}"
     [[ "$name" == "common" ]] && continue
-    rm -f "$BIN_DIR/$name" 2>/dev/null
-    ln -sn "../src/$name" "$BIN_DIR/$name"
+    ln -sfn "../src/$name" "$BIN_DIR/$name"
 done
 
 echo "Configured $(ls -1 "$BIN_DIR" | wc -l | tr -d ' ') commands in bin/"
@@ -55,8 +53,7 @@ link_completions() {
     for comp in "$COMPLETIONS_DIR"/_*; do
         [[ ! -f "$comp" ]] && continue
         name="${comp:t}"
-        rm -f "$target/$name" 2>/dev/null
-        ln -sn "$comp" "$target/$name"
+        ln -sfn "$comp" "$target/$name"
     done
     echo "Linked $(ls -1 "$COMPLETIONS_DIR"/_* 2>/dev/null | wc -l | tr -d ' ') completions to $target"
 }
