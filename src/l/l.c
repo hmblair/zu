@@ -1116,7 +1116,8 @@ static int is_git_root(const char *path) {
 static void git_populate_repo(GitCache *cache, const char *repo_path) {
     git_repository *repo = NULL;
     git_status_list *status_list = NULL;
-    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
+    git_status_options opts = {0};
+    opts.version = GIT_STATUS_OPTIONS_VERSION;
 
     if (git_repository_open(&repo, repo_path) != 0) return;
 
