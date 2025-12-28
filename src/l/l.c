@@ -1109,6 +1109,37 @@ static int is_git_root(const char *path) {
     return stat(git_path, &st) == 0;
 }
 
+/* Get current git branch for a repo root. Returns allocated string or NULL. */
+static char *get_git_branch(const char *repo_path) {
+    /* Try reading .git/HEAD directly (fastest method) */
+    char head_path[PATH_MAX];
+    snprintf(head_path, sizeof(head_path), "%s/.git/HEAD", repo_path);
+
+    FILE *f = fopen(head_path, "r");
+    if (!f) return NULL;
+
+    char buf[256];
+    char *branch = NULL;
+    if (fgets(buf, sizeof(buf), f)) {
+        /* Format: "ref: refs/heads/branch-name\n" */
+        const char *prefix = "ref: refs/heads/";
+        if (strncmp(buf, prefix, strlen(prefix)) == 0) {
+            char *start = buf + strlen(prefix);
+            size_t len = strlen(start);
+            if (len > 0 && start[len - 1] == '\n') start[len - 1] = '\0';
+            branch = xstrdup(start);
+        } else {
+            /* Detached HEAD - show short hash */
+            size_t len = strlen(buf);
+            if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+            if (len > 7) buf[7] = '\0';  /* Truncate to short hash */
+            branch = xstrdup(buf);
+        }
+    }
+    fclose(f);
+    return branch;
+}
+
 #ifdef HAVE_LIBGIT2
 
 /* libgit2 implementation - faster, no fork/exec overhead */
@@ -1541,6 +1572,15 @@ static void print_entry(const FileEntry *fe, int depth, int has_visible_children
         printf("%s%s%s%s", color, style, abbrev, RST(ctx->cfg));
     } else {
         printf("%s%s%s%s", color, style, fe->name, RST(ctx->cfg));
+    }
+
+    /* Git branch for repo root directories */
+    if (is_dir && is_git_root(fe->path)) {
+        char *branch = get_git_branch(fe->path);
+        if (branch) {
+            printf(" %s(%s)%s", CLR(ctx->cfg, COLOR_GREY), branch, RST(ctx->cfg));
+            free(branch);
+        }
     }
 
     /* Symlink target */
