@@ -1106,7 +1106,7 @@ static void git_populate_status(GitCache *cache) {
 
     char *escaped = shell_escape(cache->git_root);
     char cmd[PATH_MAX * 2 + 64];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored 2>/dev/null", escaped);
+    snprintf(cmd, sizeof(cmd), "git -C '%s' status --porcelain --ignored -uall 2>/dev/null", escaped);
     free(escaped);
 
     FILE *fp = popen(cmd, "r");
