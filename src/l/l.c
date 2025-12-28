@@ -54,6 +54,12 @@
     #define PATH_MAX 4096
 #endif
 
+/* Time constants for relative time formatting */
+#define SECONDS_PER_MINUTE  60
+#define SECONDS_PER_HOUR    3600
+#define SECONDS_PER_DAY     86400
+#define SECONDS_PER_WEEK    604800
+
 /* Network filesystem detection (for auto-disabling slow operations) */
 #ifdef __linux__
     #define NFS_SUPER_MAGIC     0x6969
@@ -225,6 +231,10 @@ struct Icons {
     int ext_count;
 };
 
+/* Return preferred icon if non-empty, otherwise fallback */
+#define ICON_OR_FALLBACK(preferred, fallback) \
+    ((preferred)[0] ? (preferred) : (fallback))
+
 /*
  * FileEntry - Represents a file system entry.
  *
@@ -321,6 +331,13 @@ static unsigned int hash_string(const char *str) {
     while ((c = *str++))
         hash = ((hash << 5) + hash) + c;
     return hash % HASH_SIZE;
+}
+
+/* Join directory and filename, handling trailing slashes correctly */
+static void path_join(char *dest, size_t dest_len, const char *dir, const char *name) {
+    size_t dir_len = strlen(dir);
+    int need_slash = (dir_len > 0 && dir[dir_len - 1] != '/');
+    snprintf(dest, dest_len, need_slash ? "%s/%s" : "%s%s", dir, name);
 }
 
 /* Get absolute path, resolving symlinks */
@@ -470,14 +487,14 @@ static void format_relative_time(time_t mtime, char *buf, size_t len) {
     time_t now = time(NULL);
     long diff = (long)(now - mtime);
 
-    if (diff < 60) {
+    if (diff < SECONDS_PER_MINUTE) {
         snprintf(buf, len, "now");
-    } else if (diff < 3600) {
-        snprintf(buf, len, "%ldm ago", diff / 60);
-    } else if (diff < 86400) {
-        snprintf(buf, len, "%ldh ago", diff / 3600);
-    } else if (diff < 604800) {
-        snprintf(buf, len, "%ldd ago", diff / 86400);
+    } else if (diff < SECONDS_PER_HOUR) {
+        snprintf(buf, len, "%ldm ago", diff / SECONDS_PER_MINUTE);
+    } else if (diff < SECONDS_PER_DAY) {
+        snprintf(buf, len, "%ldh ago", diff / SECONDS_PER_HOUR);
+    } else if (diff < SECONDS_PER_WEEK) {
+        snprintf(buf, len, "%ldd ago", diff / SECONDS_PER_DAY);
     } else {
         struct tm *tm = localtime(&mtime);
         strftime(buf, len, "%b %d", tm);
@@ -640,76 +657,64 @@ static void file_list_free(FileList *list) {
  * File Type Detection
  * ============================================================================ */
 
+/* Resolve symlink to absolute target path. Returns allocated string or NULL. */
+static char *resolve_symlink(const char *path) {
+    char target[PATH_MAX];
+    ssize_t len = readlink(path, target, sizeof(target) - 1);
+    if (len <= 0) return NULL;
+    target[len] = '\0';
+
+    /* Try realpath first (resolves to final target) */
+    char abs_target[PATH_MAX];
+    if (realpath(path, abs_target) != NULL) {
+        return xstrdup(abs_target);
+    }
+
+    /* Fallback: manually build absolute path */
+    if (target[0] == '/') {
+        return xstrdup(target);
+    }
+
+    /* Relative target: prepend directory of symlink */
+    char dir[PATH_MAX];
+    strncpy(dir, path, PATH_MAX - 1);
+    dir[PATH_MAX - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        slash[1] = '\0';
+        snprintf(abs_target, PATH_MAX, "%s%s", dir, target);
+        return xstrdup(abs_target);
+    }
+    return xstrdup(target);
+}
+
+/* Get file type for symlink target */
+static FileType get_symlink_target_type(const struct stat *target_st) {
+    if (S_ISDIR(target_st->st_mode)) return FTYPE_SYMLINK_DIR;
+    if (S_ISCHR(target_st->st_mode) || S_ISBLK(target_st->st_mode)) return FTYPE_SYMLINK_DEVICE;
+    if (S_ISSOCK(target_st->st_mode)) return FTYPE_SYMLINK_SOCKET;
+    if (S_ISFIFO(target_st->st_mode)) return FTYPE_SYMLINK_FIFO;
+    if (S_ISREG(target_st->st_mode) && (target_st->st_mode & S_IXUSR)) return FTYPE_SYMLINK_EXEC;
+    return FTYPE_SYMLINK;
+}
+
 static FileType detect_file_type(const char *path, struct stat *st,
                                   char **symlink_target) {
     struct stat lst;
     *symlink_target = NULL;
 
-    /* Use lstat to detect symlinks */
-    if (lstat(path, &lst) != 0) {
-        return FTYPE_UNKNOWN;
-    }
-
+    if (lstat(path, &lst) != 0) return FTYPE_UNKNOWN;
     *st = lst;
 
     if (S_ISLNK(lst.st_mode)) {
-        /* Read symlink target */
-        char target[PATH_MAX];
-        ssize_t len = readlink(path, target, sizeof(target) - 1);
-        if (len > 0) {
-            target[len] = '\0';
+        *symlink_target = resolve_symlink(path);
+        if (!*symlink_target) return FTYPE_SYMLINK_BROKEN;
 
-            /* Resolve to absolute path and normalize */
-            char abs_target[PATH_MAX];
-            if (realpath(path, abs_target) != NULL) {
-                /* realpath resolves the symlink to its final target */
-                *symlink_target = xstrdup(abs_target);
-            } else {
-                /* Fallback: manually build absolute path */
-                if (target[0] != '/') {
-                    char dir[PATH_MAX];
-                    strncpy(dir, path, PATH_MAX - 1);
-                    dir[PATH_MAX - 1] = '\0';
-                    char *slash = strrchr(dir, '/');
-                    if (slash) {
-                        slash[1] = '\0';
-                        snprintf(abs_target, PATH_MAX, "%s%s", dir, target);
-                    } else {
-                        strncpy(abs_target, target, PATH_MAX - 1);
-                        abs_target[PATH_MAX - 1] = '\0';
-                    }
-                } else {
-                    strncpy(abs_target, target, PATH_MAX - 1);
-                    abs_target[PATH_MAX - 1] = '\0';
-                }
-                *symlink_target = xstrdup(abs_target);
-            }
+        struct stat target_st;
+        if (stat(path, &target_st) != 0) return FTYPE_SYMLINK_BROKEN;
 
-            /* Check target type and use target's stat for display */
-            struct stat target_st;
-            if (stat(path, &target_st) == 0) {
-                *st = target_st;  /* Use target's stats for size display */
-                if (S_ISDIR(target_st.st_mode)) {
-                    return FTYPE_SYMLINK_DIR;
-                } else if (S_ISCHR(target_st.st_mode) || S_ISBLK(target_st.st_mode)) {
-                    return FTYPE_SYMLINK_DEVICE;
-                } else if (S_ISSOCK(target_st.st_mode)) {
-                    return FTYPE_SYMLINK_SOCKET;
-                } else if (S_ISFIFO(target_st.st_mode)) {
-                    return FTYPE_SYMLINK_FIFO;
-                } else if (S_ISREG(target_st.st_mode) && (target_st.st_mode & S_IXUSR)) {
-                    return FTYPE_SYMLINK_EXEC;
-                } else if (S_ISREG(target_st.st_mode)) {
-                    return FTYPE_SYMLINK;
-                } else {
-                    return FTYPE_SYMLINK;
-                }
-            } else {
-                return FTYPE_SYMLINK_BROKEN;
-            }
-        } else {
-            return FTYPE_SYMLINK_BROKEN;
-        }
+        *st = target_st;  /* Use target's stats for size display */
+        return get_symlink_target_type(&target_st);
     } else if (S_ISDIR(lst.st_mode)) {
         return FTYPE_DIR;
     } else if (S_ISCHR(lst.st_mode) || S_ISBLK(lst.st_mode)) {
@@ -979,11 +984,11 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
         case FTYPE_FIFO:
             return icons->fifo;
         case FTYPE_SYMLINK:
-            return icons->symlink_file[0] ? icons->symlink_file : icons->symlink;
+            return ICON_OR_FALLBACK(icons->symlink_file, icons->symlink);
         case FTYPE_SYMLINK_DIR:
-            return icons->symlink_dir[0] ? icons->symlink_dir : icons->symlink;
+            return ICON_OR_FALLBACK(icons->symlink_dir, icons->symlink);
         case FTYPE_SYMLINK_EXEC:
-            return icons->symlink_exec[0] ? icons->symlink_exec : icons->symlink;
+            return ICON_OR_FALLBACK(icons->symlink_exec, icons->symlink);
         case FTYPE_SYMLINK_DEVICE:
             return icons->device;
         case FTYPE_SYMLINK_SOCKET:
@@ -991,7 +996,7 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
         case FTYPE_SYMLINK_FIFO:
             return icons->fifo;
         case FTYPE_SYMLINK_BROKEN:
-            return icons->symlink_broken[0] ? icons->symlink_broken : icons->symlink;
+            return ICON_OR_FALLBACK(icons->symlink_broken, icons->symlink);
         case FTYPE_UNKNOWN:
         default:
             return icons->default_icon;
@@ -1106,9 +1111,9 @@ static void git_parse_status_output(FILE *fp, GitCache *cache, const char *repo_
         const char *arrow = strstr(path, " -> ");
         if (arrow) path = arrow + 4;
 
-        /* Build absolute path and remove trailing slash */
+        /* Build absolute path and remove trailing slash (directories from git end with /) */
         char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", repo_path, path);
+        path_join(full_path, sizeof(full_path), repo_path, path);
         len = strlen(full_path);
         if (len > 0 && full_path[len - 1] == '/') full_path[len - 1] = '\0';
 
@@ -1141,6 +1146,14 @@ static void git_populate_repo(GitCache *cache, const char *repo_path) {
     free(escaped);
 }
 
+/* Append colored icon to buffer, return new position */
+static char *append_git_icon(char *buf, size_t *remaining,
+                             const char *icon, const char *color, const Config *cfg) {
+    int written = snprintf(buf, *remaining, "%s%s%s ", color, icon, RST(cfg));
+    *remaining -= written;
+    return buf + written;
+}
+
 static const char *get_git_indicator(GitCache *cache, const char *path,
                                       const Icons *icons, const Config *cfg) {
     static char indicator[64];
@@ -1149,36 +1162,23 @@ static const char *get_git_indicator(GitCache *cache, const char *path,
     if (cfg->no_icons) return indicator;
 
     const char *status = git_cache_get(cache, path);
-    if (!status) return indicator;
+    if (!status || strcmp(status, "!!") == 0) return indicator;
 
-    if (strcmp(status, "!!") == 0) {
-        /* Ignored - no indicator */
-        return indicator;
-    } else if (strcmp(status, "??") == 0) {
-        snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 CLR(cfg, COLOR_RED), icons->git_untracked, RST(cfg));
+    char *p = indicator;
+    size_t remaining = sizeof(indicator);
+
+    if (strcmp(status, "??") == 0) {
+        append_git_icon(p, &remaining, icons->git_untracked, CLR(cfg, COLOR_RED), cfg);
     } else {
-        char *p = indicator;
-        size_t remaining = sizeof(indicator);
-        int written;
-
-        /* Modified in working tree (red) */
+        /* Modified/deleted in working tree (red) */
         if (status[1] == 'M') {
-            written = snprintf(p, remaining, "%s%s%s ",
-                             CLR(cfg, COLOR_RED), icons->git_modified, RST(cfg));
-            p += written;
-            remaining -= written;
+            p = append_git_icon(p, &remaining, icons->git_modified, CLR(cfg, COLOR_RED), cfg);
         } else if (status[1] == 'D') {
-            written = snprintf(p, remaining, "%s%s%s ",
-                             CLR(cfg, COLOR_RED), icons->git_deleted, RST(cfg));
-            p += written;
-            remaining -= written;
+            p = append_git_icon(p, &remaining, icons->git_deleted, CLR(cfg, COLOR_RED), cfg);
         }
-
         /* Staged in index (yellow) */
         if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
-            snprintf(p, remaining, "%s%s%s ",
-                    CLR(cfg, COLOR_YELLOW), icons->git_staged, RST(cfg));
+            append_git_icon(p, &remaining, icons->git_staged, CLR(cfg, COLOR_YELLOW), cfg);
         }
     }
 
@@ -1253,6 +1253,15 @@ static int entry_cmp_time(const void *a, const void *b) {
     return 0;
 }
 
+/* Reverse file list in place */
+static void reverse_file_list(FileList *list) {
+    for (size_t i = 0; i < list->count / 2; i++) {
+        FileEntry tmp = list->entries[i];
+        list->entries[i] = list->entries[list->count - 1 - i];
+        list->entries[list->count - 1 - i] = tmp;
+    }
+}
+
 static void sort_file_list(FileList *list, const Config *cfg) {
     if (list->count == 0) return;
 
@@ -1268,12 +1277,7 @@ static void sort_file_list(FileList *list, const Config *cfg) {
     qsort(list->entries, list->count, sizeof(FileEntry), cmp);
 
     if (cfg->sort_reverse) {
-        /* Reverse in place */
-        for (size_t i = 0; i < list->count / 2; i++) {
-            FileEntry tmp = list->entries[i];
-            list->entries[i] = list->entries[list->count - 1 - i];
-            list->entries[list->count - 1 - i] = tmp;
-        }
+        reverse_file_list(list);
     }
 }
 
@@ -1292,14 +1296,9 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
         if (!cfg->show_hidden && entry->d_name[0] == '.')
             continue;
 
-        /* Build full path (avoid double slash when dir_path is "/") */
+        /* Build full path */
         char full_path[PATH_MAX];
-        size_t dir_len = strlen(dir_path);
-        if (dir_len > 0 && dir_path[dir_len - 1] == '/') {
-            snprintf(full_path, sizeof(full_path), "%s%s", dir_path, entry->d_name);
-        } else {
-            snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
-        }
+        path_join(full_path, sizeof(full_path), dir_path, entry->d_name);
 
         FileEntry fe;
         memset(&fe, 0, sizeof(fe));
@@ -1346,12 +1345,7 @@ static int read_directory(const char *dir_path, FileList *list, const Config *cf
     if (cfg->sort_by != SORT_NONE && cfg->sort_by != SORT_NAME) {
         sort_file_list(list, cfg);
     } else if (cfg->sort_reverse) {
-        /* Reverse the default alphabetical sort */
-        for (size_t i = 0; i < list->count / 2; i++) {
-            FileEntry tmp = list->entries[i];
-            list->entries[i] = list->entries[list->count - 1 - i];
-            list->entries[list->count - 1 - i] = tmp;
-        }
+        reverse_file_list(list);
     }
 
     return 0;
@@ -1750,6 +1744,22 @@ static void print_usage(void) {
     printf("  -h, --help      Show this help message\n");
 }
 
+/* Apply a single-character flag. Returns 1 if valid, 0 if unknown. */
+static int apply_short_flag(char flag, Config *cfg) {
+    switch (flag) {
+        case 'a': cfg->show_hidden = 1; return 1;
+        case 's': cfg->long_format = 0; cfg->long_format_explicit = 1; return 1;
+        case 'l': cfg->long_format = 1; cfg->long_format_explicit = 1; return 1;
+        case 't': cfg->max_depth = MAX_DEPTH; return 1;
+        case 'S': cfg->sort_by = SORT_SIZE; return 1;
+        case 'T': cfg->sort_by = SORT_TIME; return 1;
+        case 'N': cfg->sort_by = SORT_NAME; return 1;
+        case 'r': cfg->sort_reverse = 1; return 1;
+        case 'h': print_usage(); exit(0);
+        default: return 0;
+    }
+}
+
 static void parse_args(int argc, char **argv, Config *cfg,
                        char ***dirs, int *dir_count) {
     static char *default_dirs[] = {"."};
@@ -1761,18 +1771,17 @@ static void parse_args(int argc, char **argv, Config *cfg,
         const char *arg = argv[i];
 
         if (arg[0] == '-' && arg[1] != '\0') {
-            if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+            /* Long options */
+            if (strcmp(arg, "--help") == 0) {
                 print_usage();
                 exit(0);
-            } else if (strcmp(arg, "-a") == 0) {
-                cfg->show_hidden = 1;
-            } else if (strcmp(arg, "-s") == 0 || strcmp(arg, "--short") == 0) {
+            } else if (strcmp(arg, "--short") == 0) {
                 cfg->long_format = 0;
                 cfg->long_format_explicit = 1;
-            } else if (strcmp(arg, "-l") == 0 || strcmp(arg, "--long") == 0) {
+            } else if (strcmp(arg, "--long") == 0) {
                 cfg->long_format = 1;
                 cfg->long_format_explicit = 1;
-            } else if (strcmp(arg, "-t") == 0 || strcmp(arg, "--tree") == 0) {
+            } else if (strcmp(arg, "--tree") == 0) {
                 cfg->max_depth = MAX_DEPTH;
             } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--depth") == 0) {
                 if (i + 1 >= argc) die("-d/--depth requires an argument");
@@ -1790,31 +1799,13 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 cfg->list_mode = 1;
             } else if (strcmp(arg, "--no-icons") == 0) {
                 cfg->no_icons = 1;
-            } else if (strcmp(arg, "-S") == 0) {
-                cfg->sort_by = SORT_SIZE;
-            } else if (strcmp(arg, "-T") == 0) {
-                cfg->sort_by = SORT_TIME;
-            } else if (strcmp(arg, "-N") == 0) {
-                cfg->sort_by = SORT_NAME;
-            } else if (strcmp(arg, "-r") == 0) {
-                cfg->sort_reverse = 1;
             } else if (arg[1] != '-') {
-                /* Handle combined short flags like -as */
+                /* Short flags (single or combined like -asl) */
                 for (int j = 1; arg[j]; j++) {
-                    switch (arg[j]) {
-                        case 'a': cfg->show_hidden = 1; break;
-                        case 's': cfg->long_format = 0; cfg->long_format_explicit = 1; break;
-                        case 'l': cfg->long_format = 1; cfg->long_format_explicit = 1; break;
-                        case 't': cfg->max_depth = MAX_DEPTH; break;
-                        case 'S': cfg->sort_by = SORT_SIZE; break;
-                        case 'T': cfg->sort_by = SORT_TIME; break;
-                        case 'N': cfg->sort_by = SORT_NAME; break;
-                        case 'r': cfg->sort_reverse = 1; break;
-                        case 'h': print_usage(); exit(0);
-                        default:
-                            fprintf(stderr, "%sError:%s Unknown option: -%c\n",
-                                    CLR(cfg, COLOR_RED), RST(cfg), arg[j]);
-                            exit(1);
+                    if (!apply_short_flag(arg[j], cfg)) {
+                        fprintf(stderr, "%sError:%s Unknown option: -%c\n",
+                                CLR(cfg, COLOR_RED), RST(cfg), arg[j]);
+                        exit(1);
                     }
                 }
             } else {
@@ -1949,5 +1940,3 @@ int main(int argc, char **argv) {
     cache_unload();
     return 0;
 }
-/* test1 */
-/* test2 */
