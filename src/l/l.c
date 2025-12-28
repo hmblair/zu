@@ -33,6 +33,9 @@
 #include <sys/mount.h>
 #endif
 #include <omp.h>
+#ifdef HAVE_LIBGIT2
+#include <git2.h>
+#endif
 #include "cache.h"
 #include "dir_stats.h"
 
@@ -1008,6 +1011,7 @@ static const char *get_icon(const Icons *icons, FileType type, int is_cwd,
  * Git Integration
  * ============================================================================ */
 
+#ifndef HAVE_LIBGIT2
 /*
  * Escape a path for safe use in shell single quotes: ' -> '\''
  *
@@ -1039,6 +1043,7 @@ static char *shell_escape(const char *path) {
     *out = '\0';
     return escaped;
 }
+#endif /* !HAVE_LIBGIT2 */
 
 static void git_cache_init(GitCache *cache) {
     memset(cache->buckets, 0, sizeof(cache->buckets));
@@ -1104,7 +1109,85 @@ static int is_git_root(const char *path) {
     return stat(git_path, &st) == 0;
 }
 
-/* Helper to parse git status output and add to cache */
+#ifdef HAVE_LIBGIT2
+
+/* libgit2 implementation - faster, no fork/exec overhead */
+
+static void git_populate_repo(GitCache *cache, const char *repo_path) {
+    git_repository *repo = NULL;
+    git_status_list *status_list = NULL;
+    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
+
+    if (git_repository_open(&repo, repo_path) != 0) return;
+
+    /* Match behavior of: git status --porcelain -uall --ignored=matching */
+    opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED |
+                 GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS |
+                 GIT_STATUS_OPT_INCLUDE_IGNORED |
+                 GIT_STATUS_OPT_EXCLUDE_SUBMODULES;
+
+    if (git_status_list_new(&status_list, repo, &opts) != 0) {
+        git_repository_free(repo);
+        return;
+    }
+
+    size_t count = git_status_list_entrycount(status_list);
+    for (size_t i = 0; i < count; i++) {
+        const git_status_entry *entry = git_status_byindex(status_list, i);
+        if (!entry) continue;
+
+        /* Determine path (prefer new path for renames) */
+        const char *path = entry->head_to_index ? entry->head_to_index->new_file.path : NULL;
+        if (!path && entry->index_to_workdir)
+            path = entry->index_to_workdir->new_file.path;
+        if (!path) continue;
+
+        /* Convert libgit2 status to porcelain format (XY) */
+        char status[3] = {' ', ' ', '\0'};
+        unsigned int s = entry->status;
+
+        /* Index status (X) */
+        if (s & GIT_STATUS_INDEX_NEW)        status[0] = 'A';
+        else if (s & GIT_STATUS_INDEX_MODIFIED) status[0] = 'M';
+        else if (s & GIT_STATUS_INDEX_DELETED)  status[0] = 'D';
+        else if (s & GIT_STATUS_INDEX_RENAMED)  status[0] = 'R';
+        else if (s & GIT_STATUS_INDEX_TYPECHANGE) status[0] = 'T';
+
+        /* Workdir status (Y) */
+        if (s & GIT_STATUS_WT_NEW)           status[1] = '?';
+        else if (s & GIT_STATUS_WT_MODIFIED) status[1] = 'M';
+        else if (s & GIT_STATUS_WT_DELETED)  status[1] = 'D';
+        else if (s & GIT_STATUS_WT_RENAMED)  status[1] = 'R';
+        else if (s & GIT_STATUS_WT_TYPECHANGE) status[1] = 'T';
+
+        /* Ignored */
+        if (s & GIT_STATUS_IGNORED) {
+            status[0] = '!';
+            status[1] = '!';
+        }
+
+        /* Untracked (workdir new without index) */
+        if ((s & GIT_STATUS_WT_NEW) && !(s & GIT_STATUS_INDEX_NEW)) {
+            status[0] = '?';
+            status[1] = '?';
+        }
+
+        /* Build absolute path */
+        char full_path[PATH_MAX];
+        path_join(full_path, sizeof(full_path), repo_path, path);
+
+        git_cache_add(cache, full_path, status);
+    }
+
+    git_status_list_free(status_list);
+    git_repository_free(repo);
+}
+
+#else
+
+/* Fallback: shell out to git command */
+
 static void git_parse_status_output(FILE *fp, GitCache *cache, const char *repo_path) {
     char line[PATH_MAX + 8];
     while (fgets(line, sizeof(line), fp)) {
@@ -1129,7 +1212,6 @@ static void git_parse_status_output(FILE *fp, GitCache *cache, const char *repo_
     }
 }
 
-/* Populate git status for a specific repository into the cache */
 static void git_populate_repo(GitCache *cache, const char *repo_path) {
     char *escaped = shell_escape(repo_path);
     char cmd[PATH_MAX * 2 + 64];
@@ -1147,6 +1229,8 @@ static void git_populate_repo(GitCache *cache, const char *repo_path) {
 
     free(escaped);
 }
+
+#endif /* HAVE_LIBGIT2 */
 
 /* Append colored icon to buffer, return new position */
 static char *append_git_icon(char *buf, size_t *remaining,
@@ -1585,6 +1669,34 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
 }
 
 /* Find enclosing git repo root for a path (if any) */
+#ifdef HAVE_LIBGIT2
+
+static int find_git_root(const char *path, char *root, size_t root_len) {
+    git_buf buf = {0};
+    if (git_repository_discover(&buf, path, 0, NULL) != 0) {
+        return 0;
+    }
+    /* buf contains path to .git, get parent directory */
+    git_repository *repo = NULL;
+    if (git_repository_open(&repo, buf.ptr) != 0) {
+        git_buf_dispose(&buf);
+        return 0;
+    }
+    const char *workdir = git_repository_workdir(repo);
+    if (workdir) {
+        strncpy(root, workdir, root_len - 1);
+        root[root_len - 1] = '\0';
+        /* Remove trailing slash */
+        size_t len = strlen(root);
+        if (len > 0 && root[len - 1] == '/') root[len - 1] = '\0';
+    }
+    git_repository_free(repo);
+    git_buf_dispose(&buf);
+    return workdir != NULL;
+}
+
+#else
+
 static int find_git_root(const char *path, char *root, size_t root_len) {
     char *escaped = shell_escape(path);
     char cmd[PATH_MAX * 2 + 64];
@@ -1603,6 +1715,8 @@ static int find_git_root(const char *path, char *root, size_t root_len) {
     pclose(fp);
     return found;
 }
+
+#endif /* HAVE_LIBGIT2 */
 
 static TreeNode *build_tree(const char *path, Column *cols,
                             GitCache *git, const Config *cfg, const Icons *icons) {
@@ -1853,6 +1967,10 @@ static void parse_args(int argc, char **argv, Config *cfg,
  * ============================================================================ */
 
 int main(int argc, char **argv) {
+#ifdef HAVE_LIBGIT2
+    git_libgit2_init();
+#endif
+
     /* Initialize config with defaults */
     Config cfg = {
         .max_depth = 1,
@@ -1958,5 +2076,8 @@ int main(int argc, char **argv) {
     }
 
     cache_unload();
+#ifdef HAVE_LIBGIT2
+    git_libgit2_shutdown();
+#endif
     return 0;
 }
