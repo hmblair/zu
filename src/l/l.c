@@ -1053,6 +1053,16 @@ static void git_cache_free(GitCache *cache) {
 
 static void git_cache_add(GitCache *cache, const char *path, const char *status) {
     unsigned int h = hash_string(path);
+
+    /* Check if already exists - skip duplicates */
+    GitStatusNode *existing = cache->buckets[h];
+    while (existing) {
+        if (strcmp(existing->path, path) == 0) {
+            return;  /* Already in cache */
+        }
+        existing = existing->next;
+    }
+
     GitStatusNode *node = xmalloc(sizeof(GitStatusNode));
     node->path = xstrdup(path);
     strncpy(node->status, status, 2);
@@ -1133,7 +1143,7 @@ static void git_populate_repo(GitCache *cache, const char *repo_path) {
 
 static const char *get_git_indicator(GitCache *cache, const char *path,
                                       const Icons *icons, const Config *cfg) {
-    static char indicator[32];
+    static char indicator[64];
     indicator[0] = '\0';
 
     if (cfg->no_icons) return indicator;
@@ -1147,18 +1157,29 @@ static const char *get_git_indicator(GitCache *cache, const char *path,
     } else if (strcmp(status, "??") == 0) {
         snprintf(indicator, sizeof(indicator), "%s%s%s ",
                  CLR(cfg, COLOR_RED), icons->git_untracked, RST(cfg));
-    } else if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
-        /* Staged */
-        snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 CLR(cfg, COLOR_YELLOW), icons->git_staged, RST(cfg));
-    } else if (status[1] == 'M') {
-        /* Modified */
-        snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 CLR(cfg, COLOR_RED), icons->git_modified, RST(cfg));
-    } else if (status[1] == 'D') {
-        /* Deleted */
-        snprintf(indicator, sizeof(indicator), "%s%s%s ",
-                 CLR(cfg, COLOR_RED), icons->git_deleted, RST(cfg));
+    } else {
+        char *p = indicator;
+        size_t remaining = sizeof(indicator);
+        int written;
+
+        /* Modified in working tree (red) */
+        if (status[1] == 'M') {
+            written = snprintf(p, remaining, "%s%s%s ",
+                             CLR(cfg, COLOR_RED), icons->git_modified, RST(cfg));
+            p += written;
+            remaining -= written;
+        } else if (status[1] == 'D') {
+            written = snprintf(p, remaining, "%s%s%s ",
+                             CLR(cfg, COLOR_RED), icons->git_deleted, RST(cfg));
+            p += written;
+            remaining -= written;
+        }
+
+        /* Staged in index (yellow) */
+        if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
+            snprintf(p, remaining, "%s%s%s ",
+                    CLR(cfg, COLOR_YELLOW), icons->git_staged, RST(cfg));
+        }
     }
 
     return indicator;
@@ -1188,12 +1209,16 @@ static GitSummary get_git_dir_summary(GitCache *cache, const char *dir_path) {
                     /* Ignored - skip */
                 } else if (strcmp(status, "??") == 0) {
                     summary.untracked++;
-                } else if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
-                    summary.staged++;
-                } else if (status[1] == 'M') {
-                    summary.modified++;
-                } else if (status[1] == 'D') {
-                    summary.deleted++;
+                } else {
+                    /* Check staged (index) and working tree separately */
+                    if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
+                        summary.staged++;
+                    }
+                    if (status[1] == 'M') {
+                        summary.modified++;
+                    } else if (status[1] == 'D') {
+                        summary.deleted++;
+                    }
                 }
             }
             node = node->next;
@@ -1545,14 +1570,35 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
     free(list.entries);
 }
 
+/* Find enclosing git repo root for a path (if any) */
+static int find_git_root(const char *path, char *root, size_t root_len) {
+    char *escaped = shell_escape(path);
+    char cmd[PATH_MAX * 2 + 64];
+    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --show-toplevel 2>/dev/null", escaped);
+    free(escaped);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    int found = 0;
+    if (fgets(root, root_len, fp)) {
+        size_t len = strlen(root);
+        if (len > 0 && root[len - 1] == '\n') root[len - 1] = '\0';
+        found = 1;
+    }
+    pclose(fp);
+    return found;
+}
+
 static TreeNode *build_tree(const char *path, Column *cols,
                             GitCache *git, const Config *cfg, const Icons *icons) {
     char abs_path[PATH_MAX];
     get_abspath(path, abs_path, cfg);  /* Don't resolve symlinks for root */
 
-    /* Detect and populate git status if this is a repo root */
-    if (is_git_root(abs_path)) {
-        git_populate_repo(git, abs_path);
+    /* Detect enclosing git repo and populate status */
+    char git_root[PATH_MAX];
+    if (find_git_root(abs_path, git_root, sizeof(git_root))) {
+        git_populate_repo(git, git_root);
     }
 
     struct stat st;
@@ -1903,3 +1949,5 @@ int main(int argc, char **argv) {
     cache_unload();
     return 0;
 }
+/* test1 */
+/* test2 */
