@@ -63,7 +63,8 @@ cmd_monitor() {
     fi
 
     # Get all stats in a single SSH call (value|percentage format)
-    local stats
+    local stats ssh_err
+    ssh_err=$(mktemp)
     stats=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" '
         # Uptime
         uptime -p 2>/dev/null | sed "s/^up //" || uptime | sed "s/.*up //" | sed "s/,.*$//"
@@ -144,11 +145,18 @@ cmd_monitor() {
                 printf \"net:%.1f %s / %.1f %s\n\", rx_val, rx_unit, tx_val, tx_unit
             }
         " || echo "net:N/A"
-    ' 2>/dev/null)
+    ' 2>"$ssh_err")
 
     if [[ -z "$stats" ]]; then
-        error "Failed to retrieve stats from $host"
+        local err_msg=$(cat "$ssh_err" 2>/dev/null)
+        rm -f "$ssh_err"
+        if [[ -n "$err_msg" ]]; then
+            error "Failed to connect to $host: $err_msg"
+        else
+            error "Failed to retrieve stats from $host (no output received)"
+        fi
     fi
+    rm -f "$ssh_err"
 
     # Parse uptime (first line before ---)
     local uptime_val
