@@ -4,21 +4,37 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/common"
 
 if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
-    echo "Usage: ${0:t} [FILES]"
+    echo "Usage: ${0:t} [-r] [FILES]"
     echo "Print full paths of files, or current directory if no files given"
+    echo ""
+    echo "Options:"
+    echo "  -r  Resolve symlinks"
     exit 0
+fi
+
+resolve=false
+if [[ "$1" == "-r" ]]; then
+    resolve=true
+    shift
 fi
 
 if [[ $# -eq 0 ]]; then
     # No arguments: print full path of current directory
-    pwd
+    if $resolve; then
+        pwd -P
+    else
+        pwd
+    fi
 else
     # Arguments provided: print full path of each file
     for file in "$@"; do
         if [[ ! -e "$file" ]]; then
             error "File not found: $file"
         fi
-        # Get absolute path using zsh's :A modifier
-        echo "${file:A}"
+        if $resolve; then
+            echo "${file:A}"
+        else
+            echo "${file:a}"
+        fi
     done
 fi
