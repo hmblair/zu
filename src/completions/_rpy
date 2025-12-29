@@ -1,0 +1,38 @@
+#compdef rpy
+
+_rpy_aliases() {
+    local config="$HOME/.config/rpy"
+    [[ -f $config ]] || return
+    local -a aliases
+    while IFS='=' read -r name _; do
+        [[ -n $name && $name != \#* ]] && aliases+=("${name## }")
+    done < "$config"
+    compadd -a aliases
+}
+
+_rpy_hosts() {
+    _ssh_hosts 2>/dev/null || _hosts
+}
+
+_rpy() {
+    local -a options=(
+        '-d[Detach: run in background]'
+        '-p[Python interpreter]:python path:_files'
+        '(-h --help)'{-h,--help}'[Show help]'
+    )
+
+    _arguments -s \
+        '1:host:->host' \
+        "${options[@]}" \
+        '*:file:_files -g "*.py"'
+
+    case $state in
+        host)
+            _alternative \
+                'aliases:alias:_rpy_aliases' \
+                'hosts:host:_rpy_hosts'
+            ;;
+    esac
+}
+
+_rpy "$@"

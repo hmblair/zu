@@ -1,0 +1,149 @@
+#!/usr/bin/env zsh
+
+# rpy - Run Python file on a remote server
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/common"
+
+CONFIG="$HOME/.config/rpy"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << EOF
+Usage: rpy <alias|user@host> [-d] [-p python] [file.py] [args...]
+
+Run a Python file on a remote server, streaming output back.
+If no file given, reads from stdin.
+
+Options:
+  -d         Detach: run in background, survive disconnection
+  -p <path>  Python interpreter (default: python3)
+
+Aliases: Define in $CONFIG as:
+  gpu = user@host -p /path/to/python
+
+Examples:
+  rpy gpu train.py
+  rpy gpu -d train.py
+  rpy alice@server train.py
+  echo 'print(1)' | rpy gpu
+
+EOF
+}
+
+expand_alias() {
+    local name="$1"
+    if [[ -f $CONFIG && $name != *@* ]]; then
+        local line=$(grep -E "^${name}\s*=" "$CONFIG" 2>/dev/null | head -1)
+        if [[ -n $line ]]; then
+            local value=${line#*=}
+            echo "${value## }"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_foreground() {
+    local target="$1"
+    local python="$2"
+    local file="$3"
+    shift 3
+    local args=("$@")
+
+    if [[ -z $file && -t 0 ]]; then
+        error "No input file and stdin is a terminal. Provide a file or pipe input."
+    fi
+
+    [[ -n $file ]] && exec < "$file"
+    ssh -T "$target" "$python - ${(q)args[@]}"
+}
+
+run_detached() {
+    local target="$1"
+    local python="$2"
+    local file="$3"
+    shift 3
+    local args=("$@")
+
+    if [[ -z $file ]]; then
+        error "-d requires a file (cannot detach piped input)"
+    fi
+
+    local timestamp=$(date +%Y%m%d-%H%M%S)
+    local remote_script="/tmp/rpy-${timestamp}.py"
+    local remote_log="/tmp/rpy-${timestamp}.log"
+
+    scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
+
+    local pid=$(ssh "$target" "nohup $python $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
+
+    success "Detached: PID $pid"
+    echo "Log: $remote_log"
+    echo "View: ssh $target tail -f $remote_log"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    if [[ $# -lt 1 || $1 == -h || $1 == --help || $1 == help ]]; then
+        usage
+        exit 0
+    fi
+
+    # Expand alias if present
+    local alias_value
+    if alias_value=$(expand_alias "$1"); then
+        shift
+        set -- ${=alias_value} "$@"
+    fi
+
+    # Parse target (user@host or user host)
+    local target
+    if [[ $1 == *@* ]]; then
+        target=$1
+        shift
+    else
+        if [[ $# -lt 2 ]]; then
+            error "Missing hostname"
+        fi
+        target="$1@$2"
+        shift 2
+    fi
+
+    # Parse flags
+    local detach=false
+    local python=python3
+    while [[ $1 == -* ]]; do
+        case $1 in
+            -d) detach=true; shift ;;
+            -p) shift; python=$1; shift ;;
+            *) break ;;
+        esac
+    done
+
+    # Parse file
+    local file=""
+    if [[ $# -gt 0 && -f $1 ]]; then
+        file=$1
+        shift
+    fi
+
+    # Run
+    if $detach; then
+        run_detached "$target" "$python" "$file" "$@"
+    else
+        run_foreground "$target" "$python" "$file" "$@"
+    fi
+}
+
+main "$@"
