@@ -32,6 +32,7 @@ _rpy() {
         '--status[Check if job is running]:job:_rpy_jobs'
         '--log[Show job output]:job:_rpy_jobs'
         '--kill[Kill a running job]:job:_rpy_jobs'
+        '--gpus[Show GPU availability and utilization]'
     )
 
     _arguments -s \

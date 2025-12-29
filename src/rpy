@@ -27,6 +27,7 @@ Job management:
   --status <job>  Check if job is running (exit 0=running, 1=done)
   --log <job>     Show job output (use -f to follow)
   --kill <job>    Kill a running job
+  --gpus       Show GPU availability and utilization
 
 Aliases: Define in $CONFIG as:
   gpu = user@host -p /path/to/python
@@ -157,6 +158,34 @@ cmd_kill() {
     esac
 }
 
+cmd_gpus() {
+    local target="$1"
+    ssh "$target" 'nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null' | \
+    while IFS=, read -r idx name mem_used mem_total util; do
+        # Trim whitespace
+        idx="${idx## }"; idx="${idx%% }"
+        name="${name## }"; name="${name%% }"
+        mem_used="${mem_used## }"; mem_used="${mem_used%% }"
+        mem_total="${mem_total## }"; mem_total="${mem_total%% }"
+        util="${util## }"; util="${util%% }"
+
+        # Calculate memory percentage
+        mem_pct=$((mem_used * 100 / mem_total))
+
+        # Color based on utilization
+        if [[ $util -lt 10 && $mem_pct -lt 10 ]]; then
+            gpu_status="${GREEN}free${NC}"
+        elif [[ $util -lt 50 ]]; then
+            gpu_status="${YELLOW}partial${NC}"
+        else
+            gpu_status="${RED}busy${NC}"
+        fi
+
+        printf "GPU %s: %-20s %5dMB/%5dMB (%2d%%)  util: %3d%%  %b\n" \
+            "$idx" "$name" "$mem_used" "$mem_total" "$mem_pct" "$util" "$gpu_status"
+    done
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Run commands
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,6 +287,10 @@ main() {
             ;;
         --kill)
             cmd_kill "$target" "$2"
+            return
+            ;;
+        --gpus)
+            cmd_gpus "$target"
             return
             ;;
     esac
