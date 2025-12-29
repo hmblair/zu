@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 
-# rpy - Run Python file on a remote server
+# rpy - Run Python files on remote servers
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/common"
@@ -13,22 +13,30 @@ CONFIG="$HOME/.config/rpy"
 
 usage() {
     cat << EOF
-Usage: rpy <alias|user@host> [-d] [-p python] [file.py] [args...]
+Usage: rpy <alias|host> [options] [file.py] [args...]
+       rpy <alias|host> --jobs|--status|--log|--kill <job>
 
-Run a Python file on a remote server, streaming output back.
-If no file given, reads from stdin.
+Run Python files on remote servers, with job management for detached runs.
 
 Options:
-  -d         Detach: run in background, survive disconnection
-  -p <path>  Python interpreter (default: python3)
+  -d           Detach: run in background, survive disconnection
+  -p <path>    Python interpreter (default: python3)
+
+Job management:
+  --jobs       List all rpy jobs on remote
+  --status <job>  Check if job is running (exit 0=running, 1=done)
+  --log <job>     Show job output (use -f to follow)
+  --kill <job>    Kill a running job
 
 Aliases: Define in $CONFIG as:
   gpu = user@host -p /path/to/python
 
 Examples:
-  rpy gpu train.py
-  rpy gpu -d train.py
-  rpy alice@server train.py
+  rpy gpu train.py              # run and stream output
+  rpy gpu -d train.py           # detach, returns job ID
+  rpy gpu --jobs                # list jobs
+  rpy gpu --log 20251229-120000 # view output
+  rpy gpu --kill 20251229-120000
   echo 'print(1)' | rpy gpu
 
 EOF
@@ -47,8 +55,110 @@ expand_alias() {
     return 1
 }
 
+# Extract just the host from target (for job commands, ignore -p flag)
+parse_target() {
+    local first="$1"
+    if [[ $first == *@* ]]; then
+        echo "$first"
+    else
+        echo "$1@$2"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Commands
+# Job management commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_jobs() {
+    local target="$1"
+    ssh "$target" 'bash -c '\''
+        for log in /tmp/rpy-*.log; do
+            [ -f "$log" ] || continue
+            job=$(basename "$log" .log | sed "s/rpy-//")
+
+            # Use character class trick to prevent pgrep from matching itself
+            pattern="rpy-${job}[.]py"
+            pid=$(pgrep -f "$pattern" 2>/dev/null | head -1)
+
+            if [ -n "$pid" ]; then
+                status="running (PID $pid)"
+            else
+                status="done"
+            fi
+
+            # Get first line of script as description
+            desc=""
+            script="/tmp/rpy-${job}.py"
+            if [ -f "$script" ]; then
+                desc=$(head -1 "$script" | sed "s/^#[[:space:]]*//" | cut -c1-40)
+            fi
+
+            printf "%-20s %-20s %s\n" "$job" "$status" "$desc"
+        done
+    '\''' | sort -r
+}
+
+cmd_status() {
+    local target="$1"
+    local job="$2"
+
+    [[ -z $job ]] && error "Usage: rpy <host> --status <job>"
+
+    # Use character class trick to prevent pgrep from matching itself
+    local pattern="rpy-${job}[.]py"
+    local running=$(ssh "$target" "pgrep -f '$pattern' >/dev/null 2>&1 && echo yes || echo no")
+
+    if [[ $running == "yes" ]]; then
+        echo "running"
+        return 0
+    else
+        echo "done"
+        return 1
+    fi
+}
+
+cmd_log() {
+    local target="$1"
+    local job="$2"
+    local follow="$3"
+
+    [[ -z $job ]] && error "Usage: rpy <host> --log <job> [-f]"
+
+    local log="/tmp/rpy-${job}.log"
+
+    if [[ $follow == "-f" ]]; then
+        ssh "$target" "tail -f '$log'"
+    else
+        ssh "$target" "cat '$log'"
+    fi
+}
+
+cmd_kill() {
+    local target="$1"
+    local job="$2"
+
+    [[ -z $job ]] && error "Usage: rpy <host> --kill <job>"
+
+    # Use character class trick to prevent pgrep from matching itself
+    local pattern="rpy-${job}[.]py"
+    local result=$(ssh "$target" "
+        pid=\$(pgrep -f '$pattern' | head -1)
+        if [ -n \"\$pid\" ]; then
+            kill \"\$pid\" 2>/dev/null && echo killed || echo failed
+        else
+            echo not_running
+        fi
+    ")
+
+    case $result in
+        killed) success "Killed job $job" ;;
+        not_running) warn "Job $job is not running" ;;
+        *) error "Failed to kill job $job" ;;
+    esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run commands
 # ─────────────────────────────────────────────────────────────────────────────
 
 run_foreground() {
@@ -77,17 +187,18 @@ run_detached() {
         error "-d requires a file (cannot detach piped input)"
     fi
 
-    local timestamp=$(date +%Y%m%d-%H%M%S)
-    local remote_script="/tmp/rpy-${timestamp}.py"
-    local remote_log="/tmp/rpy-${timestamp}.log"
+    local job=$(date +%Y%m%d-%H%M%S)
+    local remote_script="/tmp/rpy-${job}.py"
+    local remote_log="/tmp/rpy-${job}.log"
 
     scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
     local pid=$(ssh "$target" "nohup $python $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
 
-    success "Detached: PID $pid"
-    echo "Log: $remote_log"
-    echo "View: ssh $target tail -f $remote_log"
+    success "Detached: $job (PID $pid)"
+    echo "Status: rpy ${target} --status $job"
+    echo "Log:    rpy ${target} --log $job"
+    echo "Kill:   rpy ${target} --kill $job"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,16 +231,36 @@ main() {
         shift 2
     fi
 
-    # Parse flags
+    # Parse flags (before job commands, since alias may include -p)
     local detach=false
     local python=python3
-    while [[ $1 == -* ]]; do
+    while [[ $1 == -* && $1 != --* ]]; do
         case $1 in
             -d) detach=true; shift ;;
             -p) shift; python=$1; shift ;;
             *) break ;;
         esac
     done
+
+    # Check for job management commands
+    case $1 in
+        --jobs)
+            cmd_jobs "$target"
+            return
+            ;;
+        --status)
+            cmd_status "$target" "$2"
+            return
+            ;;
+        --log)
+            cmd_log "$target" "$2" "$3"
+            return
+            ;;
+        --kill)
+            cmd_kill "$target" "$2"
+            return
+            ;;
+    esac
 
     # Parse file
     local file=""

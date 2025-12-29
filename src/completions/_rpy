@@ -14,6 +14,12 @@ _rpy_hosts() {
     _ssh_hosts 2>/dev/null || _hosts
 }
 
+_rpy_jobs() {
+    # Complete job IDs from remote (if we have a target)
+    # For now, just suggest timestamp format
+    _message "job ID (YYYYMMDD-HHMMSS)"
+}
+
 _rpy() {
     local -a options=(
         '-d[Detach: run in background]'
@@ -21,9 +27,17 @@ _rpy() {
         '(-h --help)'{-h,--help}'[Show help]'
     )
 
+    local -a job_commands=(
+        '--jobs[List all rpy jobs on remote]'
+        '--status[Check if job is running]:job:_rpy_jobs'
+        '--log[Show job output]:job:_rpy_jobs'
+        '--kill[Kill a running job]:job:_rpy_jobs'
+    )
+
     _arguments -s \
         '1:host:->host' \
         "${options[@]}" \
+        "${job_commands[@]}" \
         '*:file:_files -g "*.py"'
 
     case $state in
