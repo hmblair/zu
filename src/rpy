@@ -293,6 +293,9 @@ main() {
             cmd_gpus "$target"
             return
             ;;
+        -*)
+            error "Unknown option: $1"
+            ;;
     esac
 
     # Parse file
