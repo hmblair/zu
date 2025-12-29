@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
