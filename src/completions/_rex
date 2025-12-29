@@ -1,7 +1,7 @@
-#compdef rpy
+#compdef rex
 
-_rpy_aliases() {
-    local config="$HOME/.config/rpy"
+_rex_aliases() {
+    local config="$HOME/.config/rex"
     [[ -f $config ]] || return
     local -a aliases
     while IFS='=' read -r name _; do
@@ -10,17 +10,15 @@ _rpy_aliases() {
     compadd -a aliases
 }
 
-_rpy_hosts() {
+_rex_hosts() {
     _ssh_hosts 2>/dev/null || _hosts
 }
 
-_rpy_jobs() {
-    # Complete job IDs from remote (if we have a target)
-    # For now, just suggest timestamp format
+_rex_jobs() {
     _message "job ID (YYYYMMDD-HHMMSS)"
 }
 
-_rpy() {
+_rex() {
     local -a options=(
         '-d[Detach: run in background]'
         '(-n --name)'{-n,--name}'[Name for detached job]:name:'
@@ -37,10 +35,11 @@ _rpy() {
     )
 
     local -a job_commands=(
-        '--jobs[List all rpy jobs on remote]'
-        '--status[Check if job is running]:job:_rpy_jobs'
-        '--log[Show job output]:job:_rpy_jobs'
-        '--kill[Kill a running job]:job:_rpy_jobs'
+        '--jobs[List all rex jobs on remote]'
+        '--status[Check if job is running]:job:_rex_jobs'
+        '--log[Show job output]:job:_rex_jobs'
+        '--kill[Kill a running job]:job:_rex_jobs'
+        '--watch[Wait for job to complete]:job:_rex_jobs'
         '--gpus[Show GPU availability and utilization]'
         '--last[Use most recent job]'
         '--json[Output in JSON format]'
@@ -51,21 +50,32 @@ _rpy() {
         '--no-install[Skip pip install after sync]'
     )
 
+    local -a transfer_options=(
+        '--push[Upload local file/dir to remote]:local path:_files'
+        '--pull[Download remote file/dir to local]:remote path:'
+    )
+
+    local -a exec_options=(
+        '--exec[Execute shell command on remote]:command:'
+    )
+
     _arguments -s \
         '1:host:->host' \
         "${options[@]}" \
         "${slurm_options[@]}" \
         "${job_commands[@]}" \
         "${sync_options[@]}" \
+        "${transfer_options[@]}" \
+        "${exec_options[@]}" \
         '*:file:_files -g "*.py"'
 
     case $state in
         host)
             _alternative \
-                'aliases:alias:_rpy_aliases' \
-                'hosts:host:_rpy_hosts'
+                'aliases:alias:_rex_aliases' \
+                'hosts:host:_rex_hosts'
             ;;
     esac
 }
 
-_rpy "$@"
+_rex "$@"

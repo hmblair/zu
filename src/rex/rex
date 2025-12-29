@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 emulate -L zsh
 
-# rpy - Run Python files on remote servers
+# rex - Remote execution tool
 
 # Debug mode
 if [[ $1 == --debug ]]; then
@@ -12,7 +12,7 @@ fi
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/../common"
 
-CONFIG="$HOME/.config/rpy"
+CONFIG="$HOME/.config/rex"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -26,19 +26,19 @@ remote_exec() {
 
 # Pattern for pgrep that won't match itself (character class trick)
 job_pattern() {
-    echo "rpy-${1}[.]py"
+    echo "rex-${1}[.]py"
 }
 
-# Find log file path on remote (SLURM uses ~/.rpy, direct SSH uses /tmp)
+# Find log file path on remote (SLURM uses ~/.rex, direct SSH uses /tmp)
 remote_log_path() {
     local job="$1"
-    echo "if [ -f ~/.rpy/rpy-${job}.log ]; then echo ~/.rpy/rpy-${job}.log; elif [ -f /tmp/rpy-${job}.log ]; then echo /tmp/rpy-${job}.log; else echo ''; fi"
+    echo "if [ -f ~/.rex/rex-${job}.log ]; then echo ~/.rex/rex-${job}.log; elif [ -f /tmp/rex-${job}.log ]; then echo /tmp/rex-${job}.log; else echo ''; fi"
 }
 
 # Get most recent job ID from remote
 get_last_job() {
     local target="$1"
-    remote_exec "$target" "ls -t ~/.rpy/rpy-*.log /tmp/rpy-*.log 2>/dev/null | head -1 | sed 's|.*/rpy-||; s|\.log$||'"
+    remote_exec "$target" "ls -t ~/.rex/rex-*.log /tmp/rex-*.log 2>/dev/null | head -1 | sed 's|.*/rex-||; s|\.log$||'"
 }
 
 # Resolve job ID, handling --last
@@ -64,11 +64,12 @@ json_escape() {
 
 usage() {
     cat << EOF
-Usage: rpy <alias|host> [options] [file.py] [args...]
-       rpy <alias|host> --jobs|--status|--log|--kill <job>
-       rpy <alias|host> --sync [--no-install] [path]
+Usage: rex <alias|host> [options] [file.py] [args...]
+       rex <alias|host> --jobs|--status|--log|--kill|--watch <job>
+       rex <alias|host> --sync|--push|--pull [path]
+       rex <alias|host> --exec <command>
 
-Run Python files on remote servers, with job management for detached runs.
+Remote execution tool for Python and shell commands.
 
 Options:
   -d              Detach: run in background, survive disconnection
@@ -77,17 +78,26 @@ Options:
   -m <module>     Load module before running (repeatable)
 
 Job management:
-  --jobs          List all rpy jobs on remote
+  --jobs          List all rex jobs on remote
   --status <job>  Check if job is running (exit 0=running, 1=done)
   --log <job>     Show job output (use -f to follow)
   --kill <job>    Kill a running job
+  --watch <job>   Wait for job to complete, return exit code
   --gpus          Show GPU availability and utilization
-  --last          Use most recent job (with --status/--log/--kill)
-  --json          Output in JSON format (with --jobs/--gpus/--status)
+  --last          Use most recent job (with --status/--log/--kill/--watch)
+  --json          Output in JSON format (with --jobs/--gpus/--status/--watch)
+
+File transfer:
+  --push <l> [r]  Upload local file/dir to remote
+  --pull <r> [l]  Download remote file/dir to local (supports globs)
 
 Project sync:
   --sync [path]    Rsync project to remote, pip install -e if pyproject.toml exists
   --no-install     Skip pip install (use with --sync)
+
+Shell execution:
+  --exec <cmd>     Execute arbitrary shell command on remote
+                   Use -d for detached mode
 
 SLURM options (for HPC clusters):
   --slurm          Enable SLURM mode (use srun/sbatch)
@@ -100,17 +110,18 @@ Aliases: Define in $CONFIG as:
   sherlock = user@host --slurm -m python/3.12 --partition gpu --gres gpu:1
 
 Examples:
-  rpy gpu train.py                # run and stream output
-  rpy gpu -d train.py             # detach, returns job ID
-  rpy gpu -d -n exp1 train.py     # detach with custom name
-  rpy gpu --jobs                  # list jobs
-  rpy gpu --jobs --json           # list jobs as JSON
-  rpy gpu --log --last            # view most recent job output
-  rpy gpu --kill --last           # kill most recent job
-  rpy gpu --gpus --json           # GPU info as JSON
-  rpy gpu --sync                  # sync current project to remote
-  echo 'print(1)' | rpy gpu
-  rpy sherlock -m cuda/12.0 train.py  # SLURM with modules
+  rex gpu train.py                    # run and stream output
+  rex gpu -d train.py                 # detach, returns job ID
+  rex gpu -d -n exp1 train.py         # detach with custom name
+  rex gpu --jobs                      # list jobs
+  rex gpu --watch --last              # wait for most recent job
+  rex gpu --push ./data ~/data        # upload directory
+  rex gpu --pull ~/checkpoints ./     # download directory
+  rex gpu --exec "ls -la ~/models"    # run shell command
+  rex gpu -d --exec "wget http://..." # detached shell command
+  rex gpu --sync                      # sync current project to remote
+  echo 'print(1)' | rex gpu
+  rex sherlock -m cuda/12.0 train.py  # SLURM with modules
 
 EOF
 }
@@ -147,12 +158,12 @@ cmd_jobs() {
     local json="$2"
 
     local output=$(ssh "$target" 'bash --norc --noprofile -c '\''
-        for log in /tmp/rpy-*.log ~/.rpy/rpy-*.log; do
+        for log in /tmp/rex-*.log ~/.rex/rex-*.log; do
             [ -f "$log" ] || continue
-            job=$(basename "$log" .log | sed "s/rpy-//")
+            job=$(basename "$log" .log | sed "s/rex-//")
 
             # Use character class trick to prevent pgrep from matching itself
-            pattern="rpy-${job}[.]py"
+            pattern="rex-${job}[.]py"
             pid=$(pgrep -f "$pattern" 2>/dev/null | head -1)
 
             if [ -n "$pid" ]; then
@@ -164,8 +175,8 @@ cmd_jobs() {
 
             # Get first line of script as description
             desc=""
-            script_tmp="/tmp/rpy-${job}.py"
-            script_home="$HOME/.rpy/rpy-${job}.py"
+            script_tmp="/tmp/rex-${job}.py"
+            script_home="$HOME/.rex/rex-${job}.py"
             if [ -f "$script_tmp" ]; then
                 desc=$(head -1 "$script_tmp" | sed "s/^#[[:space:]]*//" | cut -c1-40)
             elif [ -f "$script_home" ]; then
@@ -207,7 +218,7 @@ cmd_status() {
     local job="$2"
     local json="$3"
 
-    [[ -z $job ]] && error "Usage: rpy <host> --status <job>"
+    [[ -z $job ]] && error "Usage: rex <host> --status <job>"
 
     local pattern=$(job_pattern "$job")
     local pid=$(remote_exec "$target" "pgrep -f '$pattern' | head -1")
@@ -234,7 +245,7 @@ cmd_log() {
     local job="$2"
     local follow="$3"
 
-    [[ -z $job ]] && error "Usage: rpy <host> --log <job> [-f]"
+    [[ -z $job ]] && error "Usage: rex <host> --log <job> [-f]"
 
     local log_cmd=$(remote_log_path "$job")
     local cmd="log=\$($log_cmd); [ -n \"\$log\" ] || { echo 'Log not found' >&2; exit 1; }"
@@ -250,7 +261,7 @@ cmd_kill() {
     local target="$1"
     local job="$2"
 
-    [[ -z $job ]] && error "Usage: rpy <host> --kill <job>"
+    [[ -z $job ]] && error "Usage: rex <host> --kill <job>"
 
     local pattern=$(job_pattern "$job")
     local result=$(remote_exec "$target" "pid=\$(pgrep -f '$pattern' | head -1); if [ -n \"\$pid\" ]; then kill \"\$pid\" 2>/dev/null && echo killed || echo failed; else echo not_running; fi")
@@ -326,16 +337,16 @@ cmd_gpus() {
 
 cmd_slurm_jobs() {
     local target="$1"
-    remote_exec "$target" "squeue -u \$USER -o '%.10i %.20j %.8T %.10M' 2>/dev/null | grep rpy || echo 'No rpy jobs'"
+    remote_exec "$target" "squeue -u \$USER -o '%.10i %.20j %.8T %.10M' 2>/dev/null | grep rex || echo 'No rex jobs'"
 }
 
 cmd_slurm_status() {
     local target="$1"
     local job="$2"
 
-    [[ -z $job ]] && error "Usage: rpy <host> --status <job>"
+    [[ -z $job ]] && error "Usage: rex <host> --status <job>"
 
-    local state=$(remote_exec "$target" "squeue -u \$USER -n rpy-$job -h -o %T 2>/dev/null")
+    local state=$(remote_exec "$target" "squeue -u \$USER -n rex-$job -h -o %T 2>/dev/null")
     if [[ -n $state ]]; then
         echo "$state"
         return 0
@@ -349,9 +360,9 @@ cmd_slurm_kill() {
     local target="$1"
     local job="$2"
 
-    [[ -z $job ]] && error "Usage: rpy <host> --kill <job>"
+    [[ -z $job ]] && error "Usage: rex <host> --kill <job>"
 
-    if remote_exec "$target" "scancel -n rpy-$job 2>/dev/null"; then
+    if remote_exec "$target" "scancel -n rex-$job 2>/dev/null"; then
         success "Cancelled job $job"
     else
         error "Failed to cancel job $job"
@@ -436,6 +447,230 @@ cmd_sync() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# File transfer commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_push() {
+    local target="$1"
+    local local_path="$2"
+    local remote_path="$3"
+
+    [[ -z $local_path ]] && error "Usage: rex <host> --push <local> [remote]"
+
+    # Resolve to absolute path
+    local_path="${local_path:A}"
+    [[ -e $local_path ]] || error "Path not found: $local_path"
+
+    # Default remote path: mirror local structure
+    if [[ -z $remote_path ]]; then
+        if [[ $local_path == /Users/* ]]; then
+            remote_path="/home/${local_path#/Users/}"
+        else
+            remote_path="$local_path"
+        fi
+    fi
+
+    # Create remote parent directory
+    remote_exec "$target" "mkdir -p ${remote_path:h}" || error "Failed to create remote directory"
+
+    info "Pushing to ${target}:${remote_path}"
+
+    if [[ -d $local_path ]]; then
+        rsync -avz --progress "${local_path}/" "${target}:${remote_path}/" || error "Push failed"
+    else
+        rsync -avz --progress "$local_path" "${target}:${remote_path}" || error "Push failed"
+    fi
+
+    success "Pushed $(basename $local_path)"
+}
+
+cmd_pull() {
+    local target="$1"
+    local remote_path="$2"
+    local local_path="$3"
+
+    [[ -z $remote_path ]] && error "Usage: rex <host> --pull <remote> [local]"
+
+    # Default local path: current directory
+    if [[ -z $local_path ]]; then
+        local_path="$(pwd)"
+    fi
+
+    # Resolve to absolute path
+    local_path="${local_path:A}"
+
+    # Create local parent directory
+    mkdir -p "$local_path" || error "Failed to create local directory"
+
+    info "Pulling from ${target}:${remote_path}"
+
+    # rsync handles files, directories, and globs
+    rsync -avz --progress "${target}:${remote_path}" "$local_path/" || error "Pull failed"
+
+    success "Pulled to $local_path"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watch command - wait for job completion
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_watch() {
+    local target="$1"
+    local job="$2"
+    local json="$3"
+    local poll_interval=5
+
+    [[ -z $job ]] && error "Usage: rex <host> --watch <job>"
+
+    info "Watching job $job (polling every ${poll_interval}s)..."
+
+    local final_status="done"
+    local exit_code=0
+
+    while true; do
+        local pattern=$(job_pattern "$job")
+        local pid=$(remote_exec "$target" "pgrep -f '$pattern' | head -1")
+        if [[ -z $pid ]]; then
+            # Job no longer running
+            break
+        fi
+        sleep "$poll_interval"
+    done
+
+    if [[ $json == "true" ]]; then
+        printf '{"job": "%s", "status": "%s", "exit_code": %d}\n' "$job" "$final_status" "$exit_code"
+    else
+        success "Job $job completed"
+    fi
+
+    return $exit_code
+}
+
+cmd_slurm_watch() {
+    local target="$1"
+    local job="$2"
+    local json="$3"
+    local poll_interval=10
+
+    [[ -z $job ]] && error "Usage: rex <host> --watch <job>"
+
+    info "Watching job $job (polling every ${poll_interval}s)..."
+
+    local final_status="unknown"
+    local exit_code=0
+
+    while true; do
+        local state=$(remote_exec "$target" "squeue -u \$USER -n rex-$job -h -o %T 2>/dev/null")
+        if [[ -z $state ]]; then
+            # Job no longer in queue - check sacct for final status
+            local sacct_status=$(remote_exec "$target" "sacct -n -X --name=rex-$job --format=State 2>/dev/null | head -1 | tr -d ' '")
+            case $sacct_status in
+                COMPLETED) final_status="success"; exit_code=0 ;;
+                FAILED|CANCELLED|TIMEOUT|NODE_FAIL) final_status="failed"; exit_code=1 ;;
+                *) final_status="done"; exit_code=0 ;;
+            esac
+            break
+        fi
+        sleep "$poll_interval"
+    done
+
+    if [[ $json == "true" ]]; then
+        printf '{"job": "%s", "status": "%s", "exit_code": %d}\n' "$job" "$final_status" "$exit_code"
+    else
+        if [[ $exit_code -eq 0 ]]; then
+            success "Job $job completed: $final_status"
+        else
+            warn "Job $job finished: $final_status"
+        fi
+    fi
+
+    return $exit_code
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shell execution commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_exec() {
+    local target="$1"
+    local detach="$2"
+    local job_name="$3"
+    shift 3
+    local cmd="$*"
+
+    [[ -z $cmd ]] && error "Usage: rex <host> --exec <command>"
+
+    if [[ $detach == "true" ]]; then
+        local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
+        local remote_log="/tmp/rex-${job}.log"
+
+        # Run detached
+        local pid=$(remote_exec "$target" "nohup bash -c '$cmd' > $remote_log 2>&1 & echo \$!")
+
+        success "Detached: $job (PID $pid)"
+        echo "Log:    rex ${target} --log $job"
+        echo "Kill:   rex ${target} --kill $job"
+    else
+        # Run foreground - use -t for interactive commands
+        ssh -t "$target" "bash --norc --noprofile -c '$cmd'"
+    fi
+}
+
+cmd_slurm_exec() {
+    local target="$1"
+    local detach="$2"
+    local partition="$3"
+    local gres="$4"
+    local time_limit="$5"
+    local job_name="$6"
+    shift 6
+
+    local -a modules args
+    parse_module_args "$@"
+    local cmd="${args[*]}"
+
+    [[ -z $cmd ]] && error "Usage: rex <host> --slurm --exec <command>"
+
+    local slurm_opts=$(build_slurm_opts "$partition" "$gres" "$time_limit")
+
+    if [[ $detach == "true" ]]; then
+        local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
+        local remote_home=$(remote_exec "$target" "echo \$HOME")
+        local remote_dir="${remote_home}/.rex"
+        local remote_sbatch="${remote_dir}/rex-${job}.sbatch"
+        local remote_log="${remote_dir}/rex-${job}.log"
+
+        remote_exec "$target" "mkdir -p ~/.rex"
+
+        # Build sbatch script for shell command
+        local sbatch_content="#!/bin/bash -l
+#SBATCH --job-name=rex-${job}
+#SBATCH --output=${remote_log}"
+        [[ -n $partition ]] && sbatch_content+=$'\n'"#SBATCH --partition=$partition"
+        [[ -n $gres ]] && sbatch_content+=$'\n'"#SBATCH --gres=$gres"
+        [[ -n $time_limit ]] && sbatch_content+=$'\n'"#SBATCH --time=$time_limit"
+        sbatch_content+=$'\n'
+        for mod in "${modules[@]}"; do
+            sbatch_content+="module load $mod"$'\n'
+        done
+        sbatch_content+="$cmd"
+
+        remote_exec "$target" "cat > $remote_sbatch" <<< "$sbatch_content"
+        local slurm_id=$(remote_exec "$target" "sbatch --parsable $remote_sbatch 2>/dev/null")
+
+        success "Submitted: $job (SLURM $slurm_id)"
+        echo "Log:    rex ${target} --log $job"
+        echo "Kill:   rex ${target} --slurm --kill $job"
+    else
+        # Foreground with srun
+        local inner_cmd=""
+        [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
+        inner_cmd+="$cmd"
+        ssh -t "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run commands
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -468,17 +703,17 @@ run_detached() {
     fi
 
     local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
-    local remote_script="/tmp/rpy-${job}.py"
-    local remote_log="/tmp/rpy-${job}.log"
+    local remote_script="/tmp/rex-${job}.py"
+    local remote_log="/tmp/rex-${job}.log"
 
     scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
     local pid=$(remote_exec "$target" "nohup $python $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
 
     success "Detached: $job (PID $pid)"
-    echo "Status: rpy ${target} --status $job"
-    echo "Log:    rpy ${target} --log $job"
-    echo "Kill:   rpy ${target} --kill $job"
+    echo "Status: rex ${target} --status $job"
+    echo "Log:    rex ${target} --log $job"
+    echo "Kill:   rex ${target} --kill $job"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -551,18 +786,18 @@ run_slurm_detached() {
     local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
     # Get absolute home path (needed for SLURM --output which doesn't expand ~)
     local remote_home=$(remote_exec "$target" "echo \$HOME")
-    local remote_dir="${remote_home}/.rpy"
-    local remote_script="${remote_dir}/rpy-${job}.py"
-    local remote_sbatch="${remote_dir}/rpy-${job}.sbatch"
-    local remote_log="${remote_dir}/rpy-${job}.log"
+    local remote_dir="${remote_home}/.rex"
+    local remote_script="${remote_dir}/rex-${job}.py"
+    local remote_sbatch="${remote_dir}/rex-${job}.sbatch"
+    local remote_log="${remote_dir}/rex-${job}.log"
 
     # Create directory and copy script
-    remote_exec "$target" "mkdir -p ~/.rpy" || error "Failed to create remote directory"
+    remote_exec "$target" "mkdir -p ~/.rex" || error "Failed to create remote directory"
     scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
     # Build sbatch script (use login shell to get module system)
     local sbatch_content="#!/bin/bash -l
-#SBATCH --job-name=rpy-${job}
+#SBATCH --job-name=rex-${job}
 #SBATCH --output=${remote_log}"
     [[ -n $partition ]] && sbatch_content+=$'\n'"#SBATCH --partition=$partition"
     [[ -n $gres ]] && sbatch_content+=$'\n'"#SBATCH --gres=$gres"
@@ -580,9 +815,9 @@ run_slurm_detached() {
     local slurm_id=$(remote_exec "$target" "sbatch --parsable $remote_sbatch 2>/dev/null")
 
     success "Submitted: $job (SLURM $slurm_id)"
-    echo "Status: rpy ${target} --slurm --status $job"
-    echo "Log:    rpy ${target} --log $job"
-    echo "Kill:   rpy ${target} --slurm --kill $job"
+    echo "Status: rex ${target} --slurm --status $job"
+    echo "Log:    rex ${target} --log $job"
+    echo "Kill:   rex ${target} --slurm --kill $job"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -644,7 +879,7 @@ main() {
             # Sync options
             --no-install) no_install=true; shift ;;
             # Commands - stop parsing flags
-            --jobs|--status|--log|--kill|--gpus|--sync|--last) break ;;
+            --jobs|--status|--log|--kill|--gpus|--sync|--push|--pull|--watch|--exec|--last) break ;;
             # Unknown
             *) error "Unknown option: $1" ;;
         esac
@@ -714,6 +949,38 @@ main() {
                 esac
             done
             cmd_sync "$target" "$python" "$sync_no_install" "$1"
+            return
+            ;;
+        --push)
+            shift
+            cmd_push "$target" "$1" "$2"
+            return
+            ;;
+        --pull)
+            shift
+            cmd_pull "$target" "$1" "$2"
+            return
+            ;;
+        --watch)
+            shift
+            has_json_arg "$@" && json=true
+            local job=$(resolve_job "$target" "$1")
+            if $slurm; then cmd_slurm_watch "$target" "$job" "$json"
+            else cmd_watch "$target" "$job" "$json"; fi
+            return
+            ;;
+        --exec)
+            shift
+            if $slurm; then
+                # Pass modules as --module pairs
+                local -a mod_args=()
+                for mod in "${modules[@]}"; do
+                    mod_args+=(--module "$mod")
+                done
+                cmd_slurm_exec "$target" "$detach" "$partition" "$gres" "$time_limit" "$job_name" "${mod_args[@]}" "$@"
+            else
+                cmd_exec "$target" "$detach" "$job_name" "$@"
+            fi
             return
             ;;
     esac
