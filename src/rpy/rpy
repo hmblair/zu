@@ -3,7 +3,7 @@
 # rpy - Run Python files on remote servers
 
 SCRIPT_DIR="${0:A:h}"
-source "$SCRIPT_DIR/common"
+source "$SCRIPT_DIR/../common"
 
 CONFIG="$HOME/.config/rpy"
 
