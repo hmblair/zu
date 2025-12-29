@@ -181,7 +181,7 @@ cmd_gpus() {
             gpu_status="${RED}busy${NC}"
         fi
 
-        printf "GPU %s: %-20s %5dMB/%5dMB (%2d%%)  util: %3d%%  %b\n" \
+        printf "GPU %s: %-20s %5dMB/%5dMB (%d%%)  util: %3d%%  %b\n" \
             "$idx" "$name" "$mem_used" "$mem_total" "$mem_pct" "$util" "$gpu_status"
     done
 }
