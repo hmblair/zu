@@ -1132,9 +1132,37 @@ static int is_git_root(const char *path) {
 
 /* Get current git branch for a repo root. Returns allocated string or NULL. */
 static char *get_git_branch(const char *repo_path) {
-    /* Try reading .git/HEAD directly (fastest method) */
+    char git_path[PATH_MAX];
     char head_path[PATH_MAX];
-    snprintf(head_path, sizeof(head_path), "%s/.git/HEAD", repo_path);
+    snprintf(git_path, sizeof(git_path), "%s/.git", repo_path);
+
+    /* Check if .git is a file (worktree) or directory (normal repo) */
+    struct stat st;
+    if (stat(git_path, &st) != 0) return NULL;
+
+    if (S_ISREG(st.st_mode)) {
+        /* Worktree: .git is a file containing "gitdir: /path/to/git/dir" */
+        FILE *gf = fopen(git_path, "r");
+        if (!gf) return NULL;
+
+        char gitdir_buf[PATH_MAX];
+        char *gitdir = NULL;
+        if (fgets(gitdir_buf, sizeof(gitdir_buf), gf)) {
+            const char *prefix = "gitdir: ";
+            if (strncmp(gitdir_buf, prefix, strlen(prefix)) == 0) {
+                gitdir = gitdir_buf + strlen(prefix);
+                size_t len = strlen(gitdir);
+                if (len > 0 && gitdir[len - 1] == '\n') gitdir[len - 1] = '\0';
+            }
+        }
+        fclose(gf);
+        if (!gitdir) return NULL;
+
+        snprintf(head_path, sizeof(head_path), "%s/HEAD", gitdir);
+    } else {
+        /* Normal repo: .git is a directory */
+        snprintf(head_path, sizeof(head_path), "%s/.git/HEAD", repo_path);
+    }
 
     FILE *f = fopen(head_path, "r");
     if (!f) return NULL;
