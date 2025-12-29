@@ -23,6 +23,7 @@ _rpy_jobs() {
 _rpy() {
     local -a options=(
         '-d[Detach: run in background]'
+        '(-n --name)'{-n,--name}'[Name for detached job]:name:'
         '-p[Python interpreter]:python path:_files'
         '*-m[Load module (repeatable)]:module:'
         '(-h --help)'{-h,--help}'[Show help]'
@@ -41,6 +42,8 @@ _rpy() {
         '--log[Show job output]:job:_rpy_jobs'
         '--kill[Kill a running job]:job:_rpy_jobs'
         '--gpus[Show GPU availability and utilization]'
+        '--last[Use most recent job]'
+        '--json[Output in JSON format]'
     )
 
     local -a sync_options=(
