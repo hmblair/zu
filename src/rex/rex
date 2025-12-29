@@ -75,6 +75,7 @@ Options:
   -d              Detach: run in background, survive disconnection
   -n/--name <n>   Name for detached job (default: timestamp)
   -p <path>       Python interpreter (default: python3)
+  -g <gpus>       Set CUDA_VISIBLE_DEVICES (e.g., -g 0 or -g 2,3)
   -m <module>     Load module before running (repeatable)
 
 Job management:
@@ -595,24 +596,28 @@ cmd_exec() {
     local target="$1"
     local detach="$2"
     local job_name="$3"
-    shift 3
+    local gpus="$4"
+    shift 4
     local cmd="$*"
 
     [[ -z $cmd ]] && error "Usage: rex <host> --exec <command>"
+
+    local env_prefix=""
+    [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
 
     if [[ $detach == "true" ]]; then
         local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
         local remote_log="/tmp/rex-${job}.log"
 
         # Run detached
-        local pid=$(remote_exec "$target" "nohup bash -c '$cmd' > $remote_log 2>&1 & echo \$!")
+        local pid=$(remote_exec "$target" "nohup bash -c '${env_prefix}$cmd' > $remote_log 2>&1 & echo \$!")
 
         success "Detached: $job (PID $pid)"
         echo "Log:    rex ${target} --log $job"
         echo "Kill:   rex ${target} --kill $job"
     else
         # Run foreground - use -t for interactive commands
-        ssh -t "$target" "bash --norc --noprofile -c '$cmd'"
+        ssh -t "$target" "bash --norc --noprofile -c '${env_prefix}$cmd'"
     fi
 }
 
@@ -623,7 +628,8 @@ cmd_slurm_exec() {
     local gres="$4"
     local time_limit="$5"
     local job_name="$6"
-    shift 6
+    local gpus="$7"
+    shift 7
 
     local -a modules args
     parse_module_args "$@"
@@ -653,6 +659,7 @@ cmd_slurm_exec() {
         for mod in "${modules[@]}"; do
             sbatch_content+="module load $mod"$'\n'
         done
+        [[ -n $gpus ]] && sbatch_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
         sbatch_content+="$cmd"
 
         remote_exec "$target" "cat > $remote_sbatch" <<< "$sbatch_content"
@@ -665,6 +672,7 @@ cmd_slurm_exec() {
         # Foreground with srun
         local inner_cmd=""
         [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
+        [[ -n $gpus ]] && inner_cmd+="export CUDA_VISIBLE_DEVICES=$gpus && "
         inner_cmd+="$cmd"
         ssh -t "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
     fi
@@ -678,7 +686,8 @@ run_foreground() {
     local target="$1"
     local python="$2"
     local file="$3"
-    shift 3
+    local gpus="$4"
+    shift 4
     local args=("$@")
 
     if [[ -z $file && -t 0 ]]; then
@@ -687,7 +696,9 @@ run_foreground() {
 
     [[ -n $file ]] && exec < "$file"
     # Use bash --norc to bypass slow/buggy shell rc files
-    ssh -T "$target" "bash --norc --noprofile -c '$python - ${(q)args[@]}'"
+    local env_prefix=""
+    [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
+    ssh -T "$target" "bash --norc --noprofile -c '${env_prefix}$python - ${(q)args[@]}'"
 }
 
 run_detached() {
@@ -695,7 +706,8 @@ run_detached() {
     local python="$2"
     local file="$3"
     local job_name="$4"
-    shift 4
+    local gpus="$5"
+    shift 5
     local args=("$@")
 
     if [[ -z $file ]]; then
@@ -708,7 +720,9 @@ run_detached() {
 
     scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
-    local pid=$(remote_exec "$target" "nohup $python $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
+    local env_prefix=""
+    [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
+    local pid=$(remote_exec "$target" "nohup ${env_prefix}$python $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
 
     success "Detached: $job (PID $pid)"
     echo "Status: rex ${target} --status $job"
@@ -746,7 +760,8 @@ run_slurm_foreground() {
     local partition="$4"
     local gres="$5"
     local time_limit="$6"
-    shift 6
+    local gpus="$7"
+    shift 7
 
     local -a modules args
     parse_module_args "$@"
@@ -763,6 +778,7 @@ run_slurm_foreground() {
     # Use login shell (-l) to get module system initialized
     local inner_cmd=""
     [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
+    [[ -n $gpus ]] && inner_cmd+="export CUDA_VISIBLE_DEVICES=$gpus && "
     inner_cmd+="$python - ${(q)args[@]}"
 
     ssh -T "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
@@ -776,7 +792,8 @@ run_slurm_detached() {
     local gres="$5"
     local time_limit="$6"
     local job_name="$7"
-    shift 7
+    local gpus="$8"
+    shift 8
 
     local -a modules args
     parse_module_args "$@"
@@ -806,6 +823,7 @@ run_slurm_detached() {
     for mod in "${modules[@]}"; do
         sbatch_content+="module load $mod"$'\n'
     done
+    [[ -n $gpus ]] && sbatch_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
     sbatch_content+="$python $remote_script ${(q)args[@]}"
 
     # Write sbatch script to remote
@@ -861,12 +879,14 @@ main() {
     local no_install=false
     local job_name=""
     local json=false
+    local gpus=""
     while [[ $1 == -* ]]; do
         case $1 in
             # Short flags
             -d) detach=true; shift ;;
             -n) shift; job_name=$1; shift ;;
             -p) shift; python=$1; shift ;;
+            -g) shift; gpus=$1; shift ;;
             -m) shift; modules+=("$1"); shift ;;
             # Long options
             --name) shift; job_name=$1; shift ;;
@@ -977,9 +997,9 @@ main() {
                 for mod in "${modules[@]}"; do
                     mod_args+=(--module "$mod")
                 done
-                cmd_slurm_exec "$target" "$detach" "$partition" "$gres" "$time_limit" "$job_name" "${mod_args[@]}" "$@"
+                cmd_slurm_exec "$target" "$detach" "$partition" "$gres" "$time_limit" "$job_name" "$gpus" "${mod_args[@]}" "$@"
             else
-                cmd_exec "$target" "$detach" "$job_name" "$@"
+                cmd_exec "$target" "$detach" "$job_name" "$gpus" "$@"
             fi
             return
             ;;
@@ -1000,15 +1020,15 @@ main() {
             mod_args+=(--module "$mod")
         done
         if $detach; then
-            run_slurm_detached "$target" "$python" "$file" "$partition" "$gres" "$time_limit" "$job_name" "${mod_args[@]}" "$@"
+            run_slurm_detached "$target" "$python" "$file" "$partition" "$gres" "$time_limit" "$job_name" "$gpus" "${mod_args[@]}" "$@"
         else
-            run_slurm_foreground "$target" "$python" "$file" "$partition" "$gres" "$time_limit" "${mod_args[@]}" "$@"
+            run_slurm_foreground "$target" "$python" "$file" "$partition" "$gres" "$time_limit" "$gpus" "${mod_args[@]}" "$@"
         fi
     else
         if $detach; then
-            run_detached "$target" "$python" "$file" "$job_name" "$@"
+            run_detached "$target" "$python" "$file" "$job_name" "$gpus" "$@"
         else
-            run_foreground "$target" "$python" "$file" "$@"
+            run_foreground "$target" "$python" "$file" "$gpus" "$@"
         fi
     fi
 }
