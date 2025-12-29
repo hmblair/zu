@@ -22,12 +22,14 @@ usage() {
     cat << EOF
 Usage: rpy <alias|host> [options] [file.py] [args...]
        rpy <alias|host> --jobs|--status|--log|--kill <job>
+       rpy <alias|host> --sync [--no-install] [path]
 
 Run Python files on remote servers, with job management for detached runs.
 
 Options:
   -d           Detach: run in background, survive disconnection
   -p <path>    Python interpreter (default: python3)
+  -m <module>  Load module before running (repeatable)
 
 Job management:
   --jobs       List all rpy jobs on remote
@@ -36,8 +38,19 @@ Job management:
   --kill <job>    Kill a running job
   --gpus       Show GPU availability and utilization
 
+Project sync:
+  --sync [path]    Rsync project to remote, pip install -e if pyproject.toml exists
+  --no-install     Skip pip install (use with --sync)
+
+SLURM options (for HPC clusters):
+  --slurm          Enable SLURM mode (use srun/sbatch)
+  --partition <p>  SLURM partition
+  --gres <spec>    GPU resources (e.g., gpu:1)
+  --time <limit>   Time limit (e.g., 2:00:00)
+
 Aliases: Define in $CONFIG as:
   gpu = user@host -p /path/to/python
+  sherlock = user@host --slurm -m python/3.12 --partition gpu --gres gpu:1
 
 Examples:
   rpy gpu train.py              # run and stream output
@@ -45,7 +58,10 @@ Examples:
   rpy gpu --jobs                # list jobs
   rpy gpu --log 20251229-120000 # view output
   rpy gpu --kill 20251229-120000
+  rpy gpu --sync                # sync current project to remote
+  rpy gpu --sync ~/projects/ml  # sync specific project
   echo 'print(1)' | rpy gpu
+  rpy sherlock -m cuda/12.0 train.py  # SLURM with modules
 
 EOF
 }
@@ -132,12 +148,11 @@ cmd_log() {
 
     [[ -z $job ]] && error "Usage: rpy <host> --log <job> [-f]"
 
-    local log="/tmp/rpy-${job}.log"
-
+    # Check ~/.rpy first (SLURM), then /tmp (direct SSH)
     if [[ $follow == "-f" ]]; then
-        ssh "$target" "bash --norc --noprofile -c 'tail -f $log'"
+        ssh "$target" "bash --norc --noprofile -c 'if [ -f ~/.rpy/rpy-${job}.log ]; then tail -f ~/.rpy/rpy-${job}.log; elif [ -f /tmp/rpy-${job}.log ]; then tail -f /tmp/rpy-${job}.log; else echo Log not found >&2; exit 1; fi'"
     else
-        ssh "$target" "bash --norc --noprofile -c 'cat $log'"
+        ssh "$target" "bash --norc --noprofile -c 'if [ -f ~/.rpy/rpy-${job}.log ]; then cat ~/.rpy/rpy-${job}.log; elif [ -f /tmp/rpy-${job}.log ]; then cat /tmp/rpy-${job}.log; else echo Log not found >&2; exit 1; fi'"
     fi
 }
 
@@ -194,6 +209,121 @@ cmd_gpus() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SLURM job management commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_slurm_jobs() {
+    local target="$1"
+    ssh "$target" "bash --norc --noprofile -c 'squeue -u \$USER -o \"%.10i %.20j %.8T %.10M\" 2>/dev/null | grep rpy || echo \"No rpy jobs\"'"
+}
+
+cmd_slurm_status() {
+    local target="$1"
+    local job="$2"
+
+    [[ -z $job ]] && error "Usage: rpy <host> --status <job>"
+
+    local state=$(ssh "$target" "bash --norc --noprofile -c 'squeue -u \$USER -n rpy-$job -h -o %T 2>/dev/null'")
+    if [[ -n $state ]]; then
+        echo "$state"
+        return 0
+    else
+        echo "done"
+        return 1
+    fi
+}
+
+cmd_slurm_kill() {
+    local target="$1"
+    local job="$2"
+
+    [[ -z $job ]] && error "Usage: rpy <host> --kill <job>"
+
+    if ssh "$target" "bash --norc --noprofile -c 'scancel -n rpy-$job 2>/dev/null'"; then
+        success "Cancelled job $job"
+    else
+        error "Failed to cancel job $job"
+    fi
+}
+
+cmd_slurm_gpus() {
+    local target="$1"
+    ssh "$target" "bash --norc --noprofile -c 'sinfo -p gpu -o \"%P %a %D %G\" 2>/dev/null || echo \"No GPU partition info\"'"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Project sync
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_sync() {
+    local target="$1"
+    local python="$2"
+    local no_install="$3"
+    local local_path="$4"
+
+    # Default to current directory
+    [[ -z $local_path ]] && local_path="$(pwd)"
+
+    # Resolve to absolute path
+    local_path="${local_path:A}"
+
+    # Check path exists
+    [[ -d $local_path ]] || error "Directory not found: $local_path"
+
+    # Map local path to remote path
+    # /Users/<user>/... → /home/<user>/...
+    # /home/<user>/... → /home/<user>/... (unchanged)
+    local remote_path
+    if [[ $local_path == /Users/* ]]; then
+        # macOS: /Users/foo/bar → /home/foo/bar
+        remote_path="/home/${local_path#/Users/}"
+    else
+        remote_path="$local_path"
+    fi
+
+    # Rsync exclusions for Python projects
+    local -a excludes=(
+        '__pycache__'
+        '*.pyc'
+        '*.pyo'
+        '.git'
+        '.pytest_cache'
+        '*.egg-info'
+        'build'
+        'dist'
+        '.tox'
+        '.eggs'
+        '.mypy_cache'
+        '.ruff_cache'
+        '*.so'
+        '.venv'
+        'venv'
+    )
+
+    local exclude_args=""
+    for ex in "${excludes[@]}"; do
+        exclude_args+=" --exclude=$ex"
+    done
+
+    # Create remote directory
+    info "Syncing to ${target}:${remote_path}"
+    ssh "$target" "bash --norc --noprofile -c 'mkdir -p ${remote_path:h}'" || error "Failed to create remote directory"
+
+    # Rsync
+    rsync -avz --delete ${=exclude_args} "${local_path}/" "${target}:${remote_path}/" || error "Rsync failed"
+    success "Synced $(basename $local_path)"
+
+    # Pip install if pyproject.toml or setup.py exists (and not --no-install)
+    if [[ $no_install != "true" ]]; then
+        if [[ -f "${local_path}/pyproject.toml" || -f "${local_path}/setup.py" ]]; then
+            info "Installing package..."
+            ssh "$target" "bash --norc --noprofile -c 'cd ${remote_path} && ${python} -m pip install -e . -q'" || warn "pip install failed"
+            success "Installed $(basename $local_path)"
+        fi
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run commands
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -240,6 +370,109 @@ run_detached() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SLURM run commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Build module load command string (includes module system init)
+build_module_cmd() {
+    local -a mods=("$@")
+    [[ ${#mods[@]} -eq 0 ]] && return
+    # Source module system, then load modules
+    echo "source /etc/profile.d/modules.sh 2>/dev/null || source /usr/share/lmod/lmod/init/bash 2>/dev/null; module load ${mods[*]} && "
+}
+
+run_slurm_foreground() {
+    local target="$1"
+    local python="$2"
+    local file="$3"
+    local partition="$4"
+    local gres="$5"
+    local time_limit="$6"
+    shift 6
+    # Extract modules from remaining args
+    local -a modules=()
+    while [[ $1 == --module ]]; do
+        shift; modules+=("$1"); shift
+    done
+    local args=("$@")
+
+    if [[ -z $file && -t 0 ]]; then
+        error "No input file and stdin is a terminal. Provide a file or pipe input."
+    fi
+
+    [[ -n $file ]] && exec < "$file"
+
+    local srun_opts=""
+    [[ -n $partition ]] && srun_opts+=" --partition=$partition"
+    [[ -n $gres ]] && srun_opts+=" --gres=$gres"
+    [[ -n $time_limit ]] && srun_opts+=" --time=$time_limit"
+
+    # Build the inner command that runs on the compute node
+    # Use login shell (-l) to get module system initialized
+    local inner_cmd=""
+    if [[ ${#modules[@]} -gt 0 ]]; then
+        inner_cmd="module load ${modules[*]} && "
+    fi
+    inner_cmd+="$python - ${(q)args[@]}"
+
+    ssh -T "$target" "bash --norc --noprofile -c 'srun$srun_opts bash -l -c \"$inner_cmd\"'"
+}
+
+run_slurm_detached() {
+    local target="$1"
+    local python="$2"
+    local file="$3"
+    local partition="$4"
+    local gres="$5"
+    local time_limit="$6"
+    shift 6
+    # Extract modules from remaining args
+    local -a modules=()
+    while [[ $1 == --module ]]; do
+        shift; modules+=("$1"); shift
+    done
+    local args=("$@")
+
+    [[ -z $file ]] && error "-d requires a file (cannot detach piped input)"
+
+    local job=$(date +%Y%m%d-%H%M%S)
+    # Get absolute home path (needed for SLURM --output which doesn't expand ~)
+    local remote_home=$(ssh "$target" "bash --norc --noprofile -c 'echo \$HOME'")
+    local remote_dir="${remote_home}/.rpy"
+    local remote_script="${remote_dir}/rpy-${job}.py"
+    local remote_sbatch="${remote_dir}/rpy-${job}.sbatch"
+    local remote_log="${remote_dir}/rpy-${job}.log"
+
+    # Create directory and copy script
+    ssh "$target" "bash --norc --noprofile -c 'mkdir -p ~/.rpy'" || error "Failed to create remote directory"
+    scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
+
+    # Build sbatch script (use login shell to get module system)
+    local sbatch_content="#!/bin/bash -l
+#SBATCH --job-name=rpy-${job}
+#SBATCH --output=${remote_log}"
+    [[ -n $partition ]] && sbatch_content+=$'\n'"#SBATCH --partition=$partition"
+    [[ -n $gres ]] && sbatch_content+=$'\n'"#SBATCH --gres=$gres"
+    [[ -n $time_limit ]] && sbatch_content+=$'\n'"#SBATCH --time=$time_limit"
+    sbatch_content+=$'\n'
+    for mod in "${modules[@]}"; do
+        sbatch_content+="module load $mod"$'\n'
+    done
+    sbatch_content+="$python $remote_script ${(q)args[@]}"
+
+    # Write sbatch script to remote
+    ssh "$target" "bash --norc --noprofile -c 'cat > $remote_sbatch'" <<< "$sbatch_content"
+
+    # Submit and get SLURM job ID
+    local slurm_id=$(ssh "$target" "bash --norc --noprofile -c 'sbatch --parsable $remote_sbatch 2>/dev/null'")
+
+    success "Submitted: $job (SLURM $slurm_id)"
+    echo "Status: rpy ${target} --slurm --status $job"
+    echo "Log:    rpy ${target} --log $job"
+    echo "Kill:   rpy ${target} --slurm --kill $job"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -269,41 +502,73 @@ main() {
         shift 2
     fi
 
-    # Parse flags (before job commands, since alias may include -p)
+    # Parse all flags (short and long, in any order)
     local detach=false
     local python=python3
-    while [[ $1 == -* && $1 != --* ]]; do
+    local -a modules=()
+    local slurm=false
+    local partition=""
+    local gres=""
+    local time_limit=""
+    local no_install=false
+    while [[ $1 == -* ]]; do
         case $1 in
+            # Short flags
             -d) detach=true; shift ;;
             -p) shift; python=$1; shift ;;
-            *) break ;;
+            -m) shift; modules+=("$1"); shift ;;
+            # SLURM long options
+            --slurm) slurm=true; shift ;;
+            --partition) shift; partition=$1; shift ;;
+            --gres) shift; gres=$1; shift ;;
+            --time) shift; time_limit=$1; shift ;;
+            # Sync options
+            --no-install) no_install=true; shift ;;
+            # Commands - stop parsing flags
+            --jobs|--status|--log|--kill|--gpus|--sync) break ;;
+            # Unknown
+            *) error "Unknown option: $1" ;;
         esac
     done
 
-    # Check for job management commands
+    # Check for commands
     case $1 in
         --jobs)
-            cmd_jobs "$target"
+            if $slurm; then cmd_slurm_jobs "$target"
+            else cmd_jobs "$target"; fi
             return
             ;;
         --status)
-            cmd_status "$target" "$2"
+            if $slurm; then cmd_slurm_status "$target" "$2"
+            else cmd_status "$target" "$2"; fi
             return
             ;;
         --log)
-            cmd_log "$target" "$2" "$3"
+            cmd_log "$target" "$2" "$3"  # same for both
             return
             ;;
         --kill)
-            cmd_kill "$target" "$2"
+            if $slurm; then cmd_slurm_kill "$target" "$2"
+            else cmd_kill "$target" "$2"; fi
             return
             ;;
         --gpus)
-            cmd_gpus "$target"
+            if $slurm; then cmd_slurm_gpus "$target"
+            else cmd_gpus "$target"; fi
             return
             ;;
-        -*)
-            error "Unknown option: $1"
+        --sync)
+            shift  # consume --sync
+            # Parse --no-install if it follows --sync
+            local sync_no_install="$no_install"
+            while [[ $1 == --* ]]; do
+                case $1 in
+                    --no-install) sync_no_install=true; shift ;;
+                    *) break ;;
+                esac
+            done
+            cmd_sync "$target" "$python" "$sync_no_install" "$1"
+            return
             ;;
     esac
 
@@ -315,10 +580,23 @@ main() {
     fi
 
     # Run
-    if $detach; then
-        run_detached "$target" "$python" "$file" "$@"
+    if $slurm; then
+        # Pass modules as --module pairs
+        local -a mod_args=()
+        for mod in "${modules[@]}"; do
+            mod_args+=(--module "$mod")
+        done
+        if $detach; then
+            run_slurm_detached "$target" "$python" "$file" "$partition" "$gres" "$time_limit" "${mod_args[@]}" "$@"
+        else
+            run_slurm_foreground "$target" "$python" "$file" "$partition" "$gres" "$time_limit" "${mod_args[@]}" "$@"
+        fi
     else
-        run_foreground "$target" "$python" "$file" "$@"
+        if $detach; then
+            run_detached "$target" "$python" "$file" "$@"
+        else
+            run_foreground "$target" "$python" "$file" "$@"
+        fi
     fi
 }
 

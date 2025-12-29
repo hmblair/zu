@@ -24,7 +24,15 @@ _rpy() {
     local -a options=(
         '-d[Detach: run in background]'
         '-p[Python interpreter]:python path:_files'
+        '*-m[Load module (repeatable)]:module:'
         '(-h --help)'{-h,--help}'[Show help]'
+    )
+
+    local -a slurm_options=(
+        '--slurm[Enable SLURM mode]'
+        '--partition[SLURM partition]:partition:'
+        '--gres[GPU resources (e.g., gpu:1)]:gres:'
+        '--time[Time limit (e.g., 2:00:00)]:time:'
     )
 
     local -a job_commands=(
@@ -35,10 +43,17 @@ _rpy() {
         '--gpus[Show GPU availability and utilization]'
     )
 
+    local -a sync_options=(
+        '--sync[Sync project to remote]:path:_files -/'
+        '--no-install[Skip pip install after sync]'
+    )
+
     _arguments -s \
         '1:host:->host' \
         "${options[@]}" \
+        "${slurm_options[@]}" \
         "${job_commands[@]}" \
+        "${sync_options[@]}" \
         '*:file:_files -g "*.py"'
 
     case $state in
