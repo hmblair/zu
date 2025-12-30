@@ -85,6 +85,28 @@ resolve_job() {
     echo "$job"
 }
 
+# Map local path to remote path under remote $HOME
+# Strips /Users/<user> or /home/<user> and prepends remote $HOME
+# Usage: remote_path=$(map_to_remote "$target" "$local_path") || error "..."
+map_to_remote() {
+    local target="$1" local_path="$2"
+    local remote_home
+    remote_home=$(remote_exec "$target" "echo \$HOME") || return 1
+    [[ -z $remote_home ]] && return 1
+
+    if [[ $local_path == /Users/* ]]; then
+        local local_user="${local_path#/Users/}"
+        local_user="${local_user%%/*}"
+        echo "${remote_home}${local_path#/Users/$local_user}"
+    elif [[ $local_path == /home/* ]]; then
+        local local_user="${local_path#/home/}"
+        local_user="${local_user%%/*}"
+        echo "${remote_home}${local_path#/home/$local_user}"
+    else
+        echo "$local_path"
+    fi
+}
+
 # Escape string for JSON output
 json_escape() {
     local s="$1"
@@ -468,15 +490,8 @@ cmd_sync() {
     [[ -d $local_path ]] || error "Directory not found: $local_path"
 
     # Map local path to remote path
-    # /Users/<user>/... → /home/<user>/...
-    # /home/<user>/... → /home/<user>/... (unchanged)
     local remote_path
-    if [[ $local_path == /Users/* ]]; then
-        # macOS: /Users/foo/bar → /home/foo/bar
-        remote_path="/home/${local_path#/Users/}"
-    else
-        remote_path="$local_path"
-    fi
+    remote_path=$(map_to_remote "$target" "$local_path") || error "Failed to connect to $target"
 
     # Rsync exclusions for Python projects
     local -a excludes=(
@@ -535,13 +550,9 @@ cmd_push() {
     local_path="${local_path:A}"
     [[ -e $local_path ]] || error "Path not found: $local_path"
 
-    # Default remote path: mirror local structure
+    # Default remote path: mirror local structure under remote $HOME
     if [[ -z $remote_path ]]; then
-        if [[ $local_path == /Users/* ]]; then
-            remote_path="/home/${local_path#/Users/}"
-        else
-            remote_path="$local_path"
-        fi
+        remote_path=$(map_to_remote "$target" "$local_path") || error "Failed to connect to $target"
     fi
 
     # Create remote parent directory (quote path for spaces/special chars)
