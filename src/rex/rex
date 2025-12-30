@@ -440,7 +440,12 @@ cmd_slurm_gpus() {
     local partition="$2"
     local partition_opt=""
     [[ -n $partition ]] && partition_opt="-p $partition"
-    remote_exec "$target" "sinfo $partition_opt -N -o '%N %G' --noheader 2>/dev/null | grep -v '(null)' | sort -u || echo 'No GPUs in partition'"
+    local output=$(remote_exec "$target" "sinfo $partition_opt -N -o '%N %G' --noheader 2>/dev/null | grep -v '(null)' | sort -u")
+    if [[ -z $output ]]; then
+        echo "No GPUs in partition"
+    else
+        echo "$output"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
