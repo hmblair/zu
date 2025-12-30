@@ -441,6 +441,7 @@ cmd_prompts() {
         done < "$PROMPTS_FILE"
 
         menu_opts+=("${GREEN}+${NC} Add new prompt")
+        menu_opts+=("${YELLOW}✎${NC} Edit prompt")
         menu_opts+=("${RED}−${NC} Remove prompt")
         menu_opts+=("${CYAN}✓${NC} Done")
 
@@ -458,14 +459,19 @@ cmd_prompts() {
             # Add new prompt
             echo ""
             local new_name=""
-            local new_prompt=""
             vared -p "  Name: " new_name
             [[ -z "$new_name" ]] && continue
             if grep -q "^$new_name	" "$PROMPTS_FILE" 2>/dev/null; then
                 echo "  ${RED}Name already exists${NC}"
                 continue
             fi
-            vared -p "  Prompt: " new_prompt
+
+            # Open editor for prompt text
+            local tmpfile=$(mktemp)
+            ${EDITOR:-vim} "$tmpfile"
+            local new_prompt=$(<"$tmpfile")
+            rm -f "$tmpfile"
+
             [[ -z "$new_prompt" ]] && continue
             printf '%s\t%s\n' "$new_name" "$new_prompt" >> "$PROMPTS_FILE"
             # Auto-select new prompt and exit
@@ -473,6 +479,40 @@ cmd_prompts() {
             echo "$selected" > "$SELECTED_PROMPT_FILE"
             break
         elif [[ $choice -eq $((num_prompts + 1)) ]]; then
+            # Edit prompt submenu
+            echo ""
+            echo "  Select prompt to edit:"
+            local -a edit_opts=()
+            for name in "${prompt_names[@]}"; do
+                edit_opts+=("${YELLOW}✎${NC} $name")
+            done
+            edit_opts+=("${CYAN}←${NC} Back")
+
+            menu "${edit_opts[@]}"
+            local edit_choice=$?
+
+            if [[ $edit_choice -lt $num_prompts ]]; then
+                local edit_name="${prompt_names[$((edit_choice + 1))]}"
+                local old_prompt=$(grep "^$edit_name	" "$PROMPTS_FILE" | cut -f2-)
+
+                # Write to temp file and open in editor
+                local tmpfile=$(mktemp)
+                printf '%s' "$old_prompt" > "$tmpfile"
+                ${EDITOR:-vim} "$tmpfile"
+
+                # Read back and update
+                local new_prompt=$(<"$tmpfile")
+                rm -f "$tmpfile"
+
+                if [[ -n "$new_prompt" && "$new_prompt" != "$old_prompt" ]]; then
+                    # Remove old entry and add new one
+                    grep -v "^$edit_name	" "$PROMPTS_FILE" > "$PROMPTS_FILE.tmp"
+                    printf '%s\t%s\n' "$edit_name" "$new_prompt" >> "$PROMPTS_FILE.tmp"
+                    mv "$PROMPTS_FILE.tmp" "$PROMPTS_FILE"
+                    echo "  ${GREEN}Updated '$edit_name'${NC}"
+                fi
+            fi
+        elif [[ $choice -eq $((num_prompts + 2)) ]]; then
             # Remove prompt submenu
             echo ""
             echo "  Select prompt to remove:"
@@ -696,13 +736,10 @@ run_llm() {
         PROMPT="$*"
     elif [[ ! -t 0 ]]; then
         PROMPT=$(cat)
-    elif $CONVERSATION; then
-        # Allow empty prompt in conversation mode
-        PROMPT=""
     else
-        echo "Error: No prompt provided" >&2
-        echo "Usage: llm \"your prompt\" or echo \"prompt\" | llm" >&2
-        exit 1
+        # No prompt on tty - enter conversation mode
+        CONVERSATION=true
+        PROMPT=""
     fi
 
     # Use server if running, otherwise fall back to llama-cli
