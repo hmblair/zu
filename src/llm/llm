@@ -594,6 +594,7 @@ cmd_models() {
         done
 
         menu_opts+=("${GREEN}+${NC} Add new model")
+        menu_opts+=("${RED}−${NC} Remove model")
         menu_opts+=("${CYAN}✓${NC} Done")
 
         menu "${menu_opts[@]}"
@@ -618,7 +619,7 @@ cmd_models() {
 
             # Try to download/validate the model
             info "Downloading model..."
-            if ! llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null 2>&1; then
+            if ! llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null; then
                 echo "  ${RED}Failed to download model${NC}"
                 continue
             fi
@@ -627,6 +628,52 @@ cmd_models() {
             apply_model_change
             changed=true
             break
+        elif [[ $choice -eq $((num_models + 1)) ]]; then
+            # Remove model submenu
+            echo ""
+            echo "  Select model to remove:"
+            local -a rm_opts=()
+            for id in "${model_ids[@]}"; do
+                rm_opts+=("${RED}✕${NC} $id")
+            done
+            rm_opts+=("${CYAN}←${NC} Back")
+
+            menu "${rm_opts[@]}"
+            local rm_choice=$?
+
+            if [[ $rm_choice -lt $num_models ]]; then
+                local rm_id="${model_ids[$((rm_choice + 1))]}"
+
+                # Parse model ID to get manifest path
+                local owner="${rm_id%%/*}"
+                local rest="${rm_id#*/}"
+                local repo="${rest%%:*}"
+                local quant="${rest#*:}"
+                local manifest_path="$CACHE_DIR/manifest=${owner}=${repo}=${quant}.json"
+
+                # Get GGUF filename from manifest
+                local gguf_name=$(python3 -c "
+import json
+with open('$manifest_path') as f:
+    data = json.load(f)
+    print(data.get('ggufFile', {}).get('rfilename', ''))
+" 2>/dev/null)
+
+                # Delete files
+                rm -f "$manifest_path"
+                if [[ -n "$gguf_name" ]]; then
+                    rm -f "$CACHE_DIR/${owner}_${repo}_${gguf_name}"
+                    rm -f "$CACHE_DIR/${owner}_${repo}_${gguf_name}.etag"
+                fi
+
+                echo "  ${GREEN}Removed '$rm_id'${NC}"
+
+                # If we removed the selected model, reset to default
+                if [[ "$rm_id" == "$MODEL" ]]; then
+                    MODEL="$DEFAULT_MODEL"
+                    rm -f "$SELECTED_MODEL_FILE"
+                fi
+            fi
         else
             # Done
             break
