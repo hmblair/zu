@@ -316,7 +316,7 @@ cmd_kill() {
     esac
 }
 
-# Parse a GPU line from nvidia-smi and output: idx|name|mem_used|mem_total|mem_pct|util|status
+# Parse a GPU line from nvidia-smi and output: idx|name|mem_used|mem_total|mem_pct|util|gpu_status
 # Returns 1 if line is empty/invalid
 _parse_gpu_line() {
     local line="$1"
@@ -341,14 +341,14 @@ _parse_gpu_line() {
     [[ ! $util =~ ^[0-9]+$ ]] && util=0
 
     local mem_pct=$((mem_used * 100 / mem_total))
-    local status="busy"
+    local gpu_status="busy"
     if [[ $util -lt 10 && $mem_pct -lt 10 ]]; then
-        status="free"
+        gpu_status="free"
     elif [[ $util -lt 50 ]]; then
-        status="partial"
+        gpu_status="partial"
     fi
 
-    echo "${idx}|${name}|${mem_used}|${mem_total}|${mem_pct}|${util}|${status}"
+    echo "${idx}|${name}|${mem_used}|${mem_total}|${mem_pct}|${util}|${gpu_status}"
 }
 
 cmd_gpus() {
@@ -371,21 +371,21 @@ cmd_gpus() {
         local first=true
         while IFS= read -r line; do
             local parsed=$(_parse_gpu_line "$line") || continue
-            IFS='|' read -r idx name mem_used mem_total mem_pct util status <<< "$parsed"
+            IFS='|' read -r idx name mem_used mem_total mem_pct util gpu_status <<< "$parsed"
 
             $first || echo ","
             first=false
             printf '  {"index": %s, "name": "%s", "memory_used": %s, "memory_total": %s, "memory_percent": %s, "utilization": %s, "status": "%s"}' \
-                "$idx" "$name" "$mem_used" "$mem_total" "$mem_pct" "$util" "$status"
+                "$idx" "$name" "$mem_used" "$mem_total" "$mem_pct" "$util" "$gpu_status"
         done <<< "$output"
         echo $'\n]'
     else
         while IFS= read -r line; do
             local parsed=$(_parse_gpu_line "$line") || continue
-            IFS='|' read -r idx name mem_used mem_total mem_pct util status <<< "$parsed"
+            IFS='|' read -r idx name mem_used mem_total mem_pct util gpu_status <<< "$parsed"
 
             local status_colored
-            case $status in
+            case $gpu_status in
                 free) status_colored="${GREEN}free${NC}" ;;
                 partial) status_colored="${YELLOW}partial${NC}" ;;
                 *) status_colored="${RED}busy${NC}" ;;
