@@ -6,7 +6,7 @@ source "$SCRIPT_DIR/../common"
 
 # Configuration
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llm"
-PROMPTS_FILE="$CONFIG_DIR/prompts"
+PROMPTS_FILE="$CONFIG_DIR/prompts.json"
 SELECTED_PROMPT_FILE="$CONFIG_DIR/selected_prompt"
 SELECTED_MODEL_FILE="$CONFIG_DIR/selected_model"
 THEME_FILE="$SCRIPT_DIR/theme.json"
@@ -44,19 +44,77 @@ fi
 # Initialize default prompts if none exist
 if [[ ! -f "$PROMPTS_FILE" ]]; then
     cat > "$PROMPTS_FILE" <<'EOF'
-concise	Be concise and direct. Give short answers without unnecessary explanation.
-detailed	Provide thorough, detailed explanations with examples.
-code	You are a coding assistant. Provide clean, working code with brief explanations.
+{
+  "concise": "Be concise and direct. Give short answers without unnecessary explanation.",
+  "detailed": "Provide thorough, detailed explanations with examples.",
+  "code": "You are a coding assistant. Provide clean, working code with brief explanations."
+}
 EOF
     echo "concise" > "$SELECTED_PROMPT_FILE"
 fi
+
+# JSON prompt helpers
+prompt_get() {
+    local name="$1"
+    python3 -c "
+import json
+with open('$PROMPTS_FILE') as f:
+    prompts = json.load(f)
+print(prompts.get('$name', ''))
+" 2>/dev/null
+}
+
+prompt_list() {
+    python3 -c "
+import json
+with open('$PROMPTS_FILE') as f:
+    prompts = json.load(f)
+for name in prompts:
+    print(name)
+" 2>/dev/null
+}
+
+prompt_exists() {
+    local name="$1"
+    python3 -c "
+import json
+with open('$PROMPTS_FILE') as f:
+    prompts = json.load(f)
+exit(0 if '$name' in prompts else 1)
+" 2>/dev/null
+}
+
+prompt_set() {
+    local name="$1"
+    local text="$2"
+    python3 -c "
+import json
+with open('$PROMPTS_FILE') as f:
+    prompts = json.load(f)
+prompts['''$name'''] = '''$text'''
+with open('$PROMPTS_FILE', 'w') as f:
+    json.dump(prompts, f, indent=2)
+" 2>/dev/null
+}
+
+prompt_remove() {
+    local name="$1"
+    python3 -c "
+import json
+with open('$PROMPTS_FILE') as f:
+    prompts = json.load(f)
+prompts.pop('$name', None)
+with open('$PROMPTS_FILE', 'w') as f:
+    json.dump(prompts, f, indent=2)
+" 2>/dev/null
+}
 
 # Get current system prompt
 get_system_prompt() {
     local selected
     if [[ -f "$SELECTED_PROMPT_FILE" ]]; then
         selected=$(<"$SELECTED_PROMPT_FILE")
-        grep "^$selected	" "$PROMPTS_FILE" | cut -f2-
+        prompt_get "$selected"
     fi
 }
 
@@ -427,18 +485,20 @@ cmd_prompts() {
         menu_opts=()
         prompt_names=()
 
-        while IFS=$'\t' read -r name prompt || [[ -n "$name" ]]; do
+        while read -r name; do
             [[ -z "$name" ]] && continue
             prompt_names+=("$name")
-            # Truncate prompt for display
-            local short_prompt="${prompt:0:40}"
+            local prompt=$(prompt_get "$name")
+            # Truncate prompt for display (first line, max 40 chars)
+            local short_prompt="${prompt%%$'\n'*}"
+            short_prompt="${short_prompt:0:40}"
             [[ ${#prompt} -gt 40 ]] && short_prompt+="…"
             if [[ "$name" == "$selected" ]]; then
                 menu_opts+=("${GREEN}●${NC} $name ${GREY}- $short_prompt${NC}")
             else
                 menu_opts+=("  $name ${GREY}- $short_prompt${NC}")
             fi
-        done < "$PROMPTS_FILE"
+        done < <(prompt_list)
 
         menu_opts+=("${GREEN}+${NC} Add new prompt")
         menu_opts+=("${YELLOW}✎${NC} Edit prompt")
@@ -461,7 +521,7 @@ cmd_prompts() {
             local new_name=""
             vared -p "  Name: " new_name
             [[ -z "$new_name" ]] && continue
-            if grep -q "^$new_name	" "$PROMPTS_FILE" 2>/dev/null; then
+            if prompt_exists "$new_name"; then
                 echo "  ${RED}Name already exists${NC}"
                 continue
             fi
@@ -473,7 +533,7 @@ cmd_prompts() {
             rm -f "$tmpfile"
 
             [[ -z "$new_prompt" ]] && continue
-            printf '%s\t%s\n' "$new_name" "$new_prompt" >> "$PROMPTS_FILE"
+            prompt_set "$new_name" "$new_prompt"
             # Auto-select new prompt and exit
             selected="$new_name"
             echo "$selected" > "$SELECTED_PROMPT_FILE"
@@ -493,7 +553,7 @@ cmd_prompts() {
 
             if [[ $edit_choice -lt $num_prompts ]]; then
                 local edit_name="${prompt_names[$((edit_choice + 1))]}"
-                local old_prompt=$(grep "^$edit_name	" "$PROMPTS_FILE" | cut -f2-)
+                local old_prompt=$(prompt_get "$edit_name")
 
                 # Write to temp file and open in editor
                 local tmpfile=$(mktemp)
@@ -505,10 +565,7 @@ cmd_prompts() {
                 rm -f "$tmpfile"
 
                 if [[ -n "$new_prompt" && "$new_prompt" != "$old_prompt" ]]; then
-                    # Remove old entry and add new one
-                    grep -v "^$edit_name	" "$PROMPTS_FILE" > "$PROMPTS_FILE.tmp"
-                    printf '%s\t%s\n' "$edit_name" "$new_prompt" >> "$PROMPTS_FILE.tmp"
-                    mv "$PROMPTS_FILE.tmp" "$PROMPTS_FILE"
+                    prompt_set "$edit_name" "$new_prompt"
                     echo "  ${GREEN}Updated '$edit_name'${NC}"
                 fi
             fi
@@ -527,8 +584,7 @@ cmd_prompts() {
 
             if [[ $rm_choice -lt $num_prompts ]]; then
                 local rm_name="${prompt_names[$((rm_choice + 1))]}"
-                grep -v "^$rm_name	" "$PROMPTS_FILE" > "$PROMPTS_FILE.tmp"
-                mv "$PROMPTS_FILE.tmp" "$PROMPTS_FILE"
+                prompt_remove "$rm_name"
                 echo "  ${GREEN}Removed '$rm_name'${NC}"
                 # If we removed the selected prompt, clear selection
                 if [[ "$rm_name" == "$selected" ]]; then
@@ -617,11 +673,27 @@ cmd_models() {
             vared -p "  Model (owner/repo:quant): " new_model
             [[ -z "$new_model" ]] && continue
 
-            # Try to download/validate the model
+            # Parse model ID for manifest check
+            local owner="${new_model%%/*}"
+            local rest="${new_model#*/}"
+            local repo="${rest%%:*}"
+            local quant="${rest#*:}"
+            local manifest_path="$CACHE_DIR/manifest=${owner}=${repo}=${quant}.json"
+
+            # Download and test the model
             info "Downloading model..."
-            if ! llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null; then
+            llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null 2>&1
+            local exit_code=$?
+
+            # Check if manifest exists (download succeeded)
+            if [[ ! -f "$manifest_path" ]]; then
                 echo "  ${RED}Failed to download model${NC}"
                 continue
+            fi
+
+            # Warn if inference failed but download succeeded
+            if [[ $exit_code -ne 0 ]]; then
+                warn "Model downloaded but inference test failed (may need more memory)"
             fi
 
             MODEL="$new_model"
@@ -748,7 +820,7 @@ run_llm() {
                 ;;
             -s|--system)
                 # Use a named prompt
-                SYSTEM_PROMPT=$(grep "^$2	" "$PROMPTS_FILE" | cut -f2-)
+                SYSTEM_PROMPT=$(prompt_get "$2")
                 if [[ -z "$SYSTEM_PROMPT" ]]; then
                     error "Prompt '$2' not found"
                 fi
