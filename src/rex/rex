@@ -23,13 +23,9 @@ REX_TMP_DIR="/tmp"
 REX_HOME_DIR="\$HOME/.rex"  # Escaped for remote expansion
 REX_HOME_DIR_LOCAL="~/.rex"  # For local shell expansion in globs
 
-# SSH multiplexing - reuse connections for faster repeated commands
-REX_SOCKET_DIR="${TMPDIR:-/tmp}/rex-ssh-$UID"
-
-# SSH options for connection multiplexing and timeout
+# SSH options (timeout only - let user's ~/.ssh/config handle multiplexing)
 ssh_opts() {
-    mkdir -p "$REX_SOCKET_DIR" 2>/dev/null
-    echo "-o ControlMaster=auto -o ControlPath=$REX_SOCKET_DIR/%r@%h:%p -o ControlPersist=300 -o ConnectTimeout=10"
+    echo "-o ConnectTimeout=10"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
