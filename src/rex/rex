@@ -369,6 +369,7 @@ cmd_gpus() {
     if [[ $json == "true" ]]; then
         echo "["
         local first=true
+        local idx name mem_used mem_total mem_pct util gpu_status
         while IFS= read -r line; do
             local parsed=$(_parse_gpu_line "$line") || continue
             IFS='|' read -r idx name mem_used mem_total mem_pct util gpu_status <<< "$parsed"
@@ -380,11 +381,11 @@ cmd_gpus() {
         done <<< "$output"
         echo $'\n]'
     else
+        local idx name mem_used mem_total mem_pct util gpu_status status_colored
         while IFS= read -r line; do
             local parsed=$(_parse_gpu_line "$line") || continue
             IFS='|' read -r idx name mem_used mem_total mem_pct util gpu_status <<< "$parsed"
 
-            local status_colored
             case $gpu_status in
                 free) status_colored="${GREEN}free${NC}" ;;
                 partial) status_colored="${YELLOW}partial${NC}" ;;
