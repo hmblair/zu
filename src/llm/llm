@@ -681,8 +681,17 @@ cmd_models() {
             local manifest_path="$CACHE_DIR/manifest=${owner}=${repo}=${quant}.json"
 
             # Download and test the model
+            local needs_download=true
+            [[ -f "$manifest_path" ]] && needs_download=false
+
             info "Downloading model..."
-            llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null 2>&1
+            if $needs_download; then
+                # Show stderr for download progress
+                llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null
+            else
+                # Already cached, suppress all output
+                llama-cli --hf-repo "$new_model" --prompt "test" --n-predict 1 >/dev/null 2>&1
+            fi
             local exit_code=$?
 
             # Check if manifest exists (download succeeded)
