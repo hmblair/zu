@@ -1130,6 +1130,49 @@ static int is_git_root(const char *path) {
     return stat(git_path, &st) == 0;
 }
 
+/* Read a git ref hash from loose ref file or packed-refs */
+static int read_git_ref(const char *repo_path, const char *ref_name, char *hash, size_t hash_len) {
+    char ref_path[PATH_MAX];
+    char line[256];
+    hash[0] = '\0';
+
+    /* Try loose ref file first */
+    snprintf(ref_path, sizeof(ref_path), "%s/.git/%s", repo_path, ref_name);
+    FILE *f = fopen(ref_path, "r");
+    if (f) {
+        if (fgets(hash, hash_len, f)) {
+            size_t len = strlen(hash);
+            if (len > 0 && hash[len - 1] == '\n') hash[len - 1] = '\0';
+        }
+        fclose(f);
+        return hash[0] != '\0';
+    }
+
+    /* Fall back to packed-refs */
+    snprintf(ref_path, sizeof(ref_path), "%s/.git/packed-refs", repo_path);
+    f = fopen(ref_path, "r");
+    if (!f) return 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '^') continue;  /* Skip comments and peeled refs */
+        /* Format: "<hash> <ref_name>\n" */
+        char *space = strchr(line, ' ');
+        if (!space) continue;
+        *space = '\0';
+        char *ref = space + 1;
+        size_t ref_len = strlen(ref);
+        if (ref_len > 0 && ref[ref_len - 1] == '\n') ref[ref_len - 1] = '\0';
+        if (strcmp(ref, ref_name) == 0) {
+            strncpy(hash, line, hash_len - 1);
+            hash[hash_len - 1] = '\0';
+            fclose(f);
+            return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
 /* Get current git branch for a repo root. Returns allocated string or NULL. */
 static char *get_git_branch(const char *repo_path) {
     char git_path[PATH_MAX];
@@ -1631,7 +1674,19 @@ static void print_entry(const FileEntry *fe, int depth, int has_visible_children
     if (is_dir && is_git_root(fe->path)) {
         char *branch = get_git_branch(fe->path);
         if (branch) {
-            printf(" %s(%s)%s", CLR(ctx->cfg, COLOR_GREY), branch, RST(ctx->cfg));
+            char local_hash[64], remote_hash[64];
+            char local_ref[128], remote_ref[128];
+            snprintf(local_ref, sizeof(local_ref), "refs/heads/%s", branch);
+            snprintf(remote_ref, sizeof(remote_ref), "refs/remotes/origin/%s", branch);
+            read_git_ref(fe->path, local_ref, local_hash, sizeof(local_hash));
+            int has_upstream = read_git_ref(fe->path, remote_ref, remote_hash, sizeof(remote_hash));
+            if (has_upstream) {
+                int out_of_sync = strcmp(local_hash, remote_hash) != 0;
+                const char *cloud_color = out_of_sync ? COLOR_RED : COLOR_GREY;
+                printf(" %s(%s %s%s)%s", CLR(ctx->cfg, COLOR_GREY), branch, CLR(ctx->cfg, cloud_color), CLR(ctx->cfg, COLOR_GREY), RST(ctx->cfg));
+            } else {
+                printf(" %s(%s)%s", CLR(ctx->cfg, COLOR_GREY), branch, RST(ctx->cfg));
+            }
             free(branch);
         }
     }
