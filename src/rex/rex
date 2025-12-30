@@ -45,9 +45,12 @@ validate_job_name() {
 remote_exec() {
     local target="$1"; shift
     local cmd="$*"
-    # Escape single quotes for safe embedding in single-quoted string
-    cmd="${cmd//\'/\'\\\'\'}"
-    ssh ${=$(ssh_opts)} "$target" "bash --norc --noprofile -c '$cmd'"
+    # Use double quotes and escape only $ ` \ "
+    cmd="${cmd//\\/\\\\}"      # \ -> \\
+    cmd="${cmd//\$/\\\$}"      # $ -> \$
+    cmd="${cmd//\`/\\\`}"      # ` -> \`
+    cmd="${cmd//\"/\\\"}"      # " -> \"
+    ssh ${=$(ssh_opts)} "$target" "bash --norc --noprofile -c \"$cmd\""
 }
 
 # Pattern for pgrep that won't match itself (character class trick)
@@ -434,7 +437,10 @@ cmd_slurm_kill() {
 
 cmd_slurm_gpus() {
     local target="$1"
-    remote_exec "$target" "sinfo -p gpu -o '%P %a %D %G' 2>/dev/null || echo 'No GPU partition info'"
+    local partition="$2"
+    local partition_opt=""
+    [[ -n $partition ]] && partition_opt="-p $partition"
+    remote_exec "$target" "sinfo $partition_opt -o '%P %a %D %G' 2>/dev/null || echo 'No GPU partition info'"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1068,7 +1074,7 @@ main() {
         --gpus)
             shift
             [[ $1 == "--json" ]] && json=true
-            if $slurm; then cmd_slurm_gpus "$target"
+            if $slurm; then cmd_slurm_gpus "$target" "$partition"
             else cmd_gpus "$target" "$json"; fi
             return
             ;;
