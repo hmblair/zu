@@ -107,6 +107,81 @@ map_to_remote() {
     fi
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Project config (.rex.toml)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Global config variables (set by load_project_config)
+REX_PROJECT_ROOT=""
+REX_HOST=""
+REX_CODE_DIR=""
+REX_RUN_DIR=""
+REX_MODULES=()
+REX_BUILD_PARTITION=""
+REX_RUN_PARTITION=""
+REX_GRES=""
+REX_TIME=""
+
+# Parse a single TOML value: key = "value" -> value
+parse_toml_value() {
+    local config="$1" key="$2"
+    grep "^${key}" "$config" 2>/dev/null | sed -E 's/.*= *"([^"]*)".*/\1/'
+}
+
+# Parse a TOML array: key = ["a", "b"] -> array (one per line)
+parse_toml_array() {
+    local config="$1" key="$2"
+    local line=$(grep "^${key}" "$config" 2>/dev/null)
+    [[ -z $line ]] && return
+    # Extract content between [ and ], then split quoted strings
+    local content="${line#*\[}"
+    content="${content%\]*}"
+    while [[ $content =~ \"([^\"]+)\" ]]; do
+        echo "${match[1]}"
+        content="${content#*\"${match[1]}\"}"
+    done
+}
+
+# Load project config from .rex.toml
+# Walks up from cwd to find config file
+# Returns 0 if found and loaded, 1 if not found
+load_project_config() {
+    local dir="$(pwd)"
+
+    # Walk up to find .rex.toml
+    while [[ $dir != "/" ]]; do
+        if [[ -f "$dir/.rex.toml" ]]; then
+            REX_PROJECT_ROOT="$dir"
+            break
+        fi
+        dir="${dir:h}"
+    done
+
+    [[ -z $REX_PROJECT_ROOT ]] && return 1
+
+    local config="$REX_PROJECT_ROOT/.rex.toml"
+
+    REX_HOST=$(parse_toml_value "$config" host)
+    REX_CODE_DIR=$(parse_toml_value "$config" code_dir)
+    REX_RUN_DIR=$(parse_toml_value "$config" run_dir)
+    REX_MODULES=(${(f)"$(parse_toml_array "$config" modules)"})
+    REX_BUILD_PARTITION=$(parse_toml_value "$config" build_partition)
+    REX_RUN_PARTITION=$(parse_toml_value "$config" run_partition)
+    REX_GRES=$(parse_toml_value "$config" gres)
+    REX_TIME=$(parse_toml_value "$config" time)
+
+    return 0
+}
+
+# Apply project config defaults to SLURM variables
+# Sets partition, gres, time_limit, modules if not already set
+apply_project_defaults() {
+    [[ -z $partition && -n $REX_RUN_PARTITION ]] && partition="$REX_RUN_PARTITION"
+    [[ -z $gres && -n $REX_GRES ]] && gres="$REX_GRES"
+    [[ -z $time_limit && -n $REX_TIME ]] && time_limit="$REX_TIME"
+    [[ ${#modules[@]} -eq 0 && ${#REX_MODULES[@]} -gt 0 ]] && modules=("${REX_MODULES[@]}")
+}
+
 # Escape string for JSON output
 json_escape() {
     local s="$1"
@@ -480,8 +555,14 @@ cmd_sync() {
     local no_install="$3"
     local local_path="$4"
 
-    # Default to current directory
-    [[ -z $local_path ]] && local_path="$(pwd)"
+    # Default to project root (if config exists) or current directory
+    if [[ -z $local_path ]]; then
+        if [[ -n $REX_PROJECT_ROOT ]]; then
+            local_path="$REX_PROJECT_ROOT"
+        else
+            local_path="$(pwd)"
+        fi
+    fi
 
     # Resolve to absolute path
     local_path="${local_path:A}"
@@ -491,7 +572,12 @@ cmd_sync() {
 
     # Map local path to remote path
     local remote_path
-    remote_path=$(map_to_remote "$target" "$local_path") || error "Failed to connect to $target"
+    if [[ -n $REX_CODE_DIR ]]; then
+        # Use code_dir from project config
+        remote_path="$REX_CODE_DIR"
+    else
+        remote_path=$(map_to_remote "$target" "$local_path") || error "Failed to connect to $target"
+    fi
 
     # Rsync exclusions for Python projects
     local -a excludes=(
@@ -526,12 +612,92 @@ cmd_sync() {
     success "Synced $(basename $local_path)"
 
     # Pip install if pyproject.toml or setup.py exists (and not --no-install)
-    if [[ $no_install != "true" ]]; then
+    # Skip if using project config (use --build instead for proper venv setup)
+    if [[ $no_install != "true" && -z $REX_CODE_DIR ]]; then
         if [[ -f "${local_path}/pyproject.toml" || -f "${local_path}/setup.py" ]]; then
             info "Installing package..."
             remote_exec "$target" "cd ${(q)remote_path} && ${python} -m pip install -e . -q" || warn "pip install failed"
             success "Installed $(basename $local_path)"
         fi
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build command (for project config)
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_build() {
+    local target="$1"
+    local wait="$2"
+
+    # Require project config
+    [[ -z $REX_CODE_DIR ]] && error "No .rex.toml found with code_dir"
+
+    local job="build-$(date +%Y%m%d-%H%M%S)"
+    local remote_log="${REX_CODE_DIR}/.rex-build.log"
+    local remote_script="${REX_CODE_DIR}/.rex-build.sh"
+
+    # Build module load commands
+    local module_cmds=""
+    if [[ ${#REX_MODULES[@]} -gt 0 ]]; then
+        module_cmds="module load ${REX_MODULES[*]}"
+    fi
+
+    # Build partition option
+    local partition_opt=""
+    [[ -n $REX_BUILD_PARTITION ]] && partition_opt="--partition=$REX_BUILD_PARTITION"
+
+    # Generate build script
+    local script_content="#!/bin/bash -l
+set -e
+echo \"=== Rex Build ===\"
+echo \"Started: \$(date)\"
+
+$module_cmds
+
+echo \"=== Creating venv ===\"
+cd ${REX_CODE_DIR}
+rm -rf .venv
+python3 -m venv .venv
+
+echo \"=== Installing package ===\"
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -e .
+
+echo \"=== Build complete ===\"
+echo \"Finished: \$(date)\"
+"
+
+    # Write script to remote
+    info "Building in ${REX_CODE_DIR}"
+    remote_exec "$target" "cat > $remote_script && chmod +x $remote_script" <<< "$script_content" || error "Failed to write build script"
+
+    # Submit job
+    local slurm_id
+    slurm_id=$(remote_exec "$target" "sbatch --parsable $partition_opt --time=00:30:00 --job-name=rex-$job --output=$remote_log $remote_script 2>/dev/null")
+    [[ -z $slurm_id ]] && error "Failed to submit build job"
+
+    success "Submitted: $job (SLURM $slurm_id)"
+    echo "Log: rex ${target} --log $job"
+
+    # Wait if requested
+    if [[ $wait == "true" ]]; then
+        info "Waiting for build to complete..."
+        local poll_interval=5
+        while true; do
+            local state=$(remote_exec "$target" "squeue -j $slurm_id -h -o %T 2>/dev/null")
+            if [[ -z $state ]]; then
+                # Job no longer in queue - check result
+                local last_line=$(remote_exec "$target" "tail -1 $remote_log 2>/dev/null")
+                if [[ $last_line == *"Build complete"* ]]; then
+                    success "Build complete"
+                    return 0
+                else
+                    error "Build failed - check log: rex ${target} --exec \"cat $remote_log\""
+                fi
+            fi
+            sleep "$poll_interval"
+        done
     fi
 }
 
@@ -764,6 +930,8 @@ cmd_slurm_exec() {
     parse_module_args "$@"
     local cmd="${args[*]}"
 
+    apply_project_defaults
+
     [[ -z $cmd ]] && error "Usage: rex <host> --slurm --exec <command>"
 
     local slurm_opts=$(build_slurm_opts "$partition" "$gres" "$time_limit")
@@ -899,6 +1067,8 @@ run_slurm_foreground() {
     local -a modules args
     parse_module_args "$@"
 
+    apply_project_defaults
+
     if [[ -z $file && -t 0 ]]; then
         error "No input file and stdin is a terminal. Provide a file or pipe input."
     fi
@@ -912,6 +1082,9 @@ run_slurm_foreground() {
     local inner_cmd=""
     [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
     [[ -n $gpus ]] && inner_cmd+="export CUDA_VISIBLE_DEVICES=$gpus && "
+    # Activate venv and cd to run_dir if project config exists
+    [[ -n $REX_CODE_DIR ]] && inner_cmd+="source ${REX_CODE_DIR}/.venv/bin/activate && "
+    [[ -n $REX_RUN_DIR ]] && inner_cmd+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR} && "
     inner_cmd+="$python - ${(q)args[@]}"
 
     ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
@@ -930,6 +1103,8 @@ run_slurm_detached() {
 
     local -a modules args
     parse_module_args "$@"
+
+    apply_project_defaults
 
     [[ -z $file ]] && error "-d requires a file (cannot detach piped input)"
 
@@ -960,6 +1135,9 @@ run_slurm_detached() {
         sbatch_content+="module load $mod"$'\n'
     done
     [[ -n $gpus ]] && sbatch_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
+    # Activate venv and cd to run_dir if project config exists
+    [[ -n $REX_CODE_DIR ]] && sbatch_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
+    [[ -n $REX_RUN_DIR ]] && sbatch_content+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR}"$'\n'
     sbatch_content+="$python $remote_script ${(q)args[@]}"
 
     # Write sbatch script to remote
@@ -984,6 +1162,9 @@ main() {
         exit 0
     fi
 
+    # Load project config first (sets REX_* globals)
+    load_project_config
+
     # Expand alias if present
     local alias_value
     if alias_value=$(expand_alias "$1"); then
@@ -992,23 +1173,35 @@ main() {
     fi
 
     # Parse target (user@host or user host)
+    # If first arg is a flag or command, use REX_HOST from project config
     local target
-    if [[ $1 == *@* ]]; then
+    if [[ $1 == -* && -n $REX_HOST ]]; then
+        # Flag/command without explicit target - use project config
+        target="$REX_HOST"
+    elif [[ $1 == *@* ]]; then
         target=$1
         shift
     else
-        if [[ $# -lt 2 ]]; then
-            error "Missing hostname"
+        if [[ $# -lt 2 || $2 == -* ]]; then
+            # No target provided - try project config
+            if [[ -n $REX_HOST ]]; then
+                target="$REX_HOST"
+            else
+                error "Missing hostname (no .rex.toml found)"
+            fi
+        else
+            target="$1@$2"
+            shift 2
         fi
-        target="$1@$2"
-        shift 2
     fi
 
     # Parse all flags (short and long, in any order)
     local detach=false
     local python=python3
     local -a modules=()
+    # Auto-enable SLURM if project config has SLURM settings
     local slurm=false
+    [[ -n $REX_RUN_PARTITION || -n $REX_BUILD_PARTITION ]] && slurm=true
     local partition=""
     local gres=""
     local time_limit=""
@@ -1016,6 +1209,7 @@ main() {
     local job_name=""
     local json=false
     local gpus=""
+    local wait_build=false
     while [[ $1 == -* ]]; do
         case $1 in
             # Short flags
@@ -1027,6 +1221,7 @@ main() {
             # Long options
             --name) shift; job_name=$1; shift ;;
             --json) json=true; shift ;;
+            --wait) wait_build=true; shift ;;
             # SLURM long options
             --slurm) slurm=true; shift ;;
             --partition) shift; partition=$1; shift ;;
@@ -1035,7 +1230,7 @@ main() {
             # Sync options
             --no-install) no_install=true; shift ;;
             # Commands - stop parsing flags
-            --jobs|--status|--log|--kill|--gpus|--sync|--push|--pull|--watch|--exec|--last) break ;;
+            --jobs|--status|--log|--kill|--gpus|--sync|--build|--push|--pull|--watch|--exec|--last) break ;;
             # Unknown
             *) error "Unknown option: $1" ;;
         esac
@@ -1105,6 +1300,13 @@ main() {
                 esac
             done
             cmd_sync "$target" "$python" "$sync_no_install" "$1"
+            return
+            ;;
+        --build)
+            shift
+            # Parse --wait if it follows --build
+            [[ $1 == "--wait" ]] && { wait_build=true; shift; }
+            cmd_build "$target" "$wait_build"
             return
             ;;
         --push)
