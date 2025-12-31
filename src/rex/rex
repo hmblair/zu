@@ -662,7 +662,7 @@ python3 -m venv .venv
 
 echo \"=== Installing package ===\"
 .venv/bin/pip install --upgrade pip
-.venv/bin/pip install -e .
+.venv/bin/pip install --only-binary :all: -e .
 
 echo \"=== Build complete ===\"
 echo \"Finished: \$(date)\"
