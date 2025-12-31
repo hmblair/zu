@@ -203,6 +203,7 @@ Remote execution tool for Python and shell commands.
 
 Options:
   -d              Detach: run in background, survive disconnection
+  -s/--slurm      Use SLURM (srun/sbatch) for compute node execution
   -n/--name <n>   Name for detached job (default: timestamp)
   -p <path>       Python interpreter (default: python3)
   -g <gpus>       Set CUDA_VISIBLE_DEVICES (e.g., -g 0 or -g 2,3)
@@ -230,8 +231,7 @@ Shell execution:
   --exec <cmd>     Execute arbitrary shell command on remote
                    Use -d for detached mode
 
-SLURM options (for HPC clusters):
-  --slurm          Enable SLURM mode (use srun/sbatch)
+SLURM options (use with -s/--slurm):
   --partition <p>  SLURM partition
   --gres <spec>    GPU resources (e.g., gpu:1)
   --time <limit>   Time limit (e.g., 2:00:00)
@@ -241,18 +241,18 @@ Aliases: Define in $CONFIG as:
   sherlock = user@host --slurm -m python/3.12 --partition gpu --gres gpu:1
 
 Examples:
-  rex gpu train.py                    # run and stream output
-  rex gpu -d train.py                 # detach, returns job ID
+  rex gpu train.py                    # run on login node
+  rex gpu -s train.py                 # run via SLURM
+  rex gpu -s -d train.py              # SLURM detached (sbatch)
   rex gpu -d -n exp1 train.py         # detach with custom name
   rex gpu --jobs                      # list jobs
   rex gpu --watch --last              # wait for most recent job
   rex gpu --push ./data ~/data        # upload directory
   rex gpu --pull ~/checkpoints ./     # download directory
-  rex gpu --exec "ls -la ~/models"    # run shell command
-  rex gpu -d --exec "wget http://..." # detached shell command
+  rex gpu --exec "ls -la ~/models"    # run shell command on login node
+  rex gpu -s --exec "nvidia-smi"      # run shell command via SLURM
   rex gpu --sync                      # sync current project to remote
   echo 'print(1)' | rex gpu
-  rex sherlock -m cuda/12.0 train.py  # SLURM with modules
 
 EOF
 }
@@ -1196,9 +1196,8 @@ main() {
     local detach=false
     local python=python3
     local -a modules=()
-    # Auto-enable SLURM if project config has SLURM settings
-    local slurm=false slurm_explicit=false
-    [[ -n $REX_RUN_PARTITION || -n $REX_BUILD_PARTITION ]] && slurm=true
+    # SLURM is opt-in (use --slurm flag)
+    local slurm=false
     local partition=""
     local gres=""
     local time_limit=""
@@ -1215,12 +1214,13 @@ main() {
             -p) shift; python=$1; shift ;;
             -g) shift; gpus=$1; shift ;;
             -m) shift; modules+=("$1"); shift ;;
+            -s) slurm=true; shift ;;
             # Long options
             --name) shift; job_name=$1; shift ;;
             --json) json=true; shift ;;
             --wait) wait_build=true; shift ;;
             # SLURM long options
-            --slurm) slurm=true; slurm_explicit=true; shift ;;
+            --slurm) slurm=true; shift ;;
             --partition) shift; partition=$1; shift ;;
             --gres) shift; gres=$1; shift ;;
             --time) shift; time_limit=$1; shift ;;
@@ -1326,9 +1326,7 @@ main() {
             ;;
         --exec)
             shift
-            # Only use SLURM for --exec if explicitly requested (not auto-enabled)
-            if $slurm_explicit; then
-                # Pass modules as --module pairs
+            if $slurm; then
                 local -a mod_args=()
                 for mod in "${modules[@]}"; do
                     mod_args+=(--module "$mod")
