@@ -16,7 +16,7 @@ When you need to run code that requires a GPU (training models, large batch infe
 # Check available GPUs first
 rex gpu --gpus
 
-# Run a script and stream output back
+# Run a script on login node (streams output)
 rex gpu train.py --epochs 10
 
 # For long-running jobs, detach to survive disconnection
@@ -52,7 +52,7 @@ rex gpu --pull "~/logs/*.log" ./logs/       # glob pattern (quoted)
 Execute arbitrary shell commands on the remote server:
 
 ```bash
-# Foreground (streams output)
+# Foreground (streams output, runs on login node)
 rex gpu --exec "ls -la ~/checkpoints"
 rex gpu --exec "nvidia-smi"
 rex gpu --exec "du -sh ~/data/*"
@@ -82,24 +82,52 @@ rex gpu --sync /path/to/project
 
 ## SLURM Clusters (HPC)
 
-For SLURM-managed clusters like Sherlock:
+For SLURM-managed clusters, use `-s/--slurm` to run on compute nodes:
 
 ```bash
-# Example alias in ~/.config/rex:
-# sherlock = hmblair@login.sherlock.stanford.edu --slurm -m python/3.12 --partition gpu --gres gpu:1 --time 2:00:00
+# Run on login node (default)
+rex sherlock train.py
+rex sherlock --exec "ls /scratch"
+
+# Run via SLURM (-s flag)
+rex sherlock -s train.py              # srun (foreground)
+rex sherlock -s -d train.py           # sbatch (detached)
+rex sherlock -s --exec "nvidia-smi"   # shell command via srun
+
+# SLURM options
+rex sherlock -s --partition gpu --gres gpu:1 --time 2:00:00 train.py
 
 # Check GPU partition availability
 rex sherlock --gpus
+```
 
-# Run with additional modules
-rex sherlock -m cuda/12.0 train.py
+### Project Config (.rex.toml)
 
-# Detached jobs use sbatch
-rex sherlock -d train.py
+For HPC workflows, create `.rex.toml` in your project root:
 
-# Shell commands via SLURM
-rex sherlock --exec "nvidia-smi"
-rex sherlock -d --exec "wget https://..."
+```toml
+host = "hmblair@login.sherlock.stanford.edu"
+code_dir = "/home/groups/rhiju/hmblair/myproject"
+run_dir = "/scratch/users/hmblair/myproject"
+
+modules = ["system", "git/2.45.1", "python/3.12", "cuda/12.0"]
+
+[slurm]
+build_partition = "biochem"
+run_partition = "gpu"
+gres = "gpu:1"
+time = "2:00:00"
+```
+
+With project config:
+
+```bash
+# From project directory - host is inferred from .rex.toml
+rex --sync                    # sync to code_dir
+rex --build                   # create venv on compute node (sbatch)
+rex --build --wait            # wait for build to complete
+rex -s train.py               # run with SLURM defaults from config
+rex --exec "which python3"    # loads modules from config
 ```
 
 ## Agent Workflow for Long Jobs
@@ -124,4 +152,6 @@ rex gpu --gpus --json           # GPU info as JSON array
 - The `gpu` alias is configured in `~/.config/rex` with the correct host and Python venv
 - Scripts are copied to the remote, executed, and output streams back
 - For piped code: `echo 'print(torch.cuda.device_count())' | rex gpu`
+- All commands run on login node by default; use `-s` for SLURM compute nodes
 - SLURM mode uses `srun` for foreground and `sbatch` for detached jobs
+- `--exec` loads modules from `.rex.toml` or `-m` flags
