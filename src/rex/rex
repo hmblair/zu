@@ -1197,7 +1197,7 @@ main() {
     local python=python3
     local -a modules=()
     # Auto-enable SLURM if project config has SLURM settings
-    local slurm=false
+    local slurm=false slurm_explicit=false
     [[ -n $REX_RUN_PARTITION || -n $REX_BUILD_PARTITION ]] && slurm=true
     local partition=""
     local gres=""
@@ -1220,7 +1220,7 @@ main() {
             --json) json=true; shift ;;
             --wait) wait_build=true; shift ;;
             # SLURM long options
-            --slurm) slurm=true; shift ;;
+            --slurm) slurm=true; slurm_explicit=true; shift ;;
             --partition) shift; partition=$1; shift ;;
             --gres) shift; gres=$1; shift ;;
             --time) shift; time_limit=$1; shift ;;
@@ -1326,7 +1326,8 @@ main() {
             ;;
         --exec)
             shift
-            if $slurm; then
+            # Only use SLURM for --exec if explicitly requested (not auto-enabled)
+            if $slurm_explicit; then
                 # Pass modules as --module pairs
                 local -a mod_args=()
                 for mod in "${modules[@]}"; do
