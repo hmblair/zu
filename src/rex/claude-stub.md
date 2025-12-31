@@ -124,11 +124,17 @@ With project config:
 ```bash
 # From project directory - host is inferred from .rex.toml
 rex --sync                    # sync to code_dir
-rex --build                   # create venv on compute node (sbatch)
+rex --build                   # update venv (incremental, keeps .venv)
+rex --build --clean           # full rebuild (deletes .venv first)
 rex --build --wait            # wait for build to complete
 rex -s train.py               # run with SLURM defaults from config
 rex --exec "which python3"    # loads modules from config
 ```
+
+**Build notes:**
+- `--build` is incremental by default - only runs `pip install -e .` if `.venv` exists
+- Uses `--only-binary :all:` to avoid compiling packages from source
+- Runs on `build_partition` via sbatch (30 min time limit)
 
 ## Agent Workflow for Long Jobs
 
