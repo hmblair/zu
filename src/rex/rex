@@ -226,6 +226,9 @@ File transfer:
 Project sync:
   --sync [path]    Rsync project to remote, pip install -e if pyproject.toml exists
   --no-install     Skip pip install (use with --sync)
+  --build          Create/update venv on remote (requires .rex.toml)
+  --clean          Delete venv before rebuilding (use with --build)
+  --wait           Wait for build to complete (use with --build)
 
 Shell execution:
   --exec <cmd>     Execute arbitrary shell command on remote
@@ -629,6 +632,7 @@ cmd_sync() {
 cmd_build() {
     local target="$1"
     local wait="$2"
+    local clean="$3"
 
     # Require project config
     [[ -z $REX_CODE_DIR ]] && error "No .rex.toml found with code_dir"
@@ -647,6 +651,10 @@ cmd_build() {
     local partition_opt=""
     [[ -n $REX_BUILD_PARTITION ]] && partition_opt="--partition=$REX_BUILD_PARTITION"
 
+    # Clean command (only if --clean flag)
+    local clean_cmd=""
+    [[ $clean == "true" ]] && clean_cmd="rm -rf .venv"
+
     # Generate build script
     local script_content="#!/bin/bash -l
 set -e
@@ -655,10 +663,13 @@ echo \"Started: \$(date)\"
 
 $module_cmds
 
-echo \"=== Creating venv ===\"
 cd ${REX_CODE_DIR}
-rm -rf .venv
-python3 -m venv .venv
+$clean_cmd
+
+if [[ ! -d .venv ]]; then
+    echo \"=== Creating venv ===\"
+    python3 -m venv .venv
+fi
 
 echo \"=== Installing package ===\"
 .venv/bin/pip install --upgrade pip
@@ -1211,6 +1222,7 @@ main() {
     local json=false
     local gpus=""
     local wait_build=false
+    local clean_build=false
     while [[ $1 == -* ]]; do
         case $1 in
             # Short flags
@@ -1224,6 +1236,7 @@ main() {
             --name) shift; job_name=$1; shift ;;
             --json) json=true; shift ;;
             --wait) wait_build=true; shift ;;
+            --clean) clean_build=true; shift ;;
             # SLURM long options
             --slurm) slurm=true; shift ;;
             --partition) shift; partition=$1; shift ;;
@@ -1306,9 +1319,13 @@ main() {
             ;;
         --build)
             shift
-            # Parse --wait if it follows --build
-            [[ $1 == "--wait" ]] && { wait_build=true; shift; }
-            cmd_build "$target" "$wait_build"
+            # Parse --wait/--clean if they follow --build
+            while [[ $1 == "--wait" || $1 == "--clean" ]]; do
+                [[ $1 == "--wait" ]] && wait_build=true
+                [[ $1 == "--clean" ]] && clean_build=true
+                shift
+            done
+            cmd_build "$target" "$wait_build" "$clean_build"
             return
             ;;
         --push)
