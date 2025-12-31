@@ -2207,35 +2207,39 @@ int main(int argc, char **argv) {
     /* Process each directory */
     int continuation[MAX_DEPTH] = {0};
 
+    /* Initialize shared columns for consistent alignment across all arguments */
+    Column cols[NUM_COLUMNS];
+    columns_init(cols);
+
+    /* Build all trees first (computes column widths across all arguments) */
+    TreeNode **trees = xmalloc(dir_count * sizeof(TreeNode *));
+    GitCache *gits = xmalloc(dir_count * sizeof(GitCache));
+
     for (int i = 0; i < dir_count; i++) {
-        const char *dir = dirs[i];
+        git_cache_init(&gits[i]);
+        trees[i] = build_tree(dirs[i], cfg.long_format ? cols : NULL, &gits[i], &cfg, &icons);
+    }
 
-        /* Initialize git cache (populated during tree building) */
-        GitCache git;
-        git_cache_init(&git);
-
-        /* Initialize columns for long format */
-        Column cols[NUM_COLUMNS];
-        columns_init(cols);
-
-        /* Build tree and compute column widths in single pass */
-        TreeNode *tree = build_tree(dir, cfg.long_format ? cols : NULL, &git, &cfg, &icons);
-
-        /* Print tree */
+    /* Print all trees (using consistent column widths) */
+    for (int i = 0; i < dir_count; i++) {
         PrintContext ctx = {
-            .git = &git,
+            .git = &gits[i],
             .icons = &icons,
             .cfg = &cfg,
             .columns = cfg.long_format ? cols : NULL,
             .continuation = continuation
         };
-        print_tree_node(tree, 0, &ctx);
-
-        /* Cleanup */
-        tree_node_free(tree);
-        free(tree);
-        git_cache_free(&git);
+        print_tree_node(trees[i], 0, &ctx);
     }
+
+    /* Cleanup */
+    for (int i = 0; i < dir_count; i++) {
+        tree_node_free(trees[i]);
+        free(trees[i]);
+        git_cache_free(&gits[i]);
+    }
+    free(trees);
+    free(gits);
 
     cache_unload();
     /* libgit2 cleanup handled by atexit() */
