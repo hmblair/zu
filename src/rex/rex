@@ -1183,12 +1183,9 @@ main() {
         shift
     else
         if [[ $# -lt 2 || $2 == -* ]]; then
-            # No target provided - try project config
-            if [[ -n $REX_HOST ]]; then
-                target="$REX_HOST"
-            else
-                error "Missing hostname (no .rex.toml found)"
-            fi
+            # Single hostname (no user@) - use $1 as host
+            target="$1"
+            shift
         else
             target="$1@$2"
             shift 2
