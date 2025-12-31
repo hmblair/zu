@@ -1,30 +1,40 @@
 #compdef llm
 
 _llm() {
-    local curcontext="$curcontext" state
+    local curcontext="$curcontext" state line
+    local -a args
 
-    _arguments -C \
-        '(-m --model)'{-m,--model}'[HuggingFace model]:model:' \
-        '(-s --system)'{-s,--system}'[Use named system prompt]:prompt:' \
-        '(-c --conversation)'{-c,--conversation}'[Enable multi-turn conversation]' \
-        '(-r --raw)'{-r,--raw}'[Disable markdown formatting]' \
-        '(-v --verbose)'{-v,--verbose}'[Show llama-cli output]' \
-        '(-h --help)'{-h,--help}'[Show help]' \
-        '1:command:->cmd' \
-        '*:prompt:'
+    args=(
+        '(-p --prompt)'{-p,--prompt}'[Prompt to prepend to file]:prompt:'
+        '(-m --model)'{-m,--model}'[HuggingFace model]:model:'
+        '(-s --system)'{-s,--system}'[Use named system prompt]:prompt:'
+        '(-r --raw)'{-r,--raw}'[Disable markdown formatting]'
+        '(-v --verbose)'{-v,--verbose}'[Show llama-cli output]'
+        '(-h --help)'{-h,--help}'[Show help]'
+        '1:command:->cmd'
+        '*:file:_files'
+    )
+
+    _arguments -C $args
 
     case $state in
         cmd)
             local -a commands
             commands=(
                 'config:Configure prompts and models'
-                'serve:Start server (keeps model in memory)'
+                'serve:Start server'
                 'stop:Stop server'
                 'status:Show server and prompt status'
             )
             _describe -t commands 'command' commands
             ;;
     esac
+
+    # Handle serve subcommand options
+    if [[ $line[1] == serve ]]; then
+        _arguments \
+            '--context[Context size]:size:'
+    fi
 }
 
 _llm "$@"

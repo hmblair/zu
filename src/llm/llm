@@ -14,7 +14,7 @@ PID_FILE="$CONFIG_DIR/server.pid"
 CACHE_DIR="$HOME/Library/Caches/llama.cpp"
 SERVER_PORT=8787
 DEFAULT_MODEL="bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
-CONTEXT_SIZE=4096
+CONTEXT_SIZE=32768
 VERBOSE=false
 CONVERSATION=false
 FORMAT=true
@@ -122,16 +122,31 @@ get_system_prompt() {
 server_running() {
     [[ -f "$PID_FILE" ]] || return 1
     local pid=$(cat "$PID_FILE")
-    ps -p "$pid" -o comm= 2>/dev/null | grep -q llama-server
+    ps -p "$pid" -o comm= 2>/dev/null | grep -q llama-server || return 1
+    # Also check API is responsive
+    curl -s --max-time 2 "http://localhost:$SERVER_PORT/health" >/dev/null 2>&1
 }
 
 cmd_serve() {
+    # Parse serve options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --context)
+                CONTEXT_SIZE="$2"
+                shift 2
+                ;;
+            *)
+                error "Unknown option: $1"
+                ;;
+        esac
+    done
+
     if server_running; then
         warn "Server already running (PID: $(cat "$PID_FILE"))"
         return 0
     fi
 
-    info "Starting llama server..."
+    info "Starting llama server (context: $CONTEXT_SIZE)..."
     llama-server \
         --hf-repo "$MODEL" \
         --ctx-size "$CONTEXT_SIZE" \
@@ -139,6 +154,7 @@ cmd_serve() {
         >/dev/null 2>&1 &
 
     local pid=$!
+    disown $pid  # Detach from shell so it survives script exit
     echo "$pid" > "$PID_FILE"
 
     # Wait for server to be ready
@@ -154,6 +170,24 @@ cmd_serve() {
             rm -f "$PID_FILE"
             error "Server process died"
         fi
+    done
+
+    # Wait for model to finish loading (poll /v1/models until it returns data)
+    info "Loading model..."
+    while true; do
+        # Check if server died
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$PID_FILE"
+            error "Server crashed during model load (try smaller --context)"
+        fi
+
+        # Check if model is loaded (returns model list)
+        local models=$(curl -s --max-time 2 "http://localhost:$SERVER_PORT/v1/models" 2>/dev/null)
+        if echo "$models" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d.get('data',[])) > 0" 2>/dev/null; then
+            break
+        fi
+
+        sleep 1
     done
 
     success "Server running on port $SERVER_PORT (PID: $pid)"
@@ -172,8 +206,10 @@ cmd_stop() {
 }
 
 cmd_status() {
+    local pid=""
+    [[ -f "$PID_FILE" ]] && pid=$(cat "$PID_FILE")
+
     if server_running; then
-        local pid=$(cat "$PID_FILE")
         echo "Server: ${GREEN}running${NC} (PID: $pid, port: $SERVER_PORT)"
 
         # Get model from server
@@ -790,28 +826,31 @@ cmd_config() {
 
 usage() {
     cat <<EOF
-Usage: llm [options] [prompt]
+Usage: llm [options] [file]
        echo "prompt" | llm [options]
        llm <command>
 
 Commands:
     config               Configure prompts and models
-    serve                Start server (keeps model in memory)
+    serve [--context N]  Start server (keeps model in memory)
     stop                 Stop server
     status               Show server and prompt status
 
 Options:
+    -p, --prompt TEXT    Prompt to prepend to file/stdin content
     -m, --model MODEL    HuggingFace model (default: $MODEL)
     -s, --system NAME    Use named system prompt for this query
-    -c, --conversation   Enable multi-turn conversation mode
     -r, --raw            Disable markdown formatting
     -v, --verbose        Show llama-cli output (downloads, loading, etc.)
     -h, --help           Show this help
 
 Examples:
-    llm serve                            # Start server (once)
-    llm "What is the capital of France?" # Instant response
-    llm prompts                          # Manage system prompts
+    llm serve                            # Start server (32K context)
+    llm serve --context 65536            # Start with 64K context
+    llm file.txt                         # Send file contents to LLM
+    llm -p "summarize this" file.txt     # Ask about a file
+    echo "Hello" | llm                   # Pipe input to LLM
+    llm                                  # Interactive conversation mode
     llm stop                             # Stop server when done
 EOF
     exit 0
@@ -820,11 +859,17 @@ EOF
 run_llm() {
     SYSTEM_PROMPT=$(get_system_prompt)
 
+    local user_prompt=""
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             -m|--model)
                 MODEL="$2"
+                shift 2
+                ;;
+            -p|--prompt)
+                user_prompt="$2"
                 shift 2
                 ;;
             -s|--system)
@@ -834,10 +879,6 @@ run_llm() {
                     error "Prompt '$2' not found"
                 fi
                 shift 2
-                ;;
-            -c|--conversation)
-                CONVERSATION=true
-                shift
                 ;;
             -r|--raw)
                 FORMAT=false
@@ -859,15 +900,38 @@ run_llm() {
         esac
     done
 
-    # Get prompt from argument or stdin
+    # Get prompt from file, stdin, or conversation mode
     if [[ $# -gt 0 ]]; then
-        PROMPT="$*"
+        local file="$1"
+        if [[ ! -f "$file" ]]; then
+            error "File not found: $file"
+        fi
+        local file_content=$(<"$file")
+        if [[ -n "$user_prompt" ]]; then
+            PROMPT="$user_prompt"$'\n\n'"$file_content"
+        else
+            PROMPT="$file_content"
+        fi
     elif [[ ! -t 0 ]]; then
-        PROMPT=$(cat)
+        local stdin_content=$(cat)
+        if [[ -n "$user_prompt" ]]; then
+            PROMPT="$user_prompt"$'\n\n'"$stdin_content"
+        else
+            PROMPT="$stdin_content"
+        fi
     else
-        # No prompt on tty - enter conversation mode
+        # No input - enter conversation mode
         CONVERSATION=true
         PROMPT=""
+    fi
+
+    # Check if prompt is too large (rough estimate: ~4 chars per token)
+    if [[ -n "$PROMPT" ]]; then
+        local char_count=${#PROMPT}
+        local est_tokens=$((char_count / 4))
+        if [[ $est_tokens -gt $CONTEXT_SIZE ]]; then
+            error "Input too large (~$est_tokens tokens, max $CONTEXT_SIZE)"
+        fi
     fi
 
     # Use server if running, otherwise fall back to llama-cli
@@ -882,6 +946,11 @@ run_llm() {
             else
                 query_server "$PROMPT" "$SYSTEM_PROMPT"
             fi
+        fi
+        # Check if server died during query
+        if ! server_running; then
+            echo ""
+            error "Server crashed (may have run out of memory - try smaller --context)"
         fi
     else
         # Build llama-cli arguments
@@ -910,7 +979,8 @@ case "${1:-}" in
         cmd_config
         ;;
     serve)
-        cmd_serve
+        shift
+        cmd_serve "$@"
         ;;
     stop)
         cmd_stop
