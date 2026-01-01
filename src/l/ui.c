@@ -1060,9 +1060,9 @@ static void print_entry(const FileEntry *fe, int depth, int has_visible_children
             if (has_upstream) {
                 int out_of_sync = strcmp(local_hash, remote_hash) != 0;
                 const char *cloud_color = out_of_sync ? COLOR_RED : COLOR_GREY;
-                printf(" %s(%s %s%s%s)%s", CLR(ctx->cfg, COLOR_GREY), branch, CLR(ctx->cfg, cloud_color), ctx->icons->git_upstream, CLR(ctx->cfg, COLOR_GREY), RST(ctx->cfg));
+                printf(" %s(%s%s%s %s%s%s)%s", CLR(ctx->cfg, COLOR_GREY), CLR(ctx->cfg, STYLE_ITALIC), branch, RST(ctx->cfg), CLR(ctx->cfg, cloud_color), ctx->icons->git_upstream, CLR(ctx->cfg, COLOR_GREY), RST(ctx->cfg));
             } else {
-                printf(" %s(%s)%s", CLR(ctx->cfg, COLOR_GREY), branch, RST(ctx->cfg));
+                printf(" %s(%s%s%s%s)%s", CLR(ctx->cfg, COLOR_GREY), CLR(ctx->cfg, STYLE_ITALIC), branch, RST(ctx->cfg), CLR(ctx->cfg, COLOR_GREY), RST(ctx->cfg));
             }
             free(branch);
         }
