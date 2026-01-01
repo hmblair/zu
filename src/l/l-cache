@@ -78,7 +78,11 @@ cmd_status() {
     # Cache info (SQLite database)
     local cache_file="$CACHE_DIR/sizes.db"
     if [[ -f "$cache_file" ]]; then
-        local mtime=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$cache_file")
+        # Check WAL file for most recent update (SQLite WAL mode)
+        local wal_file="$cache_file-wal"
+        local check_file="$cache_file"
+        [[ -f "$wal_file" && "$wal_file" -nt "$cache_file" ]] && check_file="$wal_file"
+        local mtime=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$check_file")
         local count=$(sqlite3 "$cache_file" "SELECT COUNT(*) FROM sizes" 2>/dev/null || echo 0)
         local size=$(du -h "$cache_file" | cut -f1)
         echo "Cache: ${GREEN}$count entries${NC} ($size)"
