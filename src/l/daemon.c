@@ -424,13 +424,20 @@ static void action_exit(const char *binary_path) {
  * ============================================================================ */
 
 void daemon_run(const char *binary_path) {
-    /* Resolve daemon binary path (l-cached next to l) */
+    /* Resolve symlinks to find actual binary location */
+    char resolved_path[PATH_MAX];
+    if (!realpath(binary_path, resolved_path)) {
+        strncpy(resolved_path, binary_path, PATH_MAX - 1);
+        resolved_path[PATH_MAX - 1] = '\0';
+    }
+
+    /* Find l-cached next to resolved binary */
     char daemon_path[PATH_MAX];
-    char *slash = strrchr(binary_path, '/');
+    char *slash = strrchr(resolved_path, '/');
     if (slash) {
-        size_t dir_len = slash - binary_path;
+        size_t dir_len = slash - resolved_path;
         snprintf(daemon_path, sizeof(daemon_path), "%.*s/l-cached",
-                 (int)dir_len, binary_path);
+                 (int)dir_len, resolved_path);
     } else {
         snprintf(daemon_path, sizeof(daemon_path), "./l-cached");
     }
