@@ -1,74 +1,102 @@
 /*
- * dir_stats.h - Shared directory statistics computation
- *
- * Uses OpenMP for parallel directory traversal.
- * With OMP_NUM_THREADS=1 or omp_set_num_threads(1), runs single-threaded.
+ * cache.c - Client-side cache operations and directory statistics
  */
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE  /* For O_DIRECTORY, fdopendir, fstatat on Linux */
-#endif
-
-#ifndef DIR_STATS_H
-#define DIR_STATS_H
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "cache.h"
+#include <sqlite3.h>
+#include <pthread.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <limits.h>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-/* Result of directory statistics computation */
-typedef struct {
-    off_t size;        /* Total size in bytes (-1 if error) */
-    long file_count;   /* Total file count (-1 if error) */
-} DirStats;
+/* ============================================================================
+ * Client-side Cache (read-only)
+ * ============================================================================ */
 
-/*
- * Cache lookup function type.
- * Returns 1 if found (and fills size/count), 0 if not found.
- * Pass NULL to disable cache lookups during traversal.
- */
-typedef int (*dir_stats_cache_fn)(const char *path, off_t *size, long *count);
+static sqlite3 *g_db = NULL;
+static sqlite3_stmt *g_lookup_stmt = NULL;
+static pthread_mutex_t g_db_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Check if entry is . or .. (efficient bitwise check) */
-static inline int ds_is_dot_or_dotdot(const char *name) {
-    return name[0] == '.' &&
-           (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
-}
+int cache_load(void) {
+    char path[PATH_MAX];
+    cache_get_path(path, sizeof(path));
 
-/* Check if path is or ends with .git */
-static inline int ds_is_git_dir(const char *path) {
-    const char *name = strrchr(path, '/');
-    name = name ? name + 1 : path;
-    return strcmp(name, ".git") == 0;
-}
+    /* Use READWRITE to allow WAL recovery, but we only read */
+    int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
+    if (sqlite3_open_v2(path, &g_db, flags, NULL) != SQLITE_OK) {
+        /* Fall back to readonly if file doesn't exist */
+        if (sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+            g_db = NULL;
+            return -1;
+        }
+    }
 
-/* Check if path should be skipped to avoid double-counting.
- * On macOS APFS, firmlinks share the same st_dev, so we must check paths explicitly. */
-static inline int ds_skip_path(const char *path) {
-    /* Only skip /System/Volumes/Data - it's firmlinked and would cause double-counting.
-     * Other volumes like Preboot, VM, Update are real storage and should be counted. */
-    if (strncmp(path, "/System/Volumes/Data", 20) == 0 &&
-        (path[20] == '/' || path[20] == '\0')) return 1;
-    if (strncmp(path, "//System/Volumes/Data", 21) == 0 &&
-        (path[21] == '/' || path[21] == '\0')) return 1;
+    /* Set busy timeout to avoid conflicts with daemon */
+    sqlite3_busy_timeout(g_db, 1000);
+
+    /* Prepare lookup statement */
+    const char *sql = "SELECT size, file_count, dir_mtime FROM sizes WHERE path = ?";
+    if (sqlite3_prepare_v2(g_db, sql, -1, &g_lookup_stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        return -1;
+    }
+
     return 0;
 }
+
+int cache_lookup(const char *path, CacheEntry *out) {
+    if (!g_db || !g_lookup_stmt) return 0;
+
+    pthread_mutex_lock(&g_db_lock);
+
+    sqlite3_reset(g_lookup_stmt);
+    sqlite3_bind_text(g_lookup_stmt, 1, path, -1, SQLITE_STATIC);
+
+    int found = 0;
+    if (sqlite3_step(g_lookup_stmt) == SQLITE_ROW) {
+        out->size = sqlite3_column_int64(g_lookup_stmt, 0);
+        out->file_count = sqlite3_column_int64(g_lookup_stmt, 1);
+        out->dir_mtime = sqlite3_column_int64(g_lookup_stmt, 2);
+        found = 1;
+    }
+
+    pthread_mutex_unlock(&g_db_lock);
+    return found;
+}
+
+const CacheEntry *cache_lookup_entry(const char *path) {
+    static __thread CacheEntry entry;  /* Thread-local storage for OpenMP safety */
+    if (cache_lookup(path, &entry)) {
+        return &entry;
+    }
+    return NULL;
+}
+
+void cache_unload(void) {
+    if (g_lookup_stmt) {
+        sqlite3_finalize(g_lookup_stmt);
+        g_lookup_stmt = NULL;
+    }
+    if (g_db) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+    }
+}
+
+/* ============================================================================
+ * Directory Statistics
+ * ============================================================================ */
 
 /* Internal: recursive task function using directory fd for efficiency */
 static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn, dev_t root_dev) {
     DirStats result = {-1, -1};
 
     /* For .git directories, don't count files (but still compute size) */
-    int skip_file_count = ds_is_git_dir(path);
+    int skip_file_count = path_is_git_dir(path);
 
     int dirfd = open(path, O_RDONLY | O_DIRECTORY);
     if (dirfd < 0) return result;
@@ -102,7 +130,7 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (ds_is_dot_or_dotdot(entry->d_name))
+        if (PATH_IS_DOT_OR_DOTDOT(entry->d_name))
             continue;
 
         int is_dir = 0;
@@ -167,7 +195,7 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
             }
 
             /* Skip paths that cause double-counting (macOS firmlinks) */
-            if (ds_skip_path(subpath)) {
+            if (path_should_skip_firmlink(subpath)) {
                 free(subpath);
                 continue;
             }
@@ -230,20 +258,7 @@ static DirStats ds_get_stats_impl(const char *path, dir_stats_cache_fn cache_fn,
     return result;
 }
 
-/*
- * Compute directory statistics (size and file count) recursively.
- *
- * Parameters:
- *   path     - Directory path to scan
- *   cache_fn - Optional cache lookup function (NULL to disable)
- *
- * Returns:
- *   DirStats with size and file_count (-1 for each on error)
- *
- * Note: Uses OpenMP for parallel subdirectory processing.
- *       Set omp_set_num_threads(1) for single-threaded operation.
- */
-static inline DirStats dir_stats_get(const char *path, dir_stats_cache_fn cache_fn) {
+DirStats dir_stats_get(const char *path, dir_stats_cache_fn cache_fn) {
     DirStats result;
     #pragma omp parallel
     #pragma omp single
@@ -253,4 +268,37 @@ static inline DirStats dir_stats_get(const char *path, dir_stats_cache_fn cache_
     return result;
 }
 
-#endif /* DIR_STATS_H */
+/* Cache lookup wrapper for dir_stats with mtime validation */
+int cache_lookup_wrapper(const char *path, off_t *size, long *count) {
+    const CacheEntry *cached = cache_lookup_entry(path);
+    if (cached && cached->size >= 0 && cached->file_count >= 0) {
+        /* Validate mtime if available (skip if dir_mtime is 0 = not set) */
+        if (cached->dir_mtime > 0) {
+            struct stat st;
+            if (stat(path, &st) == 0 && st.st_mtime != cached->dir_mtime) {
+                return 0;  /* mtime changed, cache is stale */
+            }
+        }
+        *size = (off_t)cached->size;
+        *count = (long)cached->file_count;
+        return 1;
+    }
+    return 0;
+}
+
+DirStats get_dir_stats_cached(const char *path) {
+    /* Resolve symlinks for cache lookup (cache stores real paths) */
+    char resolved[PATH_MAX];
+    const char *lookup_path = path;
+    if (realpath(path, resolved) != NULL) {
+        lookup_path = resolved;
+    }
+
+    /* Check cache first for the top-level call */
+    off_t size;
+    long count;
+    if (cache_lookup_wrapper(lookup_path, &size, &count)) {
+        return (DirStats){size, count};
+    }
+    return dir_stats_get(path, cache_lookup_wrapper);
+}

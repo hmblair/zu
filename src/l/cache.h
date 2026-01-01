@@ -1,22 +1,20 @@
 /*
- * cache.h - SQLite-based directory size cache
+ * cache.h - SQLite-based directory size cache API
  *
  * Uses SQLite for:
  * - ACID transactions (crash-safe)
  * - WAL mode (readers don't block writers)
  * - Automatic schema management
- * - Easy debugging with sqlite3 CLI
  */
 
-#ifndef CACHE_H
-#define CACHE_H
+#ifndef L_CACHE_H
+#define L_CACHE_H
 
-#include <sqlite3.h>
-#include <stdlib.h>
-#include <string.h>
-#include <limits.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "common.h"
+
+/* ============================================================================
+ * Types
+ * ============================================================================ */
 
 /* Cache entry structure */
 typedef struct {
@@ -25,312 +23,80 @@ typedef struct {
     int64_t dir_mtime;
 } CacheEntry;
 
-/* Get cache database path */
-static inline void cache_path(char *buf, size_t len) {
-    const char *home = getenv("HOME");
-    snprintf(buf, len, "%s/.cache/l/sizes.db", home ? home : "/tmp");
-}
+/* Directory statistics result */
+typedef struct {
+    off_t size;        /* Total size in bytes (-1 if error) */
+    long file_count;   /* Total file count (-1 if error) */
+} DirStats;
+
+/* Cache lookup function type for dir_stats traversal */
+typedef int (*dir_stats_cache_fn)(const char *path, off_t *size, long *count);
 
 /* ============================================================================
- * Client-side functions (for l.c) - read-only access
+ * Client API (for l.c) - read-only operations
  * ============================================================================ */
 
-#include <pthread.h>
+/* Get cache database path */
+void cache_get_path(char *buf, size_t len);
 
-static sqlite3 *g_db = NULL;
-static sqlite3_stmt *g_lookup_stmt = NULL;
-static pthread_mutex_t g_db_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Load cache (read-only) - returns 0 on success, -1 on failure */
+int cache_load(void);
 
-/* Load cache (read-only, but needs write for WAL recovery) */
-static inline int cache_load(void) {
-    char path[PATH_MAX];
-    cache_path(path, sizeof(path));
-
-    /* Use READWRITE to allow WAL recovery, but we only read */
-    int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
-    if (sqlite3_open_v2(path, &g_db, flags, NULL) != SQLITE_OK) {
-        /* Fall back to readonly if file doesn't exist */
-        if (sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-            g_db = NULL;
-            return -1;
-        }
-    }
-
-    /* Set busy timeout to avoid conflicts with daemon */
-    sqlite3_busy_timeout(g_db, 1000);
-
-    /* Prepare lookup statement */
-    const char *sql = "SELECT size, file_count, dir_mtime FROM sizes WHERE path = ?";
-    if (sqlite3_prepare_v2(g_db, sql, -1, &g_lookup_stmt, NULL) != SQLITE_OK) {
-        sqlite3_close(g_db);
-        g_db = NULL;
-        return -1;
-    }
-
-    return 0;
-}
-
-/* Look up a path in the cache (thread-safe) */
-static inline int cache_lookup(const char *path, CacheEntry *out) {
-    if (!g_db || !g_lookup_stmt) return 0;
-
-    pthread_mutex_lock(&g_db_lock);
-
-    sqlite3_reset(g_lookup_stmt);
-    sqlite3_bind_text(g_lookup_stmt, 1, path, -1, SQLITE_STATIC);
-
-    int found = 0;
-    if (sqlite3_step(g_lookup_stmt) == SQLITE_ROW) {
-        out->size = sqlite3_column_int64(g_lookup_stmt, 0);
-        out->file_count = sqlite3_column_int64(g_lookup_stmt, 1);
-        out->dir_mtime = sqlite3_column_int64(g_lookup_stmt, 2);
-        found = 1;
-    }
-
-    pthread_mutex_unlock(&g_db_lock);
-    return found;
-}
+/* Look up a path in the cache (thread-safe) - returns 1 if found, 0 otherwise */
+int cache_lookup(const char *path, CacheEntry *out);
 
 /* Wrapper that returns pointer (for compatibility) */
-static inline const CacheEntry *cache_lookup_entry(const char *path) {
-    static __thread CacheEntry entry;  /* Thread-local storage */
-    if (cache_lookup(path, &entry)) {
-        return &entry;
-    }
-    return NULL;
-}
+const CacheEntry *cache_lookup_entry(const char *path);
 
 /* Close the cache */
-static inline void cache_unload(void) {
-    if (g_lookup_stmt) {
-        sqlite3_finalize(g_lookup_stmt);
-        g_lookup_stmt = NULL;
-    }
-    if (g_db) {
-        sqlite3_close(g_db);
-        g_db = NULL;
-    }
-}
+void cache_unload(void);
 
 /* ============================================================================
- * Daemon-side functions (for ld.c) - read-write access
+ * Directory Statistics
  * ============================================================================ */
 
-#ifdef CACHE_DAEMON
+/*
+ * Compute directory statistics (size and file count) recursively.
+ * Uses OpenMP for parallel subdirectory processing.
+ *
+ * Parameters:
+ *   path     - Directory path to scan
+ *   cache_fn - Optional cache lookup function (NULL to disable)
+ *
+ * Returns:
+ *   DirStats with size and file_count (-1 for each on error)
+ */
+DirStats dir_stats_get(const char *path, dir_stats_cache_fn cache_fn);
 
-static sqlite3 *d_db = NULL;
-static sqlite3_stmt *d_insert_stmt = NULL;
-static sqlite3_stmt *d_lookup_stmt = NULL;
+/* Cache lookup wrapper with mtime validation (for use with dir_stats_get) */
+int cache_lookup_wrapper(const char *path, off_t *size, long *count);
 
-/* Internal: try to open and initialize the database */
-static inline int cache_init_internal(const char *path) {
-    if (sqlite3_open(path, &d_db) != SQLITE_OK) {
-        d_db = NULL;
-        return -1;
-    }
+/* Get directory stats with cache lookup */
+DirStats get_dir_stats_cached(const char *path);
 
-    /* Configure for safety and performance */
-    sqlite3_exec(d_db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
-    sqlite3_exec(d_db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
-    sqlite3_exec(d_db, "PRAGMA busy_timeout=5000", NULL, NULL, NULL);
+/* ============================================================================
+ * Daemon API (for ld.c) - read-write operations
+ * ============================================================================ */
 
-    /* Verify database integrity */
-    sqlite3_stmt *check;
-    if (sqlite3_prepare_v2(d_db, "PRAGMA integrity_check", -1, &check, NULL) == SQLITE_OK) {
-        if (sqlite3_step(check) == SQLITE_ROW) {
-            const char *result = (const char *)sqlite3_column_text(check, 0);
-            if (result && strcmp(result, "ok") != 0) {
-                sqlite3_finalize(check);
-                sqlite3_close(d_db);
-                d_db = NULL;
-                return -1;  /* Database is corrupt */
-            }
-        }
-        sqlite3_finalize(check);
-    }
+/* Initialize cache for daemon (read-write) - returns 0 on success */
+int cache_daemon_init(void);
 
-    /* Create table if not exists */
-    const char *create_sql =
-        "CREATE TABLE IF NOT EXISTS sizes ("
-        "  path TEXT PRIMARY KEY NOT NULL,"
-        "  size INTEGER NOT NULL,"
-        "  file_count INTEGER NOT NULL,"
-        "  dir_mtime INTEGER NOT NULL"
-        ") WITHOUT ROWID";
-    if (sqlite3_exec(d_db, create_sql, NULL, NULL, NULL) != SQLITE_OK) {
-        sqlite3_close(d_db);
-        d_db = NULL;
-        return -1;
-    }
-
-    /* Prepare statements */
-    const char *insert_sql =
-        "INSERT OR REPLACE INTO sizes (path, size, file_count, dir_mtime) "
-        "VALUES (?, ?, ?, ?)";
-    if (sqlite3_prepare_v2(d_db, insert_sql, -1, &d_insert_stmt, NULL) != SQLITE_OK) {
-        sqlite3_close(d_db);
-        d_db = NULL;
-        return -1;
-    }
-
-    const char *lookup_sql = "SELECT size, file_count, dir_mtime FROM sizes WHERE path = ?";
-    if (sqlite3_prepare_v2(d_db, lookup_sql, -1, &d_lookup_stmt, NULL) != SQLITE_OK) {
-        sqlite3_finalize(d_insert_stmt);
-        sqlite3_close(d_db);
-        d_db = NULL;
-        return -1;
-    }
-
-    return 0;
-}
-
-/* Initialize cache for daemon (read-write) with error recovery */
-static inline int cache_init(void) {
-    char path[PATH_MAX];
-    cache_path(path, sizeof(path));
-
-    /* Ensure directory exists */
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s/.cache/l", getenv("HOME") ?: "/tmp");
-    mkdir(dir, 0755);
-
-    /* Try to open existing database */
-    if (cache_init_internal(path) == 0) {
-        return 0;
-    }
-
-    /* Failed - delete corrupt database and retry */
-    char wal_path[PATH_MAX], shm_path[PATH_MAX];
-    snprintf(wal_path, sizeof(wal_path), "%s-wal", path);
-    snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
-    unlink(path);
-    unlink(wal_path);
-    unlink(shm_path);
-
-    /* Try again with fresh database */
-    return cache_init_internal(path);
-}
-
-/* Store a cache entry */
-static inline int cache_store(const char *path, off_t size, long file_count, time_t dir_mtime) {
-    if (!d_db || !d_insert_stmt) return -1;
-
-    sqlite3_reset(d_insert_stmt);
-    sqlite3_bind_text(d_insert_stmt, 1, path, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(d_insert_stmt, 2, size);
-    sqlite3_bind_int64(d_insert_stmt, 3, file_count);
-    sqlite3_bind_int64(d_insert_stmt, 4, dir_mtime);
-
-    return sqlite3_step(d_insert_stmt) == SQLITE_DONE ? 0 : -1;
-}
+/* Store a cache entry - returns 0 on success */
+int cache_daemon_store(const char *path, off_t size, long file_count, time_t dir_mtime);
 
 /* Look up entry (daemon side) */
-static inline const CacheEntry *dcache_lookup_entry(const char *path) {
-    static CacheEntry entry;
-
-    if (!d_db || !d_lookup_stmt) return NULL;
-
-    sqlite3_reset(d_lookup_stmt);
-    sqlite3_bind_text(d_lookup_stmt, 1, path, -1, SQLITE_STATIC);
-
-    if (sqlite3_step(d_lookup_stmt) == SQLITE_ROW) {
-        entry.size = sqlite3_column_int64(d_lookup_stmt, 0);
-        entry.file_count = sqlite3_column_int64(d_lookup_stmt, 1);
-        entry.dir_mtime = sqlite3_column_int64(d_lookup_stmt, 2);
-        return &entry;
-    }
-
-    return NULL;
-}
+const CacheEntry *cache_daemon_lookup(const char *path);
 
 /* Checkpoint WAL to main database */
-static inline int cache_save(void) {
-    if (!d_db) return -1;
-    sqlite3_wal_checkpoint_v2(d_db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
-    return 0;
-}
+int cache_daemon_save(void);
 
 /* Get entry count (for status display) */
-static inline int cache_count(void) {
-    if (!d_db) return 0;
-    sqlite3_stmt *stmt;
-    int count = 0;
-    if (sqlite3_prepare_v2(d_db, "SELECT COUNT(*) FROM sizes", -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            count = sqlite3_column_int(stmt, 0);
-        }
-        sqlite3_finalize(stmt);
-    }
-    return count;
-}
+int cache_daemon_count(void);
 
 /* Remove cache entries for paths that no longer exist */
-static inline int cache_prune_stale(void) {
-    if (!d_db) return 0;
-
-    sqlite3_stmt *select_stmt;
-    const char *select_sql = "SELECT path FROM sizes";
-    if (sqlite3_prepare_v2(d_db, select_sql, -1, &select_stmt, NULL) != SQLITE_OK) {
-        return -1;
-    }
-
-    /* Collect stale paths */
-    char **stale = NULL;
-    int stale_count = 0;
-    int stale_cap = 0;
-
-    while (sqlite3_step(select_stmt) == SQLITE_ROW) {
-        const char *path = (const char *)sqlite3_column_text(select_stmt, 0);
-        struct stat st;
-        if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            /* Path no longer exists or is not a directory */
-            if (stale_count >= stale_cap) {
-                stale_cap = stale_cap ? stale_cap * 2 : 64;
-                stale = realloc(stale, stale_cap * sizeof(char *));
-                if (!stale) break;
-            }
-            stale[stale_count++] = strdup(path);
-        }
-    }
-    sqlite3_finalize(select_stmt);
-
-    /* Delete stale entries */
-    if (stale_count > 0) {
-        sqlite3_stmt *delete_stmt;
-        const char *delete_sql = "DELETE FROM sizes WHERE path = ?";
-        if (sqlite3_prepare_v2(d_db, delete_sql, -1, &delete_stmt, NULL) == SQLITE_OK) {
-            for (int i = 0; i < stale_count; i++) {
-                sqlite3_reset(delete_stmt);
-                sqlite3_bind_text(delete_stmt, 1, stale[i], -1, SQLITE_STATIC);
-                sqlite3_step(delete_stmt);
-                free(stale[i]);
-            }
-            sqlite3_finalize(delete_stmt);
-        }
-        free(stale);
-    }
-
-    return stale_count;
-}
+int cache_daemon_prune_stale(void);
 
 /* Free cache resources */
-static inline void cache_free(void) {
-    if (d_insert_stmt) {
-        sqlite3_finalize(d_insert_stmt);
-        d_insert_stmt = NULL;
-    }
-    if (d_lookup_stmt) {
-        sqlite3_finalize(d_lookup_stmt);
-        d_lookup_stmt = NULL;
-    }
-    if (d_db) {
-        /* Final checkpoint before close */
-        sqlite3_wal_checkpoint_v2(d_db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
-        sqlite3_close(d_db);
-        d_db = NULL;
-    }
-}
+void cache_daemon_close(void);
 
-#endif /* CACHE_DAEMON */
-
-#endif /* CACHE_H */
+#endif /* L_CACHE_H */

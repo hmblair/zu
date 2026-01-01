@@ -1,32 +1,82 @@
-CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -std=c99 -Wno-unknown-warning-option
-OMPFLAGS ?= -fopenmp
-BINDIR ?= ../../bin
+# Makefile for l directory listing tool (refactored)
 
-# Detect libgit2
-HAVE_LIBGIT2 := $(shell pkg-config --exists libgit2 2>/dev/null && echo 1)
-ifeq ($(HAVE_LIBGIT2),1)
-  LIBGIT2_CFLAGS := $(shell pkg-config --cflags libgit2) -DHAVE_LIBGIT2
-  LIBGIT2_LIBS := $(shell pkg-config --libs libgit2)
+CC = cc
+CFLAGS = -O2 -Wall -Wextra -std=c99
+LIBS = -lsqlite3 -lpthread
+
+# OpenMP support (use homebrew clang on macOS)
+UNAME := $(shell uname)
+ifeq ($(UNAME),Darwin)
+  # Check for homebrew llvm
+  BREW_LLVM := $(shell brew --prefix llvm 2>/dev/null)
+  ifneq ($(BREW_LLVM),)
+    CC = $(BREW_LLVM)/bin/clang
+    CFLAGS += -fopenmp
+    LIBS += -L$(BREW_LLVM)/lib -lomp
+  endif
+else
+  CFLAGS += -fopenmp
 endif
 
-all: l l-cached link-l-cache
+# Optional libgit2 support
+HAVE_LIBGIT2 := $(shell pkg-config --exists libgit2 2>/dev/null && echo yes)
+ifeq ($(HAVE_LIBGIT2),yes)
+  CFLAGS += -DHAVE_LIBGIT2 $(shell pkg-config --cflags libgit2)
+  LIBS += $(shell pkg-config --libs libgit2)
+endif
 
-l: l.c cache.h dir_stats.h
-	$(CC) $(CFLAGS) $(OMPFLAGS) $(LIBGIT2_CFLAGS) -o $(BINDIR)/l l.c -lsqlite3 $(LIBGIT2_LIBS)
+# Debug build
+ifdef DEBUG
+  CFLAGS = -g -O0 -Wall -Wextra -std=c99 -fsanitize=address,undefined -DDEBUG
+  CFLAGS += -fopenmp
+  ifeq ($(HAVE_LIBGIT2),yes)
+    CFLAGS += -DHAVE_LIBGIT2 $(shell pkg-config --cflags libgit2)
+  endif
+endif
 
-l-cached: ld.c cache.h
-	$(CC) $(CFLAGS) -o $(BINDIR)/l-cached ld.c -lsqlite3
+# Object files
+COMMON_OBJS = common.o
+CACHE_CLIENT_OBJS = cache.o
+CACHE_DAEMON_OBJS = cache_daemon.o
+GIT_OBJS = git.o
+UI_OBJS = ui.o
 
-link-l-cache:
-	chmod +x l-cache
-	ln -sfn ../src/l/l-cache $(BINDIR)/l-cache
+# Main targets
+all: l l-cached
 
-# Debug build with sanitizers (use: make debug)
-debug: CFLAGS := -g -O1 -Wall -Wextra -std=c99 -fsanitize=address,undefined -fno-omit-frame-pointer
-debug: all
+l: l.o $(COMMON_OBJS) $(CACHE_CLIENT_OBJS) $(GIT_OBJS) $(UI_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
+
+l-cached: ld.o $(COMMON_OBJS) $(CACHE_DAEMON_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
+
+# Symlink for l-cache script
+l-cache: l-cached
+	ln -sf l-cache l-cache
+
+# Object files
+common.o: common.c common.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+cache.o: cache.c cache.h common.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+cache_daemon.o: cache_daemon.c cache.h common.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+git.o: git.c git.h common.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+ui.o: ui.c ui.h cache.h git.h common.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+l.o: l.c common.h cache.h git.h ui.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+ld.o: ld.c common.h cache.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(BINDIR)/l $(BINDIR)/l-cached $(BINDIR)/l-cache
+	rm -f *.o l l-cached
 
-.PHONY: all clean link-l-cache debug
+.PHONY: all clean
