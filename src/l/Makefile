@@ -40,19 +40,16 @@ CACHE_CLIENT_OBJS = cache.o
 CACHE_DAEMON_OBJS = cache_daemon.o
 GIT_OBJS = git.o
 UI_OBJS = ui.o
+DAEMON_OBJS = daemon.o
 
 # Main targets
 all: l l-cached
 
-l: l.o $(COMMON_OBJS) $(CACHE_CLIENT_OBJS) $(GIT_OBJS) $(UI_OBJS)
+l: l.o $(COMMON_OBJS) $(CACHE_CLIENT_OBJS) $(GIT_OBJS) $(UI_OBJS) $(DAEMON_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
 
 l-cached: ld.o $(COMMON_OBJS) $(CACHE_DAEMON_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
-
-# Symlink for l-cache script
-l-cache: l-cached
-	ln -sf l-cache l-cache
 
 # Object files
 common.o: common.c common.h
@@ -70,7 +67,10 @@ git.o: git.c git.h common.h
 ui.o: ui.c ui.h cache.h git.h common.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-l.o: l.c common.h cache.h git.h ui.h
+l.o: l.c common.h cache.h git.h ui.h daemon.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+daemon.o: daemon.c daemon.h common.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 ld.o: ld.c common.h cache.h

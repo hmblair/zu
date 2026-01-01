@@ -9,6 +9,7 @@
 #include "cache.h"
 #include "git.h"
 #include "ui.h"
+#include "daemon.h"
 
 #ifdef HAVE_LIBGIT2
 #include <git2.h>
@@ -44,6 +45,7 @@ static void print_usage(void) {
     printf("  -r              Reverse sort order\n");
     printf("\n");
     printf("  -h, --help      Show this help message\n");
+    printf("  --daemon        Manage the size caching daemon\n");
 }
 
 static int apply_short_flag(char flag, Config *cfg) {
@@ -131,6 +133,14 @@ static void parse_args(int argc, char **argv, Config *cfg,
  * ============================================================================ */
 
 int main(int argc, char **argv) {
+    /* Check for --daemon early (before other initialization) */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--daemon") == 0) {
+            daemon_run(argv[0]);
+            return 0;
+        }
+    }
+
 #ifdef HAVE_LIBGIT2
     git_libgit2_init();
     atexit(cleanup_libgit2);
