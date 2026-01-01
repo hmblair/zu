@@ -187,6 +187,7 @@ typedef struct {
     int list_mode;
     int no_icons;
     int sort_reverse;
+    int git_only;              /* Show only files with git status (-g) */
     int is_tty;
     SortMode sort_by;
     /* Environment paths */
@@ -289,6 +290,7 @@ typedef struct TreeNode {
     FileEntry entry;
     struct TreeNode *children;
     size_t child_count;
+    int has_git_status;  /* 1 if this node or any descendant has git status */
 } TreeNode;
 
 typedef struct GitStatusNode {
@@ -1727,9 +1729,13 @@ static void tree_node_free(TreeNode *node) {
  * Ownership: FileEntry ownership transfers from FileList to TreeNode.
  * The FileList's entries array is freed, but individual entries are NOT freed
  * (they are now owned by the tree nodes).
+ *
+ * in_git_repo: 1 if we're inside a git repository, 0 otherwise.
+ * Used in git_only mode to skip directories that can't have git status.
  */
 static void build_tree_children(TreeNode *parent, int depth, Column *cols,
-                                 GitCache *git, const Config *cfg, const Icons *icons) {
+                                 GitCache *git, const Config *cfg, const Icons *icons,
+                                 int in_git_repo) {
     if (depth >= cfg->max_depth) return;
     if (access(parent->entry.path, R_OK) != 0) return;
 
@@ -1752,11 +1758,13 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
     /* Phase 1: Transfer entries and detect nested git repos */
     char **git_repos = NULL;
     size_t git_repo_count = 0;
+    int *is_git_repo_root = xmalloc(list.count * sizeof(int));
 
     for (size_t i = 0; i < list.count; i++) {
         TreeNode *child = &parent->children[i];
         memset(child, 0, sizeof(TreeNode));
         child->entry = list.entries[i];
+        is_git_repo_root[i] = 0;
 
         /* Check if this directory is a git repo root */
         if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
@@ -1764,6 +1772,7 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
             is_git_root(child->entry.path)) {
             git_repos = xrealloc(git_repos, (git_repo_count + 1) * sizeof(char *));
             git_repos[git_repo_count++] = child->entry.path;
+            is_git_repo_root[i] = 1;
         }
     }
 
@@ -1774,12 +1783,16 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
     }
     free(git_repos);
 
-    /* Phase 3: Set is_ignored, update columns, and recurse */
+    /* Phase 3: Set is_ignored/git_status, update columns, and recurse */
     for (size_t i = 0; i < list.count; i++) {
         TreeNode *child = &parent->children[i];
 
-        /* Set is_ignored */
+        /* Set is_ignored and copy git_status */
         const char *git_status = git_cache_get(git, child->entry.path);
+        if (git_status) {
+            strncpy(child->entry.git_status, git_status, sizeof(child->entry.git_status) - 1);
+            child->entry.git_status[sizeof(child->entry.git_status) - 1] = '\0';
+        }
         child->entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
                                    strcmp(child->entry.name, ".git") == 0;
 
@@ -1791,7 +1804,15 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
         /* Recurse into directories (including symlinks to directories) */
         if ((child->entry.type == FTYPE_DIR || child->entry.type == FTYPE_SYMLINK_DIR) &&
             !should_skip_dir(child->entry.name, child->entry.is_ignored, cfg)) {
-            build_tree_children(child, depth + 1, cols, git, cfg, icons);
+
+            /* In git_only mode, skip dirs that aren't in a git repo and aren't git repos */
+            int child_in_git_repo = in_git_repo || is_git_repo_root[i];
+            if (cfg->git_only && !child_in_git_repo) {
+                /* Skip - this directory can't have any git status */
+                continue;
+            }
+
+            build_tree_children(child, depth + 1, cols, git, cfg, icons, child_in_git_repo);
 
             /* Sum children's sizes instead of using get_dir_size result (only if showing all) */
             if (cfg->long_format && cfg->show_hidden && child->child_count > 0) {
@@ -1813,6 +1834,7 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
         }
     }
 
+    free(is_git_repo_root);
     /* Don't call file_list_free - we transferred ownership of entries */
     free(list.entries);
 }
@@ -1876,7 +1898,8 @@ static TreeNode *build_tree(const char *path, Column *cols,
 
     /* Detect enclosing git repo and populate status */
     char git_root[PATH_MAX];
-    if (find_git_root(abs_path, git_root, sizeof(git_root))) {
+    int in_git_repo = find_git_root(abs_path, git_root, sizeof(git_root));
+    if (in_git_repo) {
         git_populate_repo(git, git_root);
     }
 
@@ -1923,7 +1946,7 @@ static TreeNode *build_tree(const char *path, Column *cols,
 
     /* Build children if directory (including symlinks to directories) */
     if (type == FTYPE_DIR || type == FTYPE_SYMLINK_DIR) {
-        build_tree_children(root, 0, cols, git, cfg, icons);
+        build_tree_children(root, 0, cols, git, cfg, icons, in_git_repo);
 
         /* Sum children's sizes/counts to get root's total (only if showing all) */
         if (cfg->long_format && cfg->show_hidden) {
@@ -1957,44 +1980,143 @@ static TreeNode *build_tree(const char *path, Column *cols,
  * Tree Printing (no I/O, just walks the built tree)
  * ============================================================================ */
 
+/* Check if entry has a meaningful git status (modified, untracked, staged, etc.) */
+static int entry_has_git_status(const FileEntry *fe) {
+    if (fe->git_status[0] == '\0') return 0;
+    if (strcmp(fe->git_status, "!!") == 0) return 0;  /* Ignored */
+    return 1;
+}
+
+/* Compute has_git_status flag for entire tree (call once after building) */
+static int compute_git_status_flags(TreeNode *node) {
+    int result = entry_has_git_status(&node->entry);
+    for (size_t i = 0; i < node->child_count; i++) {
+        if (compute_git_status_flags(&node->children[i])) {
+            result = 1;
+        }
+    }
+    node->has_git_status = result;
+    return result;
+}
+
 static void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx);
 
 static void print_tree_children(const TreeNode *parent, int depth, PrintContext *ctx) {
-    for (size_t i = 0; i < parent->child_count; i++) {
+    /* In git_only mode, filter to only show nodes with git status */
+    size_t visible_count = 0;
+    size_t *visible_indices = NULL;
+
+    if (ctx->cfg->git_only) {
+        visible_indices = xmalloc(parent->child_count * sizeof(size_t));
+        for (size_t i = 0; i < parent->child_count; i++) {
+            if (parent->children[i].has_git_status) {
+                visible_indices[visible_count++] = i;
+            }
+        }
+    } else {
+        visible_count = parent->child_count;
+    }
+
+    for (size_t vi = 0; vi < visible_count; vi++) {
+        size_t i = ctx->cfg->git_only ? visible_indices[vi] : vi;
         const TreeNode *child = &parent->children[i];
-        int is_last = (i == parent->child_count - 1);
+        int is_last = (vi == visible_count - 1);
 
         ctx->continuation[depth] = !is_last;
 
-        print_entry(&child->entry, depth + 1, child->child_count > 0, ctx);
+        /* Count visible children for has_visible_children flag */
+        int has_visible_children = 0;
+        if (child->child_count > 0) {
+            if (ctx->cfg->git_only) {
+                for (size_t j = 0; j < child->child_count; j++) {
+                    if (child->children[j].has_git_status) {
+                        has_visible_children = 1;
+                        break;
+                    }
+                }
+            } else {
+                has_visible_children = 1;
+            }
+        }
+
+        print_entry(&child->entry, depth + 1, has_visible_children, ctx);
 
         /* Recurse into directories that have children */
         if (child->child_count > 0) {
             print_tree_children(child, depth + 1, ctx);
         }
     }
+
+    free(visible_indices);
 }
 
 static void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx) {
     /* In list mode, skip printing root directory - just show contents */
     if (ctx->cfg->list_mode && node->entry.type == FTYPE_DIR) {
+        /* Build visible indices for git_only mode */
+        size_t visible_count = 0;
+        size_t *visible_indices = NULL;
+
+        if (ctx->cfg->git_only) {
+            visible_indices = xmalloc(node->child_count * sizeof(size_t));
+            for (size_t i = 0; i < node->child_count; i++) {
+                if (node->children[i].has_git_status) {
+                    visible_indices[visible_count++] = i;
+                }
+            }
+        } else {
+            visible_count = node->child_count;
+        }
+
         /* Adjust depth for list mode */
-        for (size_t i = 0; i < node->child_count; i++) {
+        for (size_t vi = 0; vi < visible_count; vi++) {
+            size_t i = ctx->cfg->git_only ? visible_indices[vi] : vi;
             const TreeNode *child = &node->children[i];
-            int is_last = (i == node->child_count - 1);
+            int is_last = (vi == visible_count - 1);
             ctx->continuation[depth - 1] = !is_last;
 
-            print_entry(&child->entry, depth, child->child_count > 0, ctx);
+            /* Count visible children */
+            int has_visible_children = 0;
+            if (child->child_count > 0) {
+                if (ctx->cfg->git_only) {
+                    for (size_t j = 0; j < child->child_count; j++) {
+                        if (child->children[j].has_git_status) {
+                            has_visible_children = 1;
+                            break;
+                        }
+                    }
+                } else {
+                    has_visible_children = 1;
+                }
+            }
+
+            print_entry(&child->entry, depth, has_visible_children, ctx);
 
             if (child->child_count > 0) {
                 print_tree_children(child, depth, ctx);
             }
         }
+        free(visible_indices);
         return;
     }
 
+    /* Check if root has visible children */
+    int has_visible_children = 0;
+    if (node->child_count > 0) {
+        if (ctx->cfg->git_only) {
+            for (size_t i = 0; i < node->child_count; i++) {
+                if (node->children[i].has_git_status) {
+                    has_visible_children = 1;
+                    break;
+                }
+            }
+        } else {
+            has_visible_children = 1;
+        }
+    }
+
     /* Print root entry */
-    print_entry(&node->entry, depth, node->child_count > 0, ctx);
+    print_entry(&node->entry, depth, has_visible_children, ctx);
 
     /* Print children */
     if (node->child_count > 0) {
@@ -2019,6 +2141,7 @@ static void print_usage(void) {
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
     printf("  --list          Flat list output (no tree structure)\n");
     printf("  --no-icons      Hide file/folder/git icons\n");
+    printf("  -g              Show only git-modified/untracked files (implies -at)\n");
     printf("\n");
     printf("Sorting:\n");
     printf("  -S              Sort by size (largest first)\n");
@@ -2036,6 +2159,7 @@ static int apply_short_flag(char flag, Config *cfg) {
         case 's': cfg->long_format = 0; cfg->long_format_explicit = 1; return 1;
         case 'l': cfg->long_format = 1; cfg->long_format_explicit = 1; return 1;
         case 't': cfg->max_depth = MAX_DEPTH; return 1;
+        case 'g': cfg->git_only = 1; cfg->show_hidden = 1; cfg->max_depth = MAX_DEPTH; return 1;
         case 'S': cfg->sort_by = SORT_SIZE; return 1;
         case 'T': cfg->sort_by = SORT_TIME; return 1;
         case 'N': cfg->sort_by = SORT_NAME; return 1;
@@ -2143,6 +2267,7 @@ int main(int argc, char **argv) {
         .list_mode = 0,
         .no_icons = 0,
         .sort_reverse = 0,
+        .git_only = 0,
         .is_tty = isatty(STDOUT_FILENO),
         .sort_by = SORT_NONE,
         .cwd = "",
@@ -2218,6 +2343,13 @@ int main(int argc, char **argv) {
     for (int i = 0; i < dir_count; i++) {
         git_cache_init(&gits[i]);
         trees[i] = build_tree(dirs[i], cfg.long_format ? cols : NULL, &gits[i], &cfg, &icons);
+    }
+
+    /* Pre-compute git status flags for filtering (O(n) instead of O(n²)) */
+    if (cfg.git_only) {
+        for (int i = 0; i < dir_count; i++) {
+            compute_git_status_flags(trees[i]);
+        }
     }
 
     /* Print all trees (using consistent column widths) */
