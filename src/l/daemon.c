@@ -423,22 +423,60 @@ static void action_exit(const char *binary_path) {
  * Main Entry Point
  * ============================================================================ */
 
+static int find_in_path(const char *name, char *result) {
+    const char *path_env = getenv("PATH");
+    if (!path_env) return 0;
+
+    char *path_copy = strdup(path_env);
+    if (!path_copy) return 0;
+
+    char *dir = strtok(path_copy, ":");
+    while (dir) {
+        char candidate[PATH_MAX];
+        snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
+        if (access(candidate, X_OK) == 0) {
+            if (realpath(candidate, result)) {
+                free(path_copy);
+                return 1;
+            }
+        }
+        dir = strtok(NULL, ":");
+    }
+    free(path_copy);
+    return 0;
+}
+
 void daemon_run(const char *binary_path) {
-    /* Resolve symlinks to find actual binary location */
+    /* Resolve to find actual binary location */
     char resolved_path[PATH_MAX];
-    if (!realpath(binary_path, resolved_path)) {
-        strncpy(resolved_path, binary_path, PATH_MAX - 1);
-        resolved_path[PATH_MAX - 1] = '\0';
+    int found = 0;
+
+    /* If path contains /, try realpath directly */
+    if (strchr(binary_path, '/')) {
+        if (realpath(binary_path, resolved_path)) {
+            found = 1;
+        }
+    }
+
+    /* Otherwise search PATH */
+    if (!found) {
+        found = find_in_path(binary_path, resolved_path);
     }
 
     /* Find l-cached next to resolved binary */
     char daemon_path[PATH_MAX];
-    char *slash = strrchr(resolved_path, '/');
-    if (slash) {
-        size_t dir_len = slash - resolved_path;
-        snprintf(daemon_path, sizeof(daemon_path), "%.*s/l-cached",
-                 (int)dir_len, resolved_path);
-    } else {
+    if (found) {
+        char *slash = strrchr(resolved_path, '/');
+        if (slash) {
+            size_t dir_len = slash - resolved_path;
+            snprintf(daemon_path, sizeof(daemon_path), "%.*s/l-cached",
+                     (int)dir_len, resolved_path);
+        } else {
+            found = 0;
+        }
+    }
+
+    if (!found) {
         snprintf(daemon_path, sizeof(daemon_path), "./l-cached");
     }
 
