@@ -1095,6 +1095,13 @@ void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx) {
             visible_count = node->child_count;
         }
 
+        /* If no children to show, print the directory itself */
+        if (visible_count == 0) {
+            print_entry(&node->entry, depth, 0, ctx);
+            free(visible_indices);
+            return;
+        }
+
         for (size_t vi = 0; vi < visible_count; vi++) {
             size_t i = ctx->cfg->git_only ? visible_indices[vi] : vi;
             const TreeNode *child = &node->children[i];
