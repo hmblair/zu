@@ -200,6 +200,7 @@ void tree_node_free(TreeNode *node);
 TreeNode *build_tree(const char *path, Column *cols, GitCache *git,
                      const Config *cfg, const Icons *icons);
 int compute_git_status_flags(TreeNode *node);
+void columns_recalculate_visible(Column *cols, TreeNode **trees, int tree_count, const Icons *icons);
 void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx);
 
 /* ============================================================================

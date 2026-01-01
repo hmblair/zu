@@ -180,6 +180,28 @@ void columns_update_widths(Column *cols, const FileEntry *fe, const Icons *icons
     }
 }
 
+static void columns_reset_widths(Column *cols) {
+    for (int i = 0; i < NUM_COLUMNS; i++) {
+        cols[i].width = 1;
+    }
+}
+
+static void columns_update_visible_recursive(Column *cols, const TreeNode *node, const Icons *icons) {
+    if (node->has_git_status) {
+        columns_update_widths(cols, &node->entry, icons);
+    }
+    for (size_t i = 0; i < node->child_count; i++) {
+        columns_update_visible_recursive(cols, &node->children[i], icons);
+    }
+}
+
+void columns_recalculate_visible(Column *cols, TreeNode **trees, int tree_count, const Icons *icons) {
+    columns_reset_widths(cols);
+    for (int i = 0; i < tree_count; i++) {
+        columns_update_visible_recursive(cols, trees[i], icons);
+    }
+}
+
 const char *get_count_icon(const FileEntry *fe, const Icons *icons) {
     if (fe->file_count >= 0) {
         return icons->count_files;

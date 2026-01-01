@@ -228,6 +228,10 @@ int main(int argc, char **argv) {
         for (int i = 0; i < dir_count; i++) {
             compute_git_status_flags(trees[i]);
         }
+        /* Recalculate column widths for visible entries only */
+        if (cfg.long_format) {
+            columns_recalculate_visible(cols, trees, dir_count, &icons);
+        }
     }
 
     /* Print all trees (using consistent column widths) */
