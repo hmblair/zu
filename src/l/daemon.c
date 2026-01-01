@@ -25,10 +25,9 @@ static void term_disable_raw(void) {
 }
 
 static void sigint_handler(int sig) {
-    (void)sig;
     term_disable_raw();
     printf("\n");
-    _exit(0);
+    _exit(128 + sig);
 }
 
 static void term_enable_raw(void) {
