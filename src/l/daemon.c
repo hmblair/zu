@@ -5,6 +5,7 @@
 #include "daemon.h"
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <signal.h>
 #include <sqlite3.h>
 
 /* ============================================================================
@@ -18,8 +19,16 @@ static void term_disable_raw(void) {
     if (raw_mode_enabled) {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
         printf("\033[?25h");  /* Show cursor */
+        fflush(stdout);
         raw_mode_enabled = 0;
     }
+}
+
+static void sigint_handler(int sig) {
+    (void)sig;
+    term_disable_raw();
+    printf("\n");
+    _exit(0);
 }
 
 static void term_enable_raw(void) {
@@ -27,6 +36,13 @@ static void term_enable_raw(void) {
 
     tcgetattr(STDIN_FILENO, &orig_termios);
     atexit(term_disable_raw);
+
+    /* Handle SIGINT to restore terminal */
+    struct sigaction sa;
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
 
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ECHO | ICANON);
