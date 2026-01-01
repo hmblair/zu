@@ -7,12 +7,11 @@ LIBS = -lsqlite3 -lpthread
 # OpenMP support (use homebrew clang on macOS)
 UNAME := $(shell uname)
 ifeq ($(UNAME),Darwin)
-  # Check for homebrew llvm
+  # Check for homebrew llvm (Apple clang doesn't support OpenMP)
   BREW_LLVM := $(shell brew --prefix llvm 2>/dev/null)
   ifneq ($(BREW_LLVM),)
     CC = $(BREW_LLVM)/bin/clang
     CFLAGS += -fopenmp
-    LIBS += -L$(BREW_LLVM)/lib -lomp
   endif
 else
   CFLAGS += -fopenmp
