@@ -80,6 +80,7 @@ typedef struct Icons {
     char git_untracked[L_MAX_ICON_LEN];
     char git_staged[L_MAX_ICON_LEN];
     char git_deleted[L_MAX_ICON_LEN];
+    char git_upstream[L_MAX_ICON_LEN];
     char readonly[L_MAX_ICON_LEN];
     char count_files[L_MAX_ICON_LEN];
     char count_lines[L_MAX_ICON_LEN];
