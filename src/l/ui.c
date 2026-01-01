@@ -1099,7 +1099,7 @@ void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx) {
             size_t i = ctx->cfg->git_only ? visible_indices[vi] : vi;
             const TreeNode *child = &node->children[i];
             int is_last = (vi == visible_count - 1);
-            ctx->continuation[depth - 1] = !is_last;
+            if (depth > 0) ctx->continuation[depth - 1] = !is_last;
 
             int has_visible_children = 0;
             if (child->child_count > 0) {
