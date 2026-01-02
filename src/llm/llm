@@ -280,9 +280,9 @@ except:
 # Wait for model to be ready (handles 503 during model load)
 wait_for_model() {
     while true; do
-        local status=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$SERVER_PORT/v1/models")
-        [[ "$status" == "200" ]] && return 0
-        [[ "$status" == "503" ]] && { echo "${GREY}Model loading...${NC}"; sleep 2; continue; }
+        local http_code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$SERVER_PORT/v1/models")
+        [[ "$http_code" == "200" ]] && return 0
+        [[ "$http_code" == "503" ]] && { echo "${GREY}Model loading...${NC}"; sleep 2; continue; }
         return 1  # Other error
     done
 }
