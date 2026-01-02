@@ -165,11 +165,22 @@ cmd_serve() {
     fi
 
     info "Starting llama server (context: $CONTEXT_SIZE)..."
-    llama-server \
-        --hf-repo "$MODEL" \
-        --ctx-size "$CONTEXT_SIZE" \
-        --port "$SERVER_PORT" \
-        >/dev/null 2>&1 &
+
+    local -a SERVER_ARGS=(
+        --hf-repo "$MODEL"
+        --ctx-size "$CONTEXT_SIZE"
+        --port "$SERVER_PORT"
+    )
+
+    if [[ -n "$CHAT_TEMPLATE" ]]; then
+        if [[ -f "$CHAT_TEMPLATE" ]]; then
+            SERVER_ARGS+=(--jinja --chat-template-file "$CHAT_TEMPLATE")
+        else
+            SERVER_ARGS+=(--chat-template "$CHAT_TEMPLATE")
+        fi
+    fi
+
+    llama-server "${SERVER_ARGS[@]}" >/dev/null 2>&1 &
 
     local pid=$!
     disown  # Detach from shell so it survives script exit
