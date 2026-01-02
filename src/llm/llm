@@ -154,7 +154,7 @@ cmd_serve() {
         >/dev/null 2>&1 &
 
     local pid=$!
-    disown $pid  # Detach from shell so it survives script exit
+    disown  # Detach from shell so it survives script exit
     echo "$pid" > "$PID_FILE"
 
     # Wait for server to be ready
