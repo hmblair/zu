@@ -2,31 +2,31 @@
 
 _llm() {
     local curcontext="$curcontext" state line
-    local -a args
 
-    args=(
-        '(-p --prompt)'{-p,--prompt}'[Prompt to prepend to file]:prompt:'
-        '(-m --model)'{-m,--model}'[HuggingFace model]:model:'
-        '(-s --system)'{-s,--system}'[Use named system prompt]:prompt:'
-        '(-r --raw)'{-r,--raw}'[Disable markdown formatting]'
-        '(-v --verbose)'{-v,--verbose}'[Show llama-cli output]'
-        '(-h --help)'{-h,--help}'[Show help]'
-        '1:command:->cmd'
+    _arguments -C \
+        '(-p --prompt)'{-p,--prompt}'[Prompt to prepend to file]:prompt:' \
+        '(-m --model)'{-m,--model}'[HuggingFace model]:model:' \
+        '(-t --temp)'{-t,--temp}'[Temperature]:temperature:' \
+        '(-T --template)'{-T,--template}'[Chat template]:template:' \
+        '(-s --system)'{-s,--system}'[Use named system prompt]:prompt:' \
+        '(-r --raw)'{-r,--raw}'[Disable markdown formatting]' \
+        '(-v --verbose)'{-v,--verbose}'[Show llama-cli output]' \
+        '(-h --help)'{-h,--help}'[Show help]' \
+        '1:command or file:->first' \
         '*:file:_files'
-    )
-
-    _arguments -C $args
 
     case $state in
-        cmd)
+        first)
             local -a commands
             commands=(
-                'config:Configure prompts and models'
+                'config:Configure prompts, models, and settings'
                 'serve:Start server'
                 'stop:Stop server'
                 'status:Show server and prompt status'
             )
-            _describe -t commands 'command' commands
+            _alternative \
+                'commands:command:((${(q)commands[@]}))' \
+                'files:file:_files'
             ;;
     esac
 
