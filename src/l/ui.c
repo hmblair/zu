@@ -724,7 +724,8 @@ const char *get_git_indicator(GitCache *cache, const char *path,
             p = append_git_icon(p, &remaining, icons->git_deleted, CLR(cfg, COLOR_RED), cfg);
         }
         if (status[0] != ' ' && status[0] != '?' && status[0] != '!') {
-            append_git_icon(p, &remaining, icons->git_staged, CLR(cfg, COLOR_YELLOW), cfg);
+            const char *staged_icon = (status[0] == 'D') ? icons->git_deleted : icons->git_staged;
+            append_git_icon(p, &remaining, staged_icon, CLR(cfg, COLOR_YELLOW), cfg);
         }
     }
 
