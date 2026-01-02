@@ -440,6 +440,7 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import readline  # Enable line editing (Ctrl-A, Ctrl-K, etc.)
 
 SERVER_URL = 'http://localhost:$SERVER_PORT/v1/chat/completions'
 system_prompt = '''$system_prompt'''
