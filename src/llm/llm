@@ -1013,8 +1013,9 @@ run_llm() {
     SYSTEM_PROMPT=$(get_system_prompt)
 
     local user_prompt=""
+    local input_file=""
 
-    # Parse arguments
+    # Parse arguments (options can appear anywhere)
     while [[ $# -gt 0 ]]; do
         case $1 in
             -m|--model)
@@ -1056,14 +1057,15 @@ run_llm() {
                 error "Unknown option: $1"
                 ;;
             *)
-                break
+                input_file="$1"
+                shift
                 ;;
         esac
     done
 
     # Get prompt from file, stdin, or conversation mode
-    if [[ $# -gt 0 ]]; then
-        local file="$1"
+    if [[ -n "$input_file" ]]; then
+        local file="$input_file"
         if [[ ! -f "$file" ]]; then
             error "File not found: $file"
         fi
