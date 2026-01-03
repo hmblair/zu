@@ -23,6 +23,22 @@ static void cleanup_libgit2(void) {
  * Argument Parsing
  * ============================================================================ */
 
+static int parse_depth(const char *str, const char *opt_name) {
+    char *endptr;
+    long val = strtol(str, &endptr, 10);
+    char msg[128];
+    if (*endptr != '\0' || endptr == str) {
+        snprintf(msg, sizeof(msg), "%s requires an integer", opt_name);
+        die(msg);
+    }
+    if (val < 0) {
+        snprintf(msg, sizeof(msg), "%s requires a non-negative integer", opt_name);
+        die(msg);
+    }
+    if (val > INT_MAX) val = INT_MAX;
+    return (int)val;
+}
+
 static void print_usage(void) {
     printf("Usage: l [OPTIONS] [FILE ...]\n");
     printf("\n");
@@ -92,14 +108,11 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 cfg->show_ancestry = 1;
             } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--depth") == 0) {
                 if (i + 1 >= argc) die("-d/--depth requires an argument");
-                cfg->max_depth = atoi(argv[++i]);
-                if (cfg->max_depth < 0) die("-d/--depth requires a non-negative integer");
-            } else if (strncmp(arg, "-d", 2) == 0 && arg[2] >= '0' && arg[2] <= '9') {
-                cfg->max_depth = atoi(arg + 2);
-                if (cfg->max_depth < 0) die("-d requires a non-negative integer");
+                cfg->max_depth = parse_depth(argv[++i], "-d/--depth");
+            } else if (strncmp(arg, "-d", 2) == 0 && arg[2] != '\0') {
+                cfg->max_depth = parse_depth(arg + 2, "-d");
             } else if (strncmp(arg, "--depth=", 8) == 0) {
-                cfg->max_depth = atoi(arg + 8);
-                if (cfg->max_depth < 0) die("--depth requires a non-negative integer");
+                cfg->max_depth = parse_depth(arg + 8, "--depth");
             } else if (strcmp(arg, "--expand-all") == 0) {
                 cfg->expand_all = 1;
             } else if (strcmp(arg, "--list") == 0) {
