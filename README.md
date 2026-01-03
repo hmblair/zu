@@ -28,7 +28,6 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | findrm | Recursively find and remove files/directories by pattern |
 | free | Disk space analyzer with caching daemon |
 | homeserver | Docker Compose service manager |
-| l | Enhanced directory listing with icons and tree view |
 | llm | Local LLM wrapper using llama-cli |
 | mediasort | Audiobook organizer into Author/Book structure |
 | monitor | Remote server resource monitor via SSH |

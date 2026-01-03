@@ -13,14 +13,10 @@ SITE_FUNCTIONS="/usr/local/share/zsh/site-functions"
 
 mkdir -p "$BIN_DIR"
 
-# Clear existing symlinks (but preserve compiled binaries)
+# Clear existing symlinks
 for f in "$BIN_DIR"/*; do
     [[ -L "$f" ]] && rm -f "$f"
 done
-
-# Build C programs
-echo "Building C programs..."
-make -C "$SRC_DIR/l" BINDIR="$BIN_DIR" -s
 
 # Link dir/dir pattern scripts (e.g., src/bkup/bkup, src/blk/blk)
 for script in "$SRC_DIR"/*/*; do

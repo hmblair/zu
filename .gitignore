@@ -1,5 +1,2 @@
 bin/
 src/unread/
-src/l/*.o
-src/l/l
-src/l/l-cached
