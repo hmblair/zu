@@ -46,6 +46,7 @@ typedef struct {
     int no_icons;
     int sort_reverse;
     int git_only;
+    int show_ancestry;
     int is_tty;
     SortMode sort_by;
     char cwd[PATH_MAX];
@@ -199,6 +200,8 @@ int read_directory(const char *dir_path, FileList *list, const Config *cfg);
 void tree_node_free(TreeNode *node);
 TreeNode *build_tree(const char *path, Column *cols, GitCache *git,
                      const Config *cfg, const Icons *icons);
+TreeNode *build_ancestry_tree(const char *path, Column *cols, GitCache *git,
+                              const Config *cfg, const Icons *icons);
 int compute_git_status_flags(TreeNode *node);
 void columns_recalculate_visible(Column *cols, TreeNode **trees, int tree_count, const Icons *icons);
 void print_tree_node(const TreeNode *node, int depth, PrintContext *ctx);

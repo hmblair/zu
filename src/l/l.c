@@ -33,6 +33,7 @@ static void print_usage(void) {
     printf("                  Auto-enabled on network filesystems\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", L_MAX_DEPTH);
     printf("  -d, --depth INT Limit tree depth\n");
+    printf("  -P, --path      Show ancestry from ~ (or /) to target\n");
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
     printf("  --list          Flat list output (no tree structure)\n");
     printf("  --no-icons      Hide file/folder/git icons\n");
@@ -54,6 +55,7 @@ static int apply_short_flag(char flag, Config *cfg) {
         case 's': cfg->long_format = 0; cfg->long_format_explicit = 1; return 1;
         case 'l': cfg->long_format = 1; cfg->long_format_explicit = 1; return 1;
         case 't': cfg->max_depth = L_MAX_DEPTH; return 1;
+        case 'P': cfg->show_ancestry = 1; return 1;
         case 'g': cfg->git_only = 1; cfg->show_hidden = 1; cfg->max_depth = L_MAX_DEPTH; return 1;
         case 'S': cfg->sort_by = SORT_SIZE; return 1;
         case 'T': cfg->sort_by = SORT_TIME; return 1;
@@ -86,6 +88,8 @@ static void parse_args(int argc, char **argv, Config *cfg,
                 cfg->long_format_explicit = 1;
             } else if (strcmp(arg, "--tree") == 0) {
                 cfg->max_depth = L_MAX_DEPTH;
+            } else if (strcmp(arg, "--path") == 0) {
+                cfg->show_ancestry = 1;
             } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--depth") == 0) {
                 if (i + 1 >= argc) die("-d/--depth requires an argument");
                 cfg->max_depth = atoi(argv[++i]);
@@ -157,6 +161,7 @@ int main(int argc, char **argv) {
         .no_icons = 0,
         .sort_reverse = 0,
         .git_only = 0,
+        .show_ancestry = 0,
         .is_tty = isatty(STDOUT_FILENO),
         .sort_by = SORT_NONE,
         .cwd = "",
@@ -230,7 +235,11 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < dir_count; i++) {
         git_cache_init(&gits[i]);
-        trees[i] = build_tree(dirs[i], cfg.long_format ? cols : NULL, &gits[i], &cfg, &icons);
+        if (cfg.show_ancestry) {
+            trees[i] = build_ancestry_tree(dirs[i], cfg.long_format ? cols : NULL, &gits[i], &cfg, &icons);
+        } else {
+            trees[i] = build_tree(dirs[i], cfg.long_format ? cols : NULL, &gits[i], &cfg, &icons);
+        }
     }
 
     /* Pre-compute git status flags for filtering */

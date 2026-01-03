@@ -928,6 +928,153 @@ TreeNode *build_tree(const char *path, Column *cols,
     return root;
 }
 
+/* Build a single ancestor node (directory only, no children yet) */
+static TreeNode *build_ancestor_node(const char *path, Column *cols,
+                                      const Config *cfg, const Icons *icons) {
+    struct stat st;
+    char *symlink_target = NULL;
+    FileType type = detect_file_type(path, &st, &symlink_target);
+
+    TreeNode *node = xmalloc(sizeof(TreeNode));
+    memset(node, 0, sizeof(TreeNode));
+
+    node->entry.path = xstrdup(path);
+    node->entry.name = strrchr(node->entry.path, '/');
+    node->entry.name = node->entry.name ? node->entry.name + 1 : node->entry.path;
+
+    /* Special case for root */
+    if (node->entry.path[0] == '/' && node->entry.path[1] == '\0') {
+        node->entry.name = "/";
+    }
+
+    node->entry.type = type;
+    node->entry.symlink_target = symlink_target;
+    node->entry.mode = st.st_mode;
+    node->entry.mtime = GET_MTIME(st);
+    node->entry.size = st.st_size;
+    node->entry.line_count = -1;
+    node->entry.file_count = -1;
+
+    /* Compute size/file count for long format */
+    if (cfg->long_format && (type == FTYPE_DIR || type == FTYPE_SYMLINK_DIR)) {
+        DirStats stats = get_dir_stats_cached(path);
+        node->entry.size = stats.size;
+        node->entry.file_count = stats.file_count;
+    }
+
+    if (cfg->long_format && cols) {
+        columns_update_widths(cols, &node->entry, icons);
+    }
+
+    return node;
+}
+
+TreeNode *build_ancestry_tree(const char *path, Column *cols, GitCache *git,
+                               const Config *cfg, const Icons *icons) {
+    char abs_path[PATH_MAX];
+
+    /* For ancestry, preserve symlinks in path by using $PWD for relative paths */
+    if (path[0] == '/') {
+        /* Absolute path - use as given, just normalize . and .. */
+        path_get_abspath(path, abs_path, "/");
+    } else {
+        /* Relative path - try $PWD first (preserves symlinks), fall back to cwd */
+        const char *pwd = getenv("PWD");
+        if (pwd && pwd[0] == '/') {
+            path_get_abspath(path, abs_path, pwd);
+        } else {
+            get_abspath(path, abs_path, cfg);
+        }
+    }
+
+    /* Determine base path: home if path is under home, otherwise root */
+    const char *base = "/";
+    size_t base_len = 1;
+    int use_home = 0;
+
+    if (cfg->home[0] && strncmp(abs_path, cfg->home, strlen(cfg->home)) == 0) {
+        char after = abs_path[strlen(cfg->home)];
+        if (after == '\0' || after == '/') {
+            base = cfg->home;
+            base_len = strlen(cfg->home);
+            use_home = 1;
+        }
+    }
+
+    /* If path equals the base, just build a normal tree */
+    if (strcmp(abs_path, base) == 0) {
+        return build_tree(path, cols, git, cfg, icons);
+    }
+
+    /* Build list of path components from base to target */
+    char *components[PATH_MAX / 2];
+    int comp_count = 0;
+
+    /* Start after the base */
+    const char *p = abs_path + base_len;
+    if (*p == '/') p++;
+
+    char path_so_far[PATH_MAX];
+    strncpy(path_so_far, base, sizeof(path_so_far) - 1);
+    path_so_far[sizeof(path_so_far) - 1] = '\0';
+
+    while (*p) {
+        const char *slash = strchr(p, '/');
+        size_t comp_len = slash ? (size_t)(slash - p) : strlen(p);
+
+        if (comp_len > 0) {
+            /* Build the full path to this component */
+            size_t path_len = strlen(path_so_far);
+            if (path_so_far[path_len - 1] != '/') {
+                strncat(path_so_far, "/", sizeof(path_so_far) - path_len - 1);
+            }
+            strncat(path_so_far, p, comp_len);
+            path_so_far[sizeof(path_so_far) - 1] = '\0';
+
+            components[comp_count++] = xstrdup(path_so_far);
+        }
+
+        if (!slash) break;
+        p = slash + 1;
+    }
+
+    /* Build the root node (home or /) */
+    TreeNode *root;
+    if (use_home) {
+        root = build_ancestor_node(cfg->home, cols, cfg, icons);
+    } else {
+        root = build_ancestor_node("/", cols, cfg, icons);
+    }
+
+    /* Build the chain of ancestors */
+    TreeNode *current = root;
+    for (int i = 0; i < comp_count; i++) {
+        TreeNode *child;
+
+        if (i == comp_count - 1) {
+            /* This is the target - build it with full tree */
+            child = build_tree(components[i], cols, git, cfg, icons);
+            /* The child was allocated by build_tree, we need to use it as-is */
+        } else {
+            /* This is an ancestor - just a skeleton node */
+            child = build_ancestor_node(components[i], cols, cfg, icons);
+        }
+
+        /* Allocate the children array for current and add child */
+        current->children = xmalloc(sizeof(TreeNode));
+        current->child_count = 1;
+        current->children[0] = *child;
+
+        /* Free the temporary node structure (but not its contents) */
+        free(child);
+
+        current = &current->children[0];
+        free(components[i]);
+    }
+
+    return root;
+}
+
 /* ============================================================================
  * Git Status Flags
  * ============================================================================ */
