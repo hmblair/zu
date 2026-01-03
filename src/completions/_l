@@ -16,6 +16,7 @@ _l() {
         '(-s --short)'{-s,--short}'[Short format (no size, lines, time)]' \
         '(-t --tree)'{-t,--tree}'[Show full tree]' \
         '(-d --depth)'{-d,--depth}'[Limit tree depth]:depth:' \
+        '(-P --path)'{-P,--path}'[Show ancestry from ~ (or /) to target]' \
         '--expand-all[Expand all directories (ignore NO_EXPAND list)]' \
         '--list[Flat list output (no tree structure)]' \
         '--no-icons[Hide file/folder/git icons]' \
