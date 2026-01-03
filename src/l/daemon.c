@@ -429,6 +429,24 @@ static void action_clear(const char *binary_path) {
     printf("%sCleared %d entries%s\n", COLOR_GREEN, count, COLOR_RESET);
 }
 
+static void action_refresh(const char *binary_path) {
+    (void)binary_path;
+
+    if (!daemon_is_running()) {
+        printf("%sDaemon not running%s\n", COLOR_YELLOW, COLOR_RESET);
+        return;
+    }
+
+    /* Send SIGUSR1 to trigger immediate refresh */
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "pkill -USR1 -f l-cached 2>/dev/null");
+    if (system(cmd) == 0) {
+        printf("%sRefresh triggered%s\n", COLOR_GREEN, COLOR_RESET);
+    } else {
+        printf("%sFailed to signal daemon%s\n", COLOR_RED, COLOR_RESET);
+    }
+}
+
 static void action_exit(const char *binary_path) {
     (void)binary_path;
     /* No-op, handled by menu return */
@@ -505,10 +523,11 @@ void daemon_run(const char *binary_path) {
     print_status();
 
     /* Build menu based on current state */
-    MenuItem items[4];
+    MenuItem items[5];
     int count = 0;
 
     if (daemon_is_running()) {
+        items[count++] = (MenuItem){"Refresh now", action_refresh};
         items[count++] = (MenuItem){"Stop daemon", action_stop};
     } else {
         items[count++] = (MenuItem){"Start daemon", action_start};

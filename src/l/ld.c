@@ -16,6 +16,7 @@
 #define LOG_FILE "/tmp/l-cached.log"
 
 static volatile sig_atomic_t g_shutdown = 0;
+static volatile sig_atomic_t g_refresh = 0;
 static char g_roots[L_MAX_ROOTS][PATH_MAX];
 static int g_root_count = 0;
 
@@ -174,9 +175,14 @@ static ScanResult scan_dir(const char *path, dev_t root_dev, int root_idx) {
  * Signal Handling
  * ============================================================================ */
 
-static void handle_signal(int sig) {
+static void handle_shutdown(int sig) {
     (void)sig;
     g_shutdown = 1;
+}
+
+static void handle_refresh(int sig) {
+    (void)sig;
+    g_refresh = 1;
 }
 
 /* ============================================================================
@@ -224,8 +230,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_shutdown);
+    signal(SIGTERM, handle_shutdown);
+    signal(SIGUSR1, handle_refresh);
 
     log_info("starting (scan interval: %ds)", L_SCAN_INTERVAL);
 
@@ -250,8 +257,13 @@ int main(int argc, char *argv[]) {
         time_t elapsed = time(NULL) - start;
         log_info("scan complete (%lds, %d cached)", elapsed, cache_daemon_count());
 
-        for (int i = 0; i < L_SCAN_INTERVAL && !g_shutdown; i++)
+        for (int i = 0; i < L_SCAN_INTERVAL && !g_shutdown && !g_refresh; i++)
             sleep(1);
+
+        if (g_refresh) {
+            log_info("manual refresh requested");
+            g_refresh = 0;
+        }
     }
 
     cache_daemon_close();
