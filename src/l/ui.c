@@ -775,20 +775,28 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
     char **git_repos = NULL;
     size_t git_repo_count = 0;
     int *is_git_repo_root = xmalloc(list.count * sizeof(int));
+    int *is_submodule = xmalloc(list.count * sizeof(int));
 
     for (size_t i = 0; i < list.count; i++) {
         is_git_repo_root[i] = 0;
+        is_submodule[i] = 0;
         FileEntry *fe = &list.entries[i];
         if ((fe->type == FTYPE_DIR || fe->type == FTYPE_SYMLINK_DIR) &&
             strcmp(fe->name, ".git") != 0 &&
             path_is_git_root(fe->path)) {
-            git_repos = xrealloc(git_repos, (git_repo_count + 1) * sizeof(char *));
-            git_repos[git_repo_count++] = fe->path;
             is_git_repo_root[i] = 1;
+            if (in_git_repo) {
+                /* This is a submodule/nested repo - treat as ignored */
+                is_submodule[i] = 1;
+            } else {
+                /* Top-level repo - populate its git status */
+                git_repos = xrealloc(git_repos, (git_repo_count + 1) * sizeof(char *));
+                git_repos[git_repo_count++] = fe->path;
+            }
         }
     }
 
-    /* Populate git repos */
+    /* Populate git repos (excluding submodules) */
     #pragma omp parallel for schedule(dynamic)
     for (size_t i = 0; i < git_repo_count; i++) {
         git_populate_repo(git, git_repos[i]);
@@ -814,7 +822,8 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
             child->entry.git_status[sizeof(child->entry.git_status) - 1] = '\0';
         }
         child->entry.is_ignored = (git_status && strcmp(git_status, "!!") == 0) ||
-                                   strcmp(child->entry.name, ".git") == 0;
+                                   strcmp(child->entry.name, ".git") == 0 ||
+                                   is_submodule[i];
 
         if (cfg->long_format && cols) {
             columns_update_widths(cols, &child->entry, icons);
@@ -850,6 +859,7 @@ static void build_tree_children(TreeNode *parent, int depth, Column *cols,
     }
 
     free(is_git_repo_root);
+    free(is_submodule);
     free(list.entries);
 }
 
