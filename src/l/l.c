@@ -49,7 +49,7 @@ static void print_usage(void) {
     printf("                  Auto-enabled on network filesystems\n");
     printf("  -t, --tree      Show full tree (depth %d)\n", L_MAX_DEPTH);
     printf("  -d, --depth INT Limit tree depth\n");
-    printf("  -P, --path      Show ancestry from ~ (or /) to target\n");
+    printf("  -p, --path      Show ancestry from ~ (or /) to target\n");
     printf("  --expand-all    Expand all directories (ignore skip list)\n");
     printf("  --list          Flat list output (no tree structure)\n");
     printf("  --no-icons      Hide file/folder/git icons\n");
@@ -71,7 +71,7 @@ static int apply_short_flag(char flag, Config *cfg) {
         case 's': cfg->long_format = 0; cfg->long_format_explicit = 1; return 1;
         case 'l': cfg->long_format = 1; cfg->long_format_explicit = 1; return 1;
         case 't': cfg->max_depth = L_MAX_DEPTH; return 1;
-        case 'P': cfg->show_ancestry = 1; return 1;
+        case 'p': cfg->show_ancestry = 1; return 1;
         case 'g': cfg->git_only = 1; cfg->show_hidden = 1; cfg->max_depth = L_MAX_DEPTH; return 1;
         case 'S': cfg->sort_by = SORT_SIZE; return 1;
         case 'T': cfg->sort_by = SORT_TIME; return 1;
