@@ -1056,9 +1056,11 @@ run_detached() {
 
     # Use -u for unbuffered output so logs are written immediately
     # Use disown and sleep to ensure process is fully detached before SSH exits
+    # Wrap in subshell to capture exit code and signal info
     local env_prefix=""
-    [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
-    local pid=$(remote_exec "$target" "nohup ${env_prefix}$python -u $remote_script ${(q)args[@]} > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
+    [[ -n $gpus ]] && env_prefix="export CUDA_VISIBLE_DEVICES=$gpus; "
+    local wrapper="{ ${env_prefix}$python -u $remote_script ${(q)args[@]}; code=\$?; if [ \$code -gt 128 ]; then echo \"[rex] Killed by signal \$((code-128))\" >&2; elif [ \$code -ne 0 ]; then echo \"[rex] Exit code: \$code\" >&2; fi; }"
+    local pid=$(remote_exec "$target" "nohup bash -c '$wrapper' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
     success "Detached: $job (PID $pid)"
     echo "Status: rex ${target} --status $job"
