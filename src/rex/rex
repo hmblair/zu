@@ -467,13 +467,26 @@ cmd_gpus() {
     fi
 
     # Get process info (gpu_index,pid,memory,user) - use SSH directly to avoid escaping issues
-    local proc_info=$(ssh ${=$(ssh_opts)} "$target" 'nvidia-smi --query-compute-apps=gpu_index,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
-        gpu_idx=$(echo "$line" | cut -d, -f1 | tr -d " ")
-        pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
-        mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
-        user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
-        [ -n "$user" ] && echo "$gpu_idx,$pid,$mem,$user"
-    done')
+    # First get UUID to index mapping, then get processes by UUID
+    local proc_info=$(ssh ${=$(ssh_opts)} "$target" '
+        # Build UUID to index map
+        declare -A uuid_to_idx
+        while IFS=, read -r idx uuid; do
+            idx=$(echo "$idx" | tr -d " ")
+            uuid=$(echo "$uuid" | tr -d " ")
+            uuid_to_idx[$uuid]=$idx
+        done < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null)
+
+        # Get processes and map UUID to index
+        nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
+            uuid=$(echo "$line" | cut -d, -f1 | tr -d " ")
+            pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
+            mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
+            gpu_idx=${uuid_to_idx[$uuid]}
+            user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
+            [ -n "$user" ] && [ -n "$gpu_idx" ] && echo "$gpu_idx,$pid,$mem,$user"
+        done
+    ')
 
     if [[ $json == "true" ]]; then
         echo "["
