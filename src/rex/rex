@@ -454,25 +454,10 @@ cmd_gpus() {
     local target="$1"
     local json="$2"
 
-    # Get GPU info and process info in one SSH call
-    local output=$(remote_exec "$target" '
-        gpu_info=$(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
-        [ -z "$gpu_info" ] && exit 1
-        echo "GPU_INFO"
-        echo "$gpu_info"
-        echo "PROC_INFO"
-        # Get processes: gpu_index, pid, memory
-        nvidia-smi --query-compute-apps=gpu_index,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
-            gpu_idx=$(echo "$line" | cut -d, -f1 | tr -d " ")
-            pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
-            mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
-            # Get username for this PID
-            user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
-            [ -n "$user" ] && echo "$gpu_idx,$pid,$mem,$user"
-        done
-    ')
+    # Get GPU info
+    local gpu_info=$(remote_exec "$target" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null")
 
-    if [[ -z $output || $output != *"GPU_INFO"* ]]; then
+    if [[ -z $gpu_info ]]; then
         if [[ $json == "true" ]]; then
             echo "[]"
         else
@@ -481,9 +466,14 @@ cmd_gpus() {
         return
     fi
 
-    # Parse GPU info and process info
-    local gpu_info=$(echo "$output" | sed -n '/^GPU_INFO$/,/^PROC_INFO$/p' | grep -v '^GPU_INFO$\|^PROC_INFO$')
-    local proc_info=$(echo "$output" | sed -n '/^PROC_INFO$/,$p' | grep -v '^PROC_INFO$')
+    # Get process info (gpu_index,pid,memory,user) - use SSH directly to avoid escaping issues
+    local proc_info=$(ssh ${=$(ssh_opts)} "$target" 'nvidia-smi --query-compute-apps=gpu_index,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
+        gpu_idx=$(echo "$line" | cut -d, -f1 | tr -d " ")
+        pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
+        mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
+        user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
+        [ -n "$user" ] && echo "$gpu_idx,$pid,$mem,$user"
+    done')
 
     if [[ $json == "true" ]]; then
         echo "["
