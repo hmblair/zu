@@ -1017,9 +1017,10 @@ run_foreground() {
 
     [[ -n $file ]] && exec < "$file"
     # Use bash --norc to bypass slow/buggy shell rc files
+    # Use -u for unbuffered output
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
-    ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c '${env_prefix}$python - ${(q)args[@]}'"
+    ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c '${env_prefix}$python -u - ${(q)args[@]}'"
 }
 
 run_detached() {
@@ -1042,9 +1043,10 @@ run_detached() {
 
     scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
+    # Use -u for unbuffered output so logs are written immediately
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
-    local pid=$(remote_exec "$target" "nohup ${env_prefix}$python $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
+    local pid=$(remote_exec "$target" "nohup ${env_prefix}$python -u $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
 
     success "Detached: $job (PID $pid)"
     echo "Status: rex ${target} --status $job"
@@ -1106,7 +1108,7 @@ run_slurm_foreground() {
     # Activate venv and cd to run_dir if project config exists
     [[ -n $REX_CODE_DIR ]] && inner_cmd+="source ${REX_CODE_DIR}/.venv/bin/activate && "
     [[ -n $REX_RUN_DIR ]] && inner_cmd+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR} && "
-    inner_cmd+="$python - ${(q)args[@]}"
+    inner_cmd+="$python -u - ${(q)args[@]}"
 
     ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
 }
@@ -1159,7 +1161,7 @@ run_slurm_detached() {
     # Activate venv and cd to run_dir if project config exists
     [[ -n $REX_CODE_DIR ]] && sbatch_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
     [[ -n $REX_RUN_DIR ]] && sbatch_content+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR}"$'\n'
-    sbatch_content+="$python $remote_script ${(q)args[@]}"
+    sbatch_content+="$python -u $remote_script ${(q)args[@]}"
 
     # Write sbatch script to remote
     remote_exec "$target" "cat > $remote_sbatch" <<< "$sbatch_content"
