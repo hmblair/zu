@@ -454,9 +454,25 @@ cmd_gpus() {
     local target="$1"
     local json="$2"
 
-    local output=$(remote_exec "$target" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null")
+    # Get GPU info and process info in one SSH call
+    local output=$(remote_exec "$target" '
+        gpu_info=$(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
+        [ -z "$gpu_info" ] && exit 1
+        echo "GPU_INFO"
+        echo "$gpu_info"
+        echo "PROC_INFO"
+        # Get processes: gpu_index, pid, memory
+        nvidia-smi --query-compute-apps=gpu_index,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
+            gpu_idx=$(echo "$line" | cut -d, -f1 | tr -d " ")
+            pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
+            mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
+            # Get username for this PID
+            user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
+            [ -n "$user" ] && echo "$gpu_idx,$pid,$mem,$user"
+        done
+    ')
 
-    if [[ -z $output ]]; then
+    if [[ -z $output || $output != *"GPU_INFO"* ]]; then
         if [[ $json == "true" ]]; then
             echo "[]"
         else
@@ -464,6 +480,10 @@ cmd_gpus() {
         fi
         return
     fi
+
+    # Parse GPU info and process info
+    local gpu_info=$(echo "$output" | sed -n '/^GPU_INFO$/,/^PROC_INFO$/p' | grep -v '^GPU_INFO$\|^PROC_INFO$')
+    local proc_info=$(echo "$output" | sed -n '/^PROC_INFO$/,$p' | grep -v '^PROC_INFO$')
 
     if [[ $json == "true" ]]; then
         echo "["
@@ -475,9 +495,19 @@ cmd_gpus() {
 
             $first || echo ","
             first=false
-            printf '  {"index": %s, "name": "%s", "memory_used": %s, "memory_total": %s, "memory_percent": %s, "utilization": %s, "status": "%s"}' \
+            printf '  {"index": %s, "name": "%s", "memory_used": %s, "memory_total": %s, "memory_percent": %s, "utilization": %s, "status": "%s", "processes": [' \
                 "$idx" "$name" "$mem_used" "$mem_total" "$mem_pct" "$util" "$gpu_status"
-        done <<< "$output"
+
+            # Add processes for this GPU
+            local proc_first=true
+            echo "$proc_info" | while IFS=, read -r proc_gpu proc_pid proc_mem proc_user; do
+                [[ $proc_gpu == "$idx" ]] || continue
+                $proc_first || printf ','
+                proc_first=false
+                printf '{"user": "%s", "pid": %s, "memory": %s}' "$proc_user" "$proc_pid" "$proc_mem"
+            done
+            printf ']}'
+        done <<< "$gpu_info"
         echo $'\n]'
     else
         local idx name mem_used mem_total mem_pct util gpu_status status_colored
@@ -491,9 +521,15 @@ cmd_gpus() {
                 *) status_colored="${RED}busy${NC}" ;;
             esac
 
-            printf "GPU %s: %-20s %5dMB/%5dMB (%d%%)  util: %3d%%  %b\n" \
+            printf "GPU %s: %-20s %5dMB/%5dMB (%2d%%)  util: %3d%%  %b\n" \
                 "$idx" "$name" "$mem_used" "$mem_total" "$mem_pct" "$util" "$status_colored"
-        done <<< "$output"
+
+            # Show processes for this GPU
+            echo "$proc_info" | while IFS=, read -r proc_gpu proc_pid proc_mem proc_user; do
+                [[ $proc_gpu == "$idx" ]] || continue
+                printf "       └─ %-12s PID %-8s %5sMB\n" "$proc_user" "$proc_pid" "$proc_mem"
+            done
+        done <<< "$gpu_info"
     fi
 }
 
