@@ -1011,11 +1011,21 @@ run_foreground() {
     shift 4
     local args=("$@")
 
-    if [[ -z $file && -t 0 ]]; then
-        error "No input file and stdin is a terminal. Provide a file or pipe input."
+    if [[ -z $file ]]; then
+        if [[ -t 0 ]]; then
+            error "No input file and stdin is a terminal. Provide a file or pipe input."
+        fi
+        # Read stdin to temp file to verify it has content
+        local tmp=$(mktemp)
+        trap "rm -f '$tmp'" EXIT
+        cat > "$tmp"
+        if [[ ! -s $tmp ]]; then
+            error "No input file and stdin is empty. Provide a file or pipe input."
+        fi
+        file="$tmp"
     fi
 
-    [[ -n $file ]] && exec < "$file"
+    exec < "$file"
     # Use bash --norc to bypass slow/buggy shell rc files
     # Use -u for unbuffered output
     local env_prefix=""
@@ -1092,11 +1102,21 @@ run_slurm_foreground() {
 
     apply_project_defaults
 
-    if [[ -z $file && -t 0 ]]; then
-        error "No input file and stdin is a terminal. Provide a file or pipe input."
+    if [[ -z $file ]]; then
+        if [[ -t 0 ]]; then
+            error "No input file and stdin is a terminal. Provide a file or pipe input."
+        fi
+        # Read stdin to temp file to verify it has content
+        local tmp=$(mktemp)
+        trap "rm -f '$tmp'" EXIT
+        cat > "$tmp"
+        if [[ ! -s $tmp ]]; then
+            error "No input file and stdin is empty. Provide a file or pipe input."
+        fi
+        file="$tmp"
     fi
 
-    [[ -n $file ]] && exec < "$file"
+    exec < "$file"
 
     local slurm_opts=$(build_slurm_opts "$partition" "$gres" "$time_limit")
 
