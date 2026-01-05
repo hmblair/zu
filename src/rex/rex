@@ -324,19 +324,19 @@ cmd_jobs() {
     if [[ $json == "true" ]]; then
         echo "["
         local first=true
-        while IFS=$'\t' read -r job status pid desc; do
+        while IFS=$'\t' read -r job job_status pid desc; do
             [[ -z $job ]] && continue
             $first || echo ","
             first=false
             desc=$(json_escape "$desc")
-            printf '  {"job": "%s", "status": "%s"' "$job" "$status"
+            printf '  {"job": "%s", "status": "%s"' "$job" "$job_status"
             [[ -n $pid ]] && printf ', "pid": %s' "$pid"
             [[ -n $desc ]] && printf ', "description": "%s"' "$desc"
             printf '}'
         done <<< "$output"
         echo $'\n]'
     else
-        while IFS=$'\t' read -r job status pid desc; do
+        while IFS=$'\t' read -r job job_status pid desc; do
             [[ -z $job ]] && continue
             if [[ -n $pid ]]; then
                 printf "%-20s %-20s %s\n" "$job" "running (PID $pid)" "$desc"
