@@ -304,7 +304,7 @@ cmd_jobs() {
                 status="running"
             else
                 status="done"
-                pid=""
+                pid="-"
             fi
 
             # Get first line of script as description
@@ -330,7 +330,7 @@ cmd_jobs() {
             first=false
             desc=$(json_escape "$desc")
             printf '  {"job": "%s", "status": "%s"' "$job" "$job_status"
-            [[ -n $pid ]] && printf ', "pid": %s' "$pid"
+            [[ $pid != "-" ]] && printf ', "pid": %s' "$pid"
             [[ -n $desc ]] && printf ', "description": "%s"' "$desc"
             printf '}'
         done <<< "$output"
@@ -338,7 +338,7 @@ cmd_jobs() {
     else
         while IFS=$'\t' read -r job job_status pid desc; do
             [[ -z $job ]] && continue
-            if [[ -n $pid ]]; then
+            if [[ $pid != "-" ]]; then
                 printf "%-20s %-20s %s\n" "$job" "running (PID $pid)" "$desc"
             else
                 printf "%-20s %-20s %s\n" "$job" "done" "$desc"
