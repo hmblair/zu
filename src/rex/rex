@@ -23,9 +23,9 @@ REX_TMP_DIR="/tmp"
 REX_HOME_DIR="\$HOME/.rex"  # Escaped for remote expansion
 REX_HOME_DIR_LOCAL="~/.rex"  # For local shell expansion in globs
 
-# SSH options (timeout only - let user's ~/.ssh/config handle multiplexing)
+# SSH options
 ssh_opts() {
-    echo "-o ConnectTimeout=10"
+    echo "-o ConnectTimeout=10 -o ServerAliveInterval=60 -o ServerAliveCountMax=3"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -921,7 +921,8 @@ cmd_exec() {
         local remote_log="/tmp/rex-${job}.log"
 
         # Run detached with login shell for modules
-        local pid=$(remote_exec "$target" "nohup bash -l -c '${prefix}$cmd' > $remote_log 2>&1 & echo \$!")
+        # Use disown and sleep to ensure process is fully detached before SSH exits
+        local pid=$(remote_exec "$target" "nohup bash -l -c '${prefix}$cmd' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
         success "Detached: $job (PID $pid)"
         echo "Log:    rex ${target} --log $job"
@@ -1054,9 +1055,10 @@ run_detached() {
     scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
     # Use -u for unbuffered output so logs are written immediately
+    # Use disown and sleep to ensure process is fully detached before SSH exits
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
-    local pid=$(remote_exec "$target" "nohup ${env_prefix}$python -u $remote_script ${(q)args[@]} > $remote_log 2>&1 & echo \$!")
+    local pid=$(remote_exec "$target" "nohup ${env_prefix}$python -u $remote_script ${(q)args[@]} > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
     success "Detached: $job (PID $pid)"
     echo "Status: rex ${target} --status $job"
