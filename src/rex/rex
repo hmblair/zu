@@ -928,7 +928,10 @@ cmd_exec() {
         echo "Kill:   rex ${target} --kill $job"
     else
         # Run foreground with login shell for modules
-        ssh ${=$(ssh_opts)} -t "$target" "bash -l -c '${prefix}$cmd'"
+        # Only allocate PTY if stdin is a terminal
+        local tty_opt=""
+        [[ -t 0 ]] && tty_opt="-t"
+        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash -l -c '${prefix}$cmd'"
     fi
 }
 
@@ -990,7 +993,9 @@ cmd_slurm_exec() {
         [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
         [[ -n $gpus ]] && inner_cmd+="export CUDA_VISIBLE_DEVICES=$gpus && "
         inner_cmd+="$cmd"
-        ssh ${=$(ssh_opts)} -t "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
+        local tty_opt=""
+        [[ -t 0 ]] && tty_opt="-t"
+        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
     fi
 }
 
