@@ -231,8 +231,9 @@ Project sync:
   --wait           Wait for build to complete (use with --build)
 
 Shell execution:
-  --exec <cmd>     Execute arbitrary shell command on remote
-                   Use -d for detached mode
+  --exec <cmd>       Execute arbitrary shell command on remote
+                     Use -d for detached mode
+  --exec-login <cmd> Execute on login node (bypass SLURM even if -s set)
 
 SLURM options (use with -s/--slurm):
   --partition <p>  SLURM partition
@@ -1315,7 +1316,7 @@ main() {
             # Sync options
             --no-install) no_install=true; shift ;;
             # Commands - stop parsing flags
-            --jobs|--status|--log|--kill|--gpus|--sync|--build|--push|--pull|--watch|--exec|--last) break ;;
+            --jobs|--status|--log|--kill|--gpus|--sync|--build|--push|--pull|--watch|--exec|--exec-login|--last) break ;;
             # Unknown
             *) error "Unknown option: $1" ;;
         esac
@@ -1429,6 +1430,17 @@ main() {
             else
                 cmd_exec "$target" "$detach" "$job_name" "$gpus" "${mod_args[@]}" "$@"
             fi
+            return
+            ;;
+        --exec-login)
+            shift
+            # Always run on login node (bypass SLURM)
+            [[ ${#modules[@]} -eq 0 && ${#REX_MODULES[@]} -gt 0 ]] && modules=("${REX_MODULES[@]}")
+            local -a mod_args=()
+            for mod in "${modules[@]}"; do
+                mod_args+=(--module "$mod")
+            done
+            cmd_exec "$target" "$detach" "$job_name" "$gpus" "${mod_args[@]}" "$@"
             return
             ;;
     esac
