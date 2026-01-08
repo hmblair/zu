@@ -962,7 +962,10 @@ cmd_exec() {
 
         # Run detached with login shell for modules
         # Use disown and sleep to ensure process is fully detached before SSH exits
-        local pid=$(remote_exec "$target" "nohup bash -l -c '${prefix}$cmd' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
+        # Escape single quotes for bash -c '...' wrapper
+        local escaped_cmd="${prefix}$cmd"
+        escaped_cmd="${escaped_cmd//\'/\'\\\'\'}"
+        local pid=$(remote_exec "$target" "nohup bash -l -c '${escaped_cmd}' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
         success "Detached: $job (PID $pid)"
         echo "Log:    rex ${target} --log $job"
@@ -972,7 +975,10 @@ cmd_exec() {
         # Only allocate PTY if stdin is a terminal
         local tty_opt=""
         [[ -t 0 ]] && tty_opt="-t"
-        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash -l -c '${prefix}$cmd'"
+        # Escape single quotes for bash -c '...' wrapper
+        local escaped_cmd="${prefix}$cmd"
+        escaped_cmd="${escaped_cmd//\'/\'\\\'\'}"
+        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash -l -c '${escaped_cmd}'"
     fi
 }
 
@@ -1049,7 +1055,12 @@ cmd_slurm_exec() {
         inner_cmd+="$cmd"
         local tty_opt=""
         [[ -t 0 ]] && tty_opt="-t"
-        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
+        # Escape for double-quoted bash -c "..." context
+        local escaped_inner="${inner_cmd//\\/\\\\}"
+        escaped_inner="${escaped_inner//\"/\\\"}"
+        escaped_inner="${escaped_inner//\$/\\\$}"
+        escaped_inner="${escaped_inner//\`/\\\`}"
+        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$escaped_inner\"'"
     fi
 }
 
