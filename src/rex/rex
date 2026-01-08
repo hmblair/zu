@@ -1082,8 +1082,10 @@ cmd_slurm_exec() {
         [[ -n $REX_CODE_DIR ]] && script_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
         script_content+="$cmd"$'\n'
 
-        # Write script to remote, execute via srun, clean up
-        local remote_script="/tmp/rex-srun-$$.sh"
+        # Write script to shared filesystem (run_dir or ~/.rex), execute via srun, clean up
+        local script_dir="${REX_RUN_DIR:-\$HOME/.rex}"
+        remote_exec "$target" "mkdir -p $script_dir"
+        local remote_script="$script_dir/rex-exec-\$\$.sh"
         remote_exec "$target" "cat > $remote_script && chmod +x $remote_script" <<< "$script_content"
         ssh ${=$(ssh_opts)} $tty_opt "$target" "srun$slurm_opts $remote_script; _e=\$?; rm -f $remote_script; exit \$_e"
     fi
