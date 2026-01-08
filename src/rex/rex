@@ -384,13 +384,12 @@ cmd_status() {
     local ssh_exit=$?
 
     local status="done"
-    local exit_code=1
+    local exit_code=0
     if [[ $ssh_exit -ne 0 ]]; then
         status="unknown"
-        exit_code=2
+        exit_code=1
     elif [[ -n $pid ]]; then
         status="running"
-        exit_code=0
     fi
 
     if [[ $json == "true" ]]; then
@@ -866,7 +865,7 @@ cmd_watch() {
             if [[ $failures -ge $max_failures ]]; then
                 warn "Lost connection to $target after $max_failures attempts"
                 final_status="unknown"
-                exit_code=2
+                exit_code=1
                 break
             fi
             warn "Connection failed (attempt $failures/$max_failures), retrying..."
@@ -918,7 +917,7 @@ cmd_slurm_watch() {
             ((failures++))
             if [[ $failures -ge $max_failures ]]; then
                 warn "Lost connection to $target after $max_failures attempts"
-                exit_code=2
+                exit_code=1
                 break
             fi
             warn "Connection failed (attempt $failures/$max_failures), retrying..."
@@ -946,7 +945,7 @@ cmd_slurm_watch() {
     else
         if [[ $exit_code -eq 0 ]]; then
             success "Job $job completed: $final_status"
-        elif [[ $exit_code -eq 2 ]]; then
+        elif [[ $final_status == "unknown" ]]; then
             : # Already warned about connection loss
         else
             warn "Job $job finished: $final_status"
