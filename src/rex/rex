@@ -1095,7 +1095,9 @@ run_foreground() {
     # Use -u for unbuffered output
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
-    ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c '${env_prefix}$python -u - ${(q)args[@]}'"
+    local args_str=""
+    [[ ${#args[@]} -gt 0 ]] && args_str=" ${(q)args[@]}"
+    ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c '${env_prefix}$python -u -${args_str}'"
 }
 
 run_detached() {
@@ -1123,7 +1125,9 @@ run_detached() {
     # Wrap in subshell to capture exit code and signal info
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="export CUDA_VISIBLE_DEVICES=$gpus; "
-    local wrapper="{ ${env_prefix}$python -u $remote_script ${(q)args[@]}; code=\$?; if [ \$code -gt 128 ]; then echo \"[rex] Killed by signal \$((code-128))\" >&2; elif [ \$code -ne 0 ]; then echo \"[rex] Exit code: \$code\" >&2; fi; }"
+    local args_str=""
+    [[ ${#args[@]} -gt 0 ]] && args_str=" ${(q)args[@]}"
+    local wrapper="{ ${env_prefix}$python -u $remote_script${args_str}; code=\$?; if [ \$code -gt 128 ]; then echo \"[rex] Killed by signal \$((code-128))\" >&2; elif [ \$code -ne 0 ]; then echo \"[rex] Exit code: \$code\" >&2; fi; }"
     local pid=$(remote_exec "$target" "nohup bash -c '$wrapper' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
     success "Detached: $job (PID $pid)"
@@ -1196,7 +1200,9 @@ run_slurm_foreground() {
     # Activate venv and cd to run_dir if project config exists
     [[ -n $REX_CODE_DIR ]] && inner_cmd+="source ${REX_CODE_DIR}/.venv/bin/activate && "
     [[ -n $REX_RUN_DIR ]] && inner_cmd+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR} && "
-    inner_cmd+="$python -u - ${(q)args[@]}"
+    local args_str=""
+    [[ ${#args[@]} -gt 0 ]] && args_str=" ${(q)args[@]}"
+    inner_cmd+="$python -u -${args_str}"
 
     ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
 }
@@ -1254,7 +1260,9 @@ run_slurm_detached() {
     [[ -n $REX_CODE_DIR ]] && sbatch_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
     [[ -n $REX_RUN_DIR ]] && sbatch_content+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR}"$'\n'
     sbatch_content+=$'\n'
-    sbatch_content+="$python -u $remote_script ${(q)args[@]}"
+    local args_str=""
+    [[ ${#args[@]} -gt 0 ]] && args_str=" ${(q)args[@]}"
+    sbatch_content+="$python -u $remote_script${args_str}"
     sbatch_content+=$'\n'
     sbatch_content+='_rex_exit=$?'$'\n'
     sbatch_content+='echo "---"'$'\n'
