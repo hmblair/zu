@@ -53,6 +53,29 @@ remote_exec() {
     ssh ${=$(ssh_opts)} "$target" "bash --norc --noprofile -c \"$cmd\""
 }
 
+# Build properly quoted argument string from array
+# Returns string like " '--arg1' 'value'" suitable for shell command
+build_args_string() {
+    local result=""
+    for arg in "$@"; do result+=" ${(qq)arg}"; done
+    echo "$result"
+}
+
+# Escape a string for inclusion in single-quoted bash -c '...'
+escape_single_quote() {
+    echo "${1//\'/\'\\\'\'}"
+}
+
+# Escape a string for inclusion in double-quoted bash -c "..."
+escape_double_quote() {
+    local s="$1"
+    s="${s//\\/\\\\}"      # \ -> \\
+    s="${s//\$/\\\$}"      # $ -> \$
+    s="${s//\`/\\\`}"      # ` -> \`
+    s="${s//\"/\\\"}"      # " -> \"
+    echo "$s"
+}
+
 # Pattern for pgrep that won't match itself (character class trick)
 job_pattern() {
     echo "rex-${1}[.]py"
@@ -950,10 +973,11 @@ cmd_exec() {
 
     [[ -z $cmd ]] && error "Usage: rex <host> --exec <command>"
 
-    # Build command prefix (modules + env)
+    # Build command prefix (modules + env + venv)
     local prefix=""
     [[ ${#modules[@]} -gt 0 ]] && prefix="module load ${modules[*]} && "
     [[ -n $gpus ]] && prefix+="export CUDA_VISIBLE_DEVICES=$gpus && "
+    [[ -n $REX_CODE_DIR ]] && prefix+="source ${REX_CODE_DIR}/.venv/bin/activate && "
 
     if [[ $detach == "true" ]]; then
         local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
@@ -963,8 +987,7 @@ cmd_exec() {
         # Run detached with login shell for modules
         # Use disown and sleep to ensure process is fully detached before SSH exits
         # Escape single quotes for bash -c '...' wrapper
-        local escaped_cmd="${prefix}$cmd"
-        escaped_cmd="${escaped_cmd//\'/\'\\\'\'}"
+        local escaped_cmd=$(escape_single_quote "${prefix}$cmd")
         local pid=$(remote_exec "$target" "nohup bash -l -c '${escaped_cmd}' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
         success "Detached: $job (PID $pid)"
@@ -972,13 +995,13 @@ cmd_exec() {
         echo "Kill:   rex ${target} --kill $job"
     else
         # Run foreground with login shell for modules
-        # Only allocate PTY if stdin is a terminal
+        # Use file-based execution to avoid quoting issues
         local tty_opt=""
         [[ -t 0 ]] && tty_opt="-t"
-        # Escape single quotes for bash -c '...' wrapper
-        local escaped_cmd="${prefix}$cmd"
-        escaped_cmd="${escaped_cmd//\'/\'\\\'\'}"
-        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash -l -c '${escaped_cmd}'"
+        local script_content="#!/bin/bash -l
+${prefix}$cmd"
+        # Write script, execute, and clean up in one SSH session
+        ssh ${=$(ssh_opts)} $tty_opt "$target" 'script=/tmp/rex-cmd-$$.sh; cat > "$script" && chmod +x "$script" && "$script"; _e=$?; rm -f "$script"; exit $_e' <<< "$script_content"
     fi
 }
 
@@ -1024,7 +1047,7 @@ cmd_slurm_exec() {
         sbatch_content+=$'\n'
         sbatch_content+='echo "[rex] Started: $(date)"'$'\n'
         sbatch_content+='echo "[rex] Host: $(hostname)"'$'\n'
-        sbatch_content+='echo "[rex] Command: '"${cmd//\'/\'\\\'\'}"'"'$'\n'
+        sbatch_content+='echo "[rex] Command: '"$(escape_single_quote "$cmd")"'"'$'\n'
         sbatch_content+='echo "---"'$'\n'
         for mod in "${modules[@]}"; do
             sbatch_content+="module load $mod"$'\n'
@@ -1048,19 +1071,21 @@ cmd_slurm_exec() {
         echo "Log:    rex ${target} --log $job"
         echo "Kill:   rex ${target} --slurm --kill $job"
     else
-        # Foreground with srun
-        local inner_cmd=""
-        [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
-        [[ -n $gpus ]] && inner_cmd+="export CUDA_VISIBLE_DEVICES=$gpus && "
-        inner_cmd+="$cmd"
+        # Foreground with srun - use file-based execution to avoid quoting issues
         local tty_opt=""
         [[ -t 0 ]] && tty_opt="-t"
-        # Escape for double-quoted bash -c "..." context
-        local escaped_inner="${inner_cmd//\\/\\\\}"
-        escaped_inner="${escaped_inner//\"/\\\"}"
-        escaped_inner="${escaped_inner//\$/\\\$}"
-        escaped_inner="${escaped_inner//\`/\\\`}"
-        ssh ${=$(ssh_opts)} $tty_opt "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$escaped_inner\"'"
+
+        # Build script content
+        local script_content="#!/bin/bash -l"$'\n'
+        [[ ${#modules[@]} -gt 0 ]] && script_content+="module load ${modules[*]}"$'\n'
+        [[ -n $gpus ]] && script_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
+        [[ -n $REX_CODE_DIR ]] && script_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
+        script_content+="$cmd"$'\n'
+
+        # Write script to remote, execute via srun, clean up
+        local remote_script="/tmp/rex-srun-$$.sh"
+        remote_exec "$target" "cat > $remote_script && chmod +x $remote_script" <<< "$script_content"
+        ssh ${=$(ssh_opts)} $tty_opt "$target" "srun$slurm_opts $remote_script; _e=\$?; rm -f $remote_script; exit \$_e"
     fi
 }
 
@@ -1095,8 +1120,7 @@ run_foreground() {
     # Use -u for unbuffered output
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
-    local args_str=""
-    for arg in "${args[@]}"; do args_str+=" ${(qq)arg}"; done
+    local args_str=$(build_args_string "${args[@]}")
     ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c '${env_prefix}$python -u -${args_str}'"
 }
 
@@ -1125,8 +1149,7 @@ run_detached() {
     # Wrap in subshell to capture exit code and signal info
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="export CUDA_VISIBLE_DEVICES=$gpus; "
-    local args_str=""
-    for arg in "${args[@]}"; do args_str+=" ${(qq)arg}"; done
+    local args_str=$(build_args_string "${args[@]}")
     local wrapper="{ ${env_prefix}$python -u $remote_script${args_str}; code=\$?; if [ \$code -gt 128 ]; then echo \"[rex] Killed by signal \$((code-128))\" >&2; elif [ \$code -ne 0 ]; then echo \"[rex] Exit code: \$code\" >&2; fi; }"
     local pid=$(remote_exec "$target" "nohup bash -c '$wrapper' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
 
@@ -1200,8 +1223,7 @@ run_slurm_foreground() {
     # Activate venv and cd to run_dir if project config exists
     [[ -n $REX_CODE_DIR ]] && inner_cmd+="source ${REX_CODE_DIR}/.venv/bin/activate && "
     [[ -n $REX_RUN_DIR ]] && inner_cmd+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR} && "
-    local args_str=""
-    for arg in "${args[@]}"; do args_str+=" ${(qq)arg}"; done
+    local args_str=$(build_args_string "${args[@]}")
     inner_cmd+="$python -u -${args_str}"
 
     ssh ${=$(ssh_opts)} -T "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
@@ -1260,8 +1282,7 @@ run_slurm_detached() {
     [[ -n $REX_CODE_DIR ]] && sbatch_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
     [[ -n $REX_RUN_DIR ]] && sbatch_content+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR}"$'\n'
     sbatch_content+=$'\n'
-    local args_str=""
-    for arg in "${args[@]}"; do args_str+=" ${(qq)arg}"; done
+    local args_str=$(build_args_string "${args[@]}")
     sbatch_content+="$python -u $remote_script${args_str}"
     sbatch_content+=$'\n'
     sbatch_content+='_rex_exit=$?'$'\n'
