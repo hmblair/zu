@@ -273,6 +273,7 @@ Shell execution:
 Connection management:
   --connect          Open persistent SSH connection for faster subsequent commands
   --disconnect       Close persistent SSH connection
+  --connection       Show connection status (connected/disconnected)
 
 SLURM options (use with -s/--slurm):
   --partition <p>  SLURM partition
@@ -531,6 +532,25 @@ cmd_disconnect() {
     ssh -O exit -o ControlPath="$socket" "$target" 2>/dev/null
     rm -f "$socket"
     success "Disconnected from $target"
+}
+
+cmd_connection() {
+    local target="$1"
+    local socket=$(ssh_socket_path "$target")
+
+    if [[ ! -S $socket ]]; then
+        echo "disconnected"
+        return 1
+    fi
+
+    if ssh -O check -o ControlPath="$socket" "$target" 2>/dev/null; then
+        echo "connected"
+        return 0
+    else
+        rm -f "$socket"
+        echo "disconnected"
+        return 1
+    fi
 }
 
 cmd_gpus() {
@@ -1442,7 +1462,7 @@ main() {
             # Sync options
             --no-install) no_install=true; shift ;;
             # Commands - stop parsing flags
-            --jobs|--status|--log|--kill|--gpus|--sync|--build|--push|--pull|--watch|--exec|--exec-login|--last|--connect|--disconnect) break ;;
+            --jobs|--status|--log|--kill|--gpus|--sync|--build|--push|--pull|--watch|--exec|--exec-login|--last|--connect|--disconnect|--connection) break ;;
             # Unknown
             *) error "Unknown option: $1" ;;
         esac
@@ -1507,6 +1527,10 @@ main() {
             ;;
         --disconnect)
             cmd_disconnect "$target"
+            return
+            ;;
+        --connection)
+            cmd_connection "$target"
             return
             ;;
         --sync)

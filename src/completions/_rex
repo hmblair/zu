@@ -67,6 +67,7 @@ _rex() {
     local -a connection_options=(
         '--connect[Open persistent SSH connection]'
         '--disconnect[Close persistent SSH connection]'
+        '--connection[Show connection status]'
     )
 
     _arguments -s \
