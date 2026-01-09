@@ -25,9 +25,10 @@ REX_HOME_DIR_LOCAL="~/.rex"  # For local shell expansion in globs
 
 # SSH control socket path for connection multiplexing
 # Uses standard ~/.ssh/controlmasters/ so regular ssh can also benefit
+# Replace @ with -- to avoid confusing SSH option parser
 ssh_socket_path() {
     local target="$1"
-    echo "$HOME/.ssh/controlmasters/${target}"
+    echo "$HOME/.ssh/controlmasters/${target/@/--}"
 }
 
 # SSH options (includes multiplexing if socket exists)
@@ -546,8 +547,10 @@ cmd_connection() {
             for socket in "$socket_dir"/*; do
                 [[ -S $socket ]] || continue
                 local name=$(basename "$socket")
-                if ssh -O check -o ControlPath="$socket" "$name" 2>/dev/null; then
-                    echo "connected: $name"
+                # Reconstruct target: -- becomes @
+                local target="${name/--/@}"
+                if ssh -O check -o ControlPath="$socket" "$target" 2>/dev/null; then
+                    echo "connected: $target"
                     found=true
                 else
                     rm -f "$socket"
