@@ -56,6 +56,7 @@ validate_job_name() {
 
 # Run a command on remote via SSH (bypasses slow shell rc files)
 # Returns exit code from remote command; caller should check $?
+# Use for simple commands without complex quoting needs
 remote_exec() {
     local target="$1"; shift
     local cmd="$*"
@@ -65,6 +66,26 @@ remote_exec() {
     cmd="${cmd//\`/\\\`}"      # ` -> \`
     cmd="${cmd//\"/\\\"}"      # " -> \"
     ssh ${=$(ssh_opts "$target")} "$target" "bash --norc --noprofile -c \"$cmd\""
+}
+
+# Run a script on remote via file-based execution (safest for complex scripts)
+# Usage: remote_exec_script [-t] [-l] target <<< "script content"
+#   -t  Allocate TTY (for interactive commands)
+#   -l  Use login shell (for module system, etc.)
+# Returns exit code from remote script
+remote_exec_script() {
+    local tty_opt="" shell_cmd="bash"
+    while [[ $1 == -* ]]; do
+        case $1 in
+            -t) tty_opt="-t"; shift ;;
+            -l) shell_cmd="bash -l"; shift ;;
+            *) break ;;
+        esac
+    done
+    local target="$1"
+    # Write script to temp file, execute, clean up - all in one SSH session
+    ssh ${=$(ssh_opts "$target")} $tty_opt "$target" \
+        "$shell_cmd -c 'script=\$(mktemp) && cat > \"\$script\" && chmod +x \"\$script\" && \"\$script\"; e=\$?; rm -f \"\$script\"; exit \$e'"
 }
 
 # Build properly quoted argument string from array
@@ -337,35 +358,36 @@ cmd_jobs() {
     local target="$1"
     local json="$2"
 
-    local output=$(ssh ${=$(ssh_opts "$target")} "$target" 'bash --norc --noprofile -c '\''
-        for log in /tmp/rex-*.log ~/.rex/rex-*.log; do
-            [ -f "$log" ] || continue
-            job=$(basename "$log" .log | sed "s/rex-//")
+    local output=$(remote_exec_script "$target" <<'SCRIPT' | sort -r
+for log in /tmp/rex-*.log ~/.rex/rex-*.log; do
+    [ -f "$log" ] || continue
+    job=$(basename "$log" .log | sed "s/rex-//")
 
-            # Use character class trick to prevent pgrep from matching itself
-            pattern="rex-${job}[.]py"
-            pid=$(pgrep -f "$pattern" 2>/dev/null | head -1)
+    # Use character class trick to prevent pgrep from matching itself
+    pattern="rex-${job}[.]py"
+    pid=$(pgrep -f "$pattern" 2>/dev/null | head -1)
 
-            if [ -n "$pid" ]; then
-                status="running"
-            else
-                status="done"
-                pid="-"
-            fi
+    if [ -n "$pid" ]; then
+        status="running"
+    else
+        status="done"
+        pid="-"
+    fi
 
-            # Get first line of script as description
-            desc=""
-            script_tmp="/tmp/rex-${job}.py"
-            script_home="$HOME/.rex/rex-${job}.py"
-            if [ -f "$script_tmp" ]; then
-                desc=$(head -1 "$script_tmp" | sed "s/^#[[:space:]]*//" | cut -c1-40)
-            elif [ -f "$script_home" ]; then
-                desc=$(head -1 "$script_home" | sed "s/^#[[:space:]]*//" | cut -c1-40)
-            fi
+    # Get first line of script as description
+    desc=""
+    script_tmp="/tmp/rex-${job}.py"
+    script_home="$HOME/.rex/rex-${job}.py"
+    if [ -f "$script_tmp" ]; then
+        desc=$(head -1 "$script_tmp" | sed "s/^#[[:space:]]*//" | cut -c1-40)
+    elif [ -f "$script_home" ]; then
+        desc=$(head -1 "$script_home" | sed "s/^#[[:space:]]*//" | cut -c1-40)
+    fi
 
-            printf "%s\t%s\t%s\t%s\n" "$job" "$status" "$pid" "$desc"
-        done
-    '\''' | sort -r)
+    printf "%s\t%s\t%s\t%s\n" "$job" "$status" "$pid" "$desc"
+done
+SCRIPT
+)
 
     if [[ $json == "true" ]]; then
         echo "["
@@ -597,27 +619,28 @@ cmd_gpus() {
         return
     fi
 
-    # Get process info (gpu_index,pid,memory,user) - use SSH directly to avoid escaping issues
+    # Get process info (gpu_index,pid,memory,user)
     # First get UUID to index mapping, then get processes by UUID
-    local proc_info=$(ssh ${=$(ssh_opts "$target")} "$target" '
-        # Build UUID to index map
-        declare -A uuid_to_idx
-        while IFS=, read -r idx uuid; do
-            idx=$(echo "$idx" | tr -d " ")
-            uuid=$(echo "$uuid" | tr -d " ")
-            uuid_to_idx[$uuid]=$idx
-        done < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null)
+    local proc_info=$(remote_exec_script "$target" <<'SCRIPT'
+# Build UUID to index map
+declare -A uuid_to_idx
+while IFS=, read -r idx uuid; do
+    idx=$(echo "$idx" | tr -d " ")
+    uuid=$(echo "$uuid" | tr -d " ")
+    uuid_to_idx[$uuid]=$idx
+done < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null)
 
-        # Get processes and map UUID to index
-        nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
-            uuid=$(echo "$line" | cut -d, -f1 | tr -d " ")
-            pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
-            mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
-            gpu_idx=${uuid_to_idx[$uuid]}
-            user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
-            [ -n "$user" ] && [ -n "$gpu_idx" ] && echo "$gpu_idx,$pid,$mem,$user"
-        done
-    ')
+# Get processes and map UUID to index
+nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
+    uuid=$(echo "$line" | cut -d, -f1 | tr -d " ")
+    pid=$(echo "$line" | cut -d, -f2 | tr -d " ")
+    mem=$(echo "$line" | cut -d, -f3 | tr -d " ")
+    gpu_idx=${uuid_to_idx[$uuid]}
+    user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d " ")
+    [ -n "$user" ] && [ -n "$gpu_idx" ] && echo "$gpu_idx,$pid,$mem,$user"
+done
+SCRIPT
+)
 
     if [[ $json == "true" ]]; then
         echo "["
@@ -1225,13 +1248,23 @@ run_foreground() {
         file="$tmp"
     fi
 
-    exec < "$file"
-    # Use bash --norc to bypass slow/buggy shell rc files
-    # Use -u for unbuffered output
-    local env_prefix=""
-    [[ -n $gpus ]] && env_prefix="CUDA_VISIBLE_DEVICES=$gpus "
+    # Use file-based execution to avoid quoting issues
+    local script_id="$$-$(date +%s)"
+    local remote_py="/tmp/rex-run-${script_id}.py"
+    local remote_sh="/tmp/rex-run-${script_id}.sh"
+
+    # Copy Python script to remote
+    remote_exec "$target" "cat > $remote_py" < "$file"
+
+    # Build wrapper script
+    local script_content="#!/bin/bash"$'\n'
+    [[ -n $gpus ]] && script_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
     local args_str=$(build_args_string "${args[@]}")
-    ssh ${=$(ssh_opts "$target")} -T "$target" "bash --norc --noprofile -c '${env_prefix}$python -u -${args_str}'"
+    script_content+="$python -u $remote_py${args_str}"$'\n'
+
+    # Write wrapper, execute, clean up
+    remote_exec "$target" "cat > $remote_sh && chmod +x $remote_sh" <<< "$script_content"
+    ssh ${=$(ssh_opts "$target")} -T "$target" "$remote_sh; _e=\$?; rm -f $remote_py $remote_sh; exit \$_e"
 }
 
 run_detached() {
@@ -1321,22 +1354,30 @@ run_slurm_foreground() {
         file="$tmp"
     fi
 
-    exec < "$file"
-
     local slurm_opts=$(build_slurm_opts "$partition" "$gres" "$time_limit")
 
-    # Build the inner command that runs on the compute node
-    # Use login shell (-l) to get module system initialized
-    local inner_cmd=""
-    [[ ${#modules[@]} -gt 0 ]] && inner_cmd="module load ${modules[*]} && "
-    [[ -n $gpus ]] && inner_cmd+="export CUDA_VISIBLE_DEVICES=$gpus && "
-    # Activate venv and cd to run_dir if project config exists
-    [[ -n $REX_CODE_DIR ]] && inner_cmd+="source ${REX_CODE_DIR}/.venv/bin/activate && "
-    [[ -n $REX_RUN_DIR ]] && inner_cmd+="mkdir -p ${REX_RUN_DIR} && cd ${REX_RUN_DIR} && "
-    local args_str=$(build_args_string "${args[@]}")
-    inner_cmd+="$python -u -${args_str}"
+    # Use file-based execution to avoid quoting issues
+    # First copy Python script to remote, then build wrapper script
+    local script_id="$$-$(date +%s)"
+    local script_dir="${REX_RUN_DIR:-\$HOME/.rex}"
+    local remote_py="$script_dir/rex-run-${script_id}.py"
+    local remote_sh="$script_dir/rex-run-${script_id}.sh"
 
-    ssh ${=$(ssh_opts "$target")} -T "$target" "bash --norc --noprofile -c 'srun$slurm_opts bash -l -c \"$inner_cmd\"'"
+    # Copy Python script to remote
+    remote_exec "$target" "mkdir -p $script_dir && cat > $remote_py" < "$file"
+
+    # Build wrapper script
+    local script_content="#!/bin/bash -l"$'\n'
+    [[ ${#modules[@]} -gt 0 ]] && script_content+="module load ${modules[*]}"$'\n'
+    [[ -n $gpus ]] && script_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
+    [[ -n $REX_CODE_DIR ]] && script_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
+    [[ -n $REX_RUN_DIR ]] && script_content+="cd ${REX_RUN_DIR}"$'\n'
+    local args_str=$(build_args_string "${args[@]}")
+    script_content+="$python -u $remote_py${args_str}"$'\n'
+
+    # Write wrapper, execute via srun, clean up
+    remote_exec "$target" "cat > $remote_sh && chmod +x $remote_sh" <<< "$script_content"
+    ssh ${=$(ssh_opts "$target")} -T "$target" "srun$slurm_opts $remote_sh; _e=\$?; rm -f $remote_py $remote_sh; exit \$_e"
 }
 
 run_slurm_detached() {
