@@ -544,10 +544,11 @@ cmd_connection() {
         if [[ -d $socket_dir ]]; then
             for socket in "$socket_dir"/*; do
                 [[ -S $socket ]] || continue
-                # Extract target from socket name (replace - back to @ and :)
                 local name=$(basename "$socket")
-                if ssh -O check -o ControlPath="$socket" 2>/dev/null; then
-                    echo "connected: $name"
+                # Reconstruct target: first - becomes @, rest stay as - (host may have -)
+                local reconstructed="${name/-/@}"
+                if ssh -O check -o ControlPath="$socket" "$reconstructed" 2>/dev/null; then
+                    echo "connected: $reconstructed"
                     found=true
                 else
                     rm -f "$socket"
