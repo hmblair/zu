@@ -781,7 +781,7 @@ cmd_sync() {
     remote_exec "$target" "mkdir -p ${(q)${remote_path:h}}" || error "Failed to create remote directory"
 
     # Rsync
-    rsync -avz --delete -e "ssh ${=$(ssh_opts "$target")}" ${=exclude_args} "${local_path}/" "${target}:${remote_path}/" || error "Rsync failed"
+    rsync -avz --delete ${=exclude_args} "${local_path}/" "${target}:${remote_path}/" || error "Rsync failed"
     success "Synced $(basename $local_path)"
 
     # Pip install if pyproject.toml or setup.py exists (and not --no-install)
@@ -907,11 +907,10 @@ cmd_push() {
 
     info "Pushing to ${target}:${remote_path}"
 
-    local ssh_cmd="ssh ${=$(ssh_opts "$target")}"
     if [[ -d $local_path ]]; then
-        rsync -avz --progress -e "$ssh_cmd" "${local_path}/" "${target}:${remote_path}/" || error "Push failed"
+        rsync -avz --progress "${local_path}/" "${target}:${remote_path}/" || error "Push failed"
     else
-        rsync -avz --progress -e "$ssh_cmd" "$local_path" "${target}:${remote_path}" || error "Push failed"
+        rsync -avz --progress "$local_path" "${target}:${remote_path}" || error "Push failed"
     fi
 
     success "Pushed $(basename $local_path)"
@@ -938,7 +937,7 @@ cmd_pull() {
     info "Pulling from ${target}:${remote_path}"
 
     # rsync handles files, directories, and globs
-    rsync -avz --progress -e "ssh ${=$(ssh_opts "$target")}" "${target}:${remote_path}" "$local_path/" || error "Pull failed"
+    rsync -avz --progress "${target}:${remote_path}" "$local_path/" || error "Pull failed"
 
     success "Pulled to $local_path"
 }
@@ -1253,7 +1252,7 @@ run_detached() {
     local remote_script="/tmp/rex-${job}.py"
     local remote_log="/tmp/rex-${job}.log"
 
-    scp -q -o ControlPath="$(ssh_socket_path "$target")" -o ControlMaster=auto "$file" "${target}:${remote_script}" || error "Failed to copy script"
+    scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
     # Use -u for unbuffered output so logs are written immediately
     # Use disown and sleep to ensure process is fully detached before SSH exits
@@ -1371,7 +1370,7 @@ run_slurm_detached() {
 
     # Create directory and copy script
     remote_exec "$target" "mkdir -p ~/.rex" || error "Failed to create remote directory"
-    scp -q -o ControlPath="$(ssh_socket_path "$target")" -o ControlMaster=auto "$file" "${target}:${remote_script}" || error "Failed to copy script"
+    scp -q "$file" "${target}:${remote_script}" || error "Failed to copy script"
 
     # Build sbatch script (use login shell to get module system)
     local sbatch_content="#!/bin/bash -l
