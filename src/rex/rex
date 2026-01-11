@@ -1103,11 +1103,12 @@ cmd_exec() {
 
     [[ -z $cmd ]] && error "Usage: rex <host> --exec <command>"
 
-    # Build command prefix (modules + env + venv)
+    # Build command prefix (modules + env + venv + cd)
     local prefix=""
     [[ ${#modules[@]} -gt 0 ]] && prefix="module load ${modules[*]} && "
     [[ -n $gpus ]] && prefix+="export CUDA_VISIBLE_DEVICES=$gpus && "
     [[ -n $REX_CODE_DIR ]] && prefix+="source ${REX_CODE_DIR}/.venv/bin/activate && "
+    [[ -n $REX_RUN_DIR ]] && prefix+="cd ${REX_RUN_DIR} && "
 
     if [[ $detach == "true" ]]; then
         local job="${job_name:-$(date +%Y%m%d-%H%M%S)}"
@@ -1185,6 +1186,7 @@ cmd_slurm_exec() {
         [[ -n $gpus ]] && sbatch_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
         # Activate venv if project config exists
         [[ -n $REX_CODE_DIR ]] && sbatch_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
+        [[ -n $REX_RUN_DIR ]] && sbatch_content+="cd ${REX_RUN_DIR}"$'\n'
         sbatch_content+=$'\n'
         sbatch_content+="$cmd"
         sbatch_content+=$'\n'
@@ -1210,6 +1212,7 @@ cmd_slurm_exec() {
         [[ ${#modules[@]} -gt 0 ]] && script_content+="module load ${modules[*]}"$'\n'
         [[ -n $gpus ]] && script_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
         [[ -n $REX_CODE_DIR ]] && script_content+="source ${REX_CODE_DIR}/.venv/bin/activate"$'\n'
+        [[ -n $REX_RUN_DIR ]] && script_content+="cd ${REX_RUN_DIR}"$'\n'
         script_content+="$cmd"$'\n'
 
         # Write script to shared filesystem (run_dir or ~/.rex), execute via srun, clean up
@@ -1259,6 +1262,7 @@ run_foreground() {
     # Build wrapper script
     local script_content="#!/bin/bash"$'\n'
     [[ -n $gpus ]] && script_content+="export CUDA_VISIBLE_DEVICES=$gpus"$'\n'
+    [[ -n $REX_RUN_DIR ]] && script_content+="cd ${REX_RUN_DIR}"$'\n'
     local args_str=$(build_args_string "${args[@]}")
     script_content+="$python -u $remote_py${args_str}"$'\n'
 
@@ -1292,6 +1296,7 @@ run_detached() {
     # Wrap in subshell to capture exit code and signal info
     local env_prefix=""
     [[ -n $gpus ]] && env_prefix="export CUDA_VISIBLE_DEVICES=$gpus; "
+    [[ -n $REX_RUN_DIR ]] && env_prefix+="cd ${REX_RUN_DIR}; "
     local args_str=$(build_args_string "${args[@]}")
     local wrapper="{ ${env_prefix}$python -u $remote_script${args_str}; code=\$?; if [ \$code -gt 128 ]; then echo \"[rex] Killed by signal \$((code-128))\" >&2; elif [ \$code -ne 0 ]; then echo \"[rex] Exit code: \$code\" >&2; fi; }"
     local pid=$(remote_exec "$target" "nohup bash -c '$wrapper' > $remote_log 2>&1 & pid=\$!; disown \$pid 2>/dev/null; sleep 0.5; echo \$pid")
