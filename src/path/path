@@ -72,7 +72,7 @@ file_to_path() {
 cmd_read() {
     /bin/mkdir -p "$PATH_DIR"
     # Output export statement to be eval'd: eval "$(path read)"
-    echo "export PATH=\"\$PATH:$(file_to_path "$PATH_DIR"/*(N))\""
+    echo "export PATH=\"$(file_to_path "$PATH_DIR"/*(N)):\$PATH\""
 }
 
 cmd_add() {
