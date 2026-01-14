@@ -76,6 +76,10 @@ cmd_whereami() {
     local paths=("$@")
     [[ ${#paths[@]} -eq 0 ]] && paths=(".")
 
+    for p in "${paths[@]}"; do
+        [[ -e "$p" ]] || error "No such file or directory: $p"
+    done
+
     if [[ -z "$SSH_CONNECTION" ]]; then
         for p in "${paths[@]}"; do
             echo "${p:A}"
