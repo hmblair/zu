@@ -10,11 +10,14 @@ _whereami() {
     )
 
     _arguments -C \
-        '1:command:->command'
+        '1:path or command:->first' \
+        '*:path:_files'
 
     case $state in
-        command)
-            _describe -t commands 'whereami command' commands
+        first)
+            _alternative \
+                'commands:command:((setup\:"Configure DNS name" show\:"Show DNS name" reset\:"Remove config" help\:"Show usage"))' \
+                'files:path:_files'
             ;;
     esac
 }

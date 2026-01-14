@@ -10,21 +10,23 @@ CONFIG_FILE="$HOME/.config/whereami/dns"
 
 usage() {
     cat << EOF
-Usage: whereami [command]
+Usage: whereami [path...] [command]
 
 Output user@host:path for easy rsync/scp usage.
 Run on a remote server, then paste the output into a local command.
 
 Commands:
-  (none)    Print user@host:path
+  (none)    Print user@host:path for current directory
   setup     Configure the DNS name for this machine
   show      Show configured DNS name
   reset     Remove configuration
 
 Examples:
-  whereami          # Outputs: user@hpc.edu:/home/user/project
-  whereami | copy   # Copy to clipboard (with OSC 52 over SSH)
-  whereami setup    # Configure DNS name for this machine
+  whereami              # Outputs: user@hpc.edu:/home/user/project
+  whereami file.txt     # Outputs: user@hpc.edu:/home/user/project/file.txt
+  whereami *.py         # Outputs paths for all Python files
+  whereami | copy       # Copy to clipboard (with OSC 52 over SSH)
+  whereami setup        # Configure DNS name for this machine
 
   # Then on your local machine:
   rsync file.txt user@hpc.edu:/home/user/project
@@ -71,8 +73,13 @@ cmd_reset() {
 }
 
 cmd_whereami() {
+    local paths=("$@")
+    [[ ${#paths[@]} -eq 0 ]] && paths=(".")
+
     if [[ -z "$SSH_CONNECTION" ]]; then
-        pwd
+        for p in "${paths[@]}"; do
+            echo "${p:A}"
+        done
         return
     fi
 
@@ -85,7 +92,10 @@ cmd_whereami() {
         host=$(hostname -f)
     fi
 
-    echo "$(whoami)@${host}:$(pwd)"
+    local prefix="$(whoami)@${host}:"
+    for p in "${paths[@]}"; do
+        echo "${prefix}${p:A}"
+    done
 }
 
 case "${1:-}" in
@@ -101,10 +111,7 @@ case "${1:-}" in
     -h|--help|help)
         usage
         ;;
-    "")
-        cmd_whereami
-        ;;
     *)
-        error "Unknown command: $1"
+        cmd_whereami "$@"
         ;;
 esac
