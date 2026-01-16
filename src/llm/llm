@@ -1116,31 +1116,7 @@ run_llm() {
             error "Server crashed (may have run out of memory - try smaller --context)"
         fi
     else
-        # Build llama-cli arguments
-        ARGS=(
-            --hf-repo "$MODEL"
-            --ctx-size "$CONTEXT_SIZE"
-            --temp "$TEMPERATURE"
-            --prompt "$PROMPT"
-            --no-display-prompt
-        )
-
-        [[ -n "$SYSTEM_PROMPT" ]] && ARGS+=(--system-prompt "$SYSTEM_PROMPT")
-        if [[ -n "$CHAT_TEMPLATE" ]]; then
-            if [[ -f "$CHAT_TEMPLATE" ]]; then
-                ARGS+=(--jinja --chat-template-file "$CHAT_TEMPLATE")
-            else
-                ARGS+=(--chat-template "$CHAT_TEMPLATE")
-            fi
-        fi
-        $CONVERSATION || ARGS+=(--single-turn --no-perf)
-
-        # Run llama-cli (formatting only available with server mode)
-        if $VERBOSE; then
-            exec llama-cli "${ARGS[@]}"
-        else
-            exec llama-cli "${ARGS[@]}" 2>/dev/null
-        fi
+        error "Server not running. Start it with: llm serve"
     fi
 }
 
