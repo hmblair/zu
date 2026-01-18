@@ -34,7 +34,7 @@ usage() {
     echo "  dns off                       Restore original DNS settings"
     echo "  dns reset                     Reset DNS to 1.1.1.1 on all interfaces"
     echo "  dns status                    Show current DNS status"
-    echo "  setup                         One-time setup (installs daemon)"
+    echo "  install                       Install daemon and configure blk"
     echo "  reload                        Restart the daemon"
     echo "  uninstall                     Remove daemon and config (only if no active blocks)"
     echo ""
@@ -61,10 +61,10 @@ usage() {
 check_setup() {
     # Check for old-format files that indicate need to uninstall first
     if [[ -f "$BLOCK_DIR/data.enc" ]] || [[ -f "$BLOCK_DIR/salt" ]]; then
-        error "Old encrypted format detected. Run 'blk uninstall' first, then run 'blk setup' again."
+        error "Old encrypted format detected. Run 'blk uninstall' first, then run 'blk install' again."
     fi
     if [[ ! -f "$DATA_FILE" ]]; then
-        error "blk has not been set up. Run 'blk setup' first."
+        error "blk is not installed. Run 'blk install' first."
     fi
 }
 
@@ -632,7 +632,7 @@ print('none')
             ;;
         not_installed)
             printf "  Daemon: ${RED}not installed${NC}\n"
-            warn "Daemon is not installed. Run 'blk setup' first."
+            warn "Daemon is not installed. Run 'blk install' first."
             ;;
         crashing:*)
             local exit_code="${daemon_status#crashing:}"
@@ -852,7 +852,7 @@ case "${1:-}" in
     dns)
         cmd_dns "$2"
         ;;
-    setup)
+    install)
         cmd_setup
         ;;
     reload)
