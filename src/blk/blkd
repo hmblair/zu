@@ -12,14 +12,11 @@ source "$SCRIPT_DIR/../common"
 # ─────────────────────────────────────────────────────────────────────────────
 
 BLOCK_DIR="$HOME/.blk"
-DATA_FILE="$BLOCK_DIR/data.enc"
-SALT_FILE="$BLOCK_DIR/salt"
+DATA_FILE="$BLOCK_DIR/data.json"
 TRIGGER_FILE="$BLOCK_DIR/trigger"
 ADD_REQUEST_FILE="$BLOCK_DIR/add_request"
-SUMMARY_FILE="$BLOCK_DIR/summary"
 ANCHOR_NAME="com.zu.blk"
 ANCHOR_FILE="/etc/pf.anchors/$ANCHOR_NAME"
-DAEMON_PASS_FILE="/var/root/.blk_pass"
 
 CHECK_INTERVAL=5  # seconds between rule verification
 LOG_PREFIX="[blkd]"
@@ -37,22 +34,21 @@ log_error() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Password and Decryption
+# Data File I/O
 # ─────────────────────────────────────────────────────────────────────────────
 
-get_password() {
-    # Retrieve password from root-only file (handle with or without trailing newline)
-    tr -d '\n' < "$DAEMON_PASS_FILE" 2>/dev/null
+read_data() {
+    if [[ -f "$DATA_FILE" ]]; then
+        cat "$DATA_FILE" 2>/dev/null
+    else
+        echo "{}"
+    fi
 }
 
-# Wrappers for common functions
-decrypt_data() {
-    local password="$1"
-    zu_decrypt "$DATA_FILE" "$password"
-}
-
-encrypt_data() {
-    zu_encrypt "$@"
+write_data() {
+    local data="$1"
+    echo "$data" > "$DATA_FILE"
+    chmod 644 "$DATA_FILE"
 }
 
 is_schedule_active() {
@@ -286,36 +282,22 @@ get_current_rules() {
 # Block Management
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Process add requests from the CLI (requires valid HMAC signature)
+# Process add requests from the CLI
 process_add_requests() {
-    local password="$1"
-
     if [[ ! -f "$ADD_REQUEST_FILE" ]]; then
         return 0
     fi
 
-    local content=$(cat "$ADD_REQUEST_FILE" 2>/dev/null)
-    if [[ -z "$content" ]]; then
+    local request=$(cat "$ADD_REQUEST_FILE" 2>/dev/null)
+    if [[ -z "$request" ]]; then
         rm -f "$ADD_REQUEST_FILE"
         return 0
     fi
 
-    # Parse signed request: <json>\n<hmac>
-    local request="${content%$'\n'*}"
-    local provided_hmac="${content##*$'\n'}"
+    log "Processing add request"
 
-    # Verify HMAC signature
-    local computed_hmac=$(zu_hmac "$request" "$password")
-    if [[ "$provided_hmac" != "$computed_hmac" ]]; then
-        log_error "Invalid HMAC signature on add request - rejecting"
-        rm -f "$ADD_REQUEST_FILE"
-        return 1
-    fi
-
-    log "Processing verified add request"
-
-    # Decrypt current data
-    local data=$(decrypt_data "$password")
+    # Read current data
+    local data=$(read_data)
     if [[ -z "$data" ]]; then
         data="{}"
     fi
@@ -346,22 +328,16 @@ if not domain:
 if 'schedule' in request:
     # Daily schedule
     entry = {'schedule': request['schedule']}
-    if request.get('hidden'):
-        entry['hidden'] = True
     data[domain] = entry
 elif 'expiry' in request:
     # Timed block
-    if request.get('hidden'):
-        data[domain] = {'expiry': request['expiry'], 'hidden': True}
-    else:
-        data[domain] = {'expiry': request['expiry']}
+    data[domain] = {'expiry': request['expiry']}
 
 print(json.dumps(data))
 " 2>/dev/null)
 
     if [[ -n "$new_data" ]] && [[ "$new_data" != "$data" ]]; then
-        # Re-encrypt and save
-        encrypt_data "$new_data" "$password" > "$DATA_FILE"
+        write_data "$new_data"
         log "Added block from request"
     fi
 
@@ -369,52 +345,8 @@ print(json.dumps(data))
     rm -f "$ADD_REQUEST_FILE"
 }
 
-# Update the summary file with non-hidden blocks
-update_summary_file() {
-    local data="$1"
-    local now=$(date +%s)
-
-    # Extract non-hidden active blocks (including linked domains)
-    local summary=$(echo "$data" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-now = $now
-summary = {}
-for domain, val in data.items():
-    if isinstance(val, (int, float)):
-        # Simple timed block (not hidden) - convert to dict format for consistency
-        if val > now:
-            summary[domain] = {'expiry': int(val)}
-    elif isinstance(val, dict):
-        # Skip hidden entries
-        if val.get('hidden'):
-            continue
-        entry = {}
-        if 'expiry' in val:
-            if val['expiry'] > now:
-                entry['expiry'] = int(val['expiry'])
-            else:
-                continue
-        elif 'schedule' in val:
-            entry['schedule'] = val['schedule']
-        else:
-            continue
-        # Include linked domains
-        if 'includes' in val:
-            entry['includes'] = val['includes']
-        summary[domain] = entry
-print(json.dumps(summary))
-" 2>/dev/null)
-
-    if [[ -n "$summary" ]]; then
-        echo "$summary" > "$SUMMARY_FILE"
-        chmod 644 "$SUMMARY_FILE"
-    fi
-}
-
 remove_expired_blocks() {
-    local password="$1"
-    local data="$2"
+    local data="$1"
     local now=$(date +%s)
 
     # Remove expired entries
@@ -429,7 +361,7 @@ for k, v in data.items():
         if v > now:
             active[k] = v
     elif isinstance(v, dict) and 'expiry' in v:
-        # Hidden timed block
+        # Timed block with expiry
         if v['expiry'] > now:
             active[k] = v
     elif isinstance(v, dict) and 'schedule' in v:
@@ -440,7 +372,7 @@ print(json.dumps(active))
 
     if [[ "$new_data" != "$data" ]]; then
         log "Removing expired blocks"
-        encrypt_data "$new_data" "$password" > "$DATA_FILE"
+        write_data "$new_data"
         echo "$new_data"
     else
         echo "$data"
@@ -456,14 +388,6 @@ main() {
 
     # Ensure anchor is in pf.conf
     ensure_anchor_in_pf_conf
-
-    # Get password from file
-    local password=$(get_password)
-    if [[ -z "$password" ]]; then
-        log_error "Cannot retrieve password from $DAEMON_PASS_FILE. Exiting."
-        exit 1
-    fi
-    log "Password retrieved successfully (length: ${#password})"
 
     local last_trigger_mtime=""
     local expected_rules=""
@@ -483,11 +407,11 @@ main() {
             last_trigger_mtime="$current_trigger_mtime"
         fi
 
-        # Process any pending add requests (allows adding blocks without password)
-        process_add_requests "$password"
+        # Process any pending add requests
+        process_add_requests
 
-        # Decrypt and process blocks
-        local data=$(decrypt_data "$password")
+        # Read and process blocks
+        local data=$(read_data)
         if [[ -z "$data" ]] || [[ "$data" == "{}" ]]; then
             # No blocks, ensure rules are cleared
             if [[ -n "$expected_rules" ]]; then
@@ -495,15 +419,9 @@ main() {
                 apply_pf_rules ""
                 expected_rules=""
             fi
-            # Update summary file (empty)
-            echo "{}" > "$SUMMARY_FILE"
-            chmod 644 "$SUMMARY_FILE"
         else
             # Remove expired blocks
-            data=$(remove_expired_blocks "$password" "$data")
-
-            # Update the summary file with non-hidden blocks
-            update_summary_file "$data"
+            data=$(remove_expired_blocks "$data")
 
             # Generate expected rules
             local new_rules=$(generate_pf_rules "$data")

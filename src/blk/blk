@@ -9,15 +9,11 @@ source "$SCRIPT_DIR/../common"
 
 # Configuration
 BLOCK_DIR="$HOME/.blk"
-DATA_FILE="$BLOCK_DIR/data.enc"
-SALT_FILE="$BLOCK_DIR/salt"
+DATA_FILE="$BLOCK_DIR/data.json"
 TRIGGER_FILE="$BLOCK_DIR/trigger"
 ADD_REQUEST_FILE="$BLOCK_DIR/add_request"
-SUMMARY_FILE="$BLOCK_DIR/summary"
 DNS_BACKUP_FILE="$BLOCK_DIR/dns_backup"
 PLIST_LABEL="com.zu.blkd"
-DAEMON_PASS_FILE="/var/root/.blk_pass"
-OP_ITEM_NAME="blk"  # 1Password item name for storing password
 FAMILY_DNS="1.1.1.3"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,20 +24,20 @@ usage() {
     echo "Usage: blk <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  add [--hidden] <domain> <duration>  Block a domain/pattern for specified duration"
-    echo "  daily [--hidden] <domain> <schedule>  Set up a daily recurring block"
-    echo "  remove <domain>             Remove a daily schedule (only when not active)"
-    echo "  link <parent> <domain>...   Link domains to follow parent's block rules"
-    echo "  unlink <parent> <domain>... Remove linked domains from parent"
-    echo "  list [--show-hidden]        Show all active blocks with time remaining"
-    echo "  status <domain>             Check if a domain is blocked"
-    echo "  dns on                      Switch DNS to 1.1.1.3 (blocks malware/adult content)"
-    echo "  dns off                     Restore original DNS settings"
-    echo "  dns reset                   Reset DNS to automatic on all interfaces"
-    echo "  dns status                  Show current DNS status"
-    echo "  setup                       One-time setup (installs daemon)"
-    echo "  reload                      Restart the daemon"
-    echo "  uninstall                   Remove daemon and config (only if no active blocks)"
+    echo "  add <domain> <duration>       Block a domain/pattern for specified duration"
+    echo "  daily <domain> <schedule>     Set up a daily recurring block"
+    echo "  remove <domain>               Remove a daily schedule (only when not active)"
+    echo "  link <parent> <domain>...     Link domains to follow parent's block rules"
+    echo "  unlink <parent> <domain>...   Remove linked domains from parent"
+    echo "  list                          Show all active blocks with time remaining"
+    echo "  status <domain>               Check if a domain is blocked"
+    echo "  dns on                        Switch DNS to 1.1.1.3 (blocks malware/adult content)"
+    echo "  dns off                       Restore original DNS settings"
+    echo "  dns reset                     Reset DNS to automatic on all interfaces"
+    echo "  dns status                    Show current DNS status"
+    echo "  setup                         One-time setup (installs daemon)"
+    echo "  reload                        Restart the daemon"
+    echo "  uninstall                     Remove daemon and config (only if no active blocks)"
     echo ""
     echo "Duration format:"
     echo "  30s = 30 seconds"
@@ -69,76 +65,32 @@ usage() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1Password integration
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Check if 1Password CLI is available
-op_available() {
-    command -v op &>/dev/null
-}
-
-# Get password from 1Password (returns empty string on failure)
-op_get_password() {
-    if ! op_available; then
-        return 1
-    fi
-    # Sign out first to force fresh Touch ID prompt every time
-    op signout --all 2>/dev/null
-    # Try to read password field from the item (triggers Touch ID)
-    local password
-    password=$(op item get "$OP_ITEM_NAME" --fields password --reveal 2>/dev/null)
-    if [[ $? -eq 0 ]] && [[ -n "$password" ]]; then
-        echo -n "$password"
-        return 0
-    fi
-    return 1
-}
-
-# Store password in 1Password
-op_store_password() {
-    local password="$1"
-    if ! op_available; then
-        return 1
-    fi
-    # Check if item already exists
-    if op item get "$OP_ITEM_NAME" &>/dev/null; then
-        # Update existing item
-        op item edit "$OP_ITEM_NAME" "password=$password" &>/dev/null
-    else
-        # Create new item
-        op item create --category=password --title="$OP_ITEM_NAME" "password=$password" &>/dev/null
-    fi
-    return $?
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 # Check if setup has been completed
 check_setup() {
-    if [[ ! -f "$SALT_FILE" ]] || [[ ! -f "$DATA_FILE" ]]; then
+    # Check for old-format files that indicate need to uninstall first
+    if [[ -f "$BLOCK_DIR/data.enc" ]] || [[ -f "$BLOCK_DIR/salt" ]]; then
+        error "Old encrypted format detected. Run 'blk uninstall' first, then run 'blk setup' again."
+    fi
+    if [[ ! -f "$DATA_FILE" ]]; then
         error "blk has not been set up. Run 'blk setup' first."
     fi
 }
 
-# Get password - tries 1Password first, falls back to manual prompt
-prompt_password() {
-    local prompt="${1:-Password: }"
-    local password
-
-    # Try 1Password first (will trigger Touch ID if available)
-    if op_available; then
-        password=$(op_get_password)
-        if [[ $? -eq 0 ]] && [[ -n "$password" ]]; then
-            echo -n "$password"
-            return 0
-        fi
-        # 1Password failed (user cancelled, item not found, etc.) - fall through to manual
+# Read data from JSON file
+read_data() {
+    if [[ -f "$DATA_FILE" ]]; then
+        cat "$DATA_FILE" 2>/dev/null
+    else
+        echo "{}"
     fi
+}
 
-    # Manual password entry
-    read -s "password?$prompt"
-    echo "" >&2  # newline to stderr for terminal formatting
-    echo -n "$password"
+# Write data to JSON file
+write_data() {
+    local data="$1"
+    echo "$data" > "$DATA_FILE"
+    chmod 644 "$DATA_FILE"
 }
 
 # Validate domain or pattern format
@@ -157,22 +109,6 @@ validate_domain() {
     if ! [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; then
         error "Invalid domain format: $domain"
     fi
-}
-
-# Wrapper for zu_decrypt that validates JSON
-decrypt_data() {
-    local password="$1"
-    local decrypted
-    decrypted=$(zu_decrypt "$DATA_FILE" "$password")
-    if [[ $? -ne 0 ]]; then
-        return 1
-    fi
-    # Validate it's valid JSON
-    if ! printf '%s' "$decrypted" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-        return 1
-    fi
-    printf '%s' "$decrypted"
-    return 0
 }
 
 # Aliases for common functions (shorter names for this script)
@@ -257,77 +193,27 @@ cmd_setup() {
     info "Setting up website blocker..."
 
     # Check if already set up
-    if [[ -f "$SALT_FILE" ]]; then
+    if [[ -f "$DATA_FILE" ]]; then
         warn "blk is already set up. Run 'blk uninstall' first to reconfigure."
         exit 1
+    fi
+
+    # Check for old-format files
+    if [[ -f "$BLOCK_DIR/data.enc" ]] || [[ -f "$BLOCK_DIR/salt" ]]; then
+        error "Old encrypted format detected. Run 'blk uninstall' (with the old version) first."
     fi
 
     # Create block directory
     mkdir -p "$BLOCK_DIR"
     chmod 700 "$BLOCK_DIR"
 
-    # Prompt for password (direct prompt, not via prompt_password which tries 1Password)
-    echo "Choose a password for encrypting your block list."
-    echo "You will need this password to add blocks or view the list."
-    echo ""
-
-    local password
-    local confirm
-    read -s "password?Password: "
-    echo ""
-    read -s "confirm?Confirm password: "
-    echo ""
-
-    if [[ "$password" != "$confirm" ]]; then
-        rm -rf "$BLOCK_DIR"
-        error "Passwords do not match."
-    fi
-
-    if [[ -z "$password" ]]; then
-        rm -rf "$BLOCK_DIR"
-        error "Password cannot be empty."
-    fi
-
-    # Offer to store in 1Password if available
-    if op_available; then
-        echo ""
-        read -q "use_op?Store password in 1Password for Touch ID unlock? [y/N] "
-        echo ""
-        if [[ "$use_op" == "y" ]]; then
-            if op_store_password "$password"; then
-                success "Password stored in 1Password as '$OP_ITEM_NAME'"
-            else
-                warn "Failed to store in 1Password. You can add it manually later."
-            fi
-        fi
-    fi
-
-    # Generate salt
-    openssl rand -hex 32 > "$SALT_FILE"
-    chmod 600 "$SALT_FILE"
-
     # Initialize empty data file
-    zu_encrypt "{}" "$password" > "$DATA_FILE"
-    chmod 600 "$DATA_FILE"
+    echo "{}" > "$DATA_FILE"
+    chmod 644 "$DATA_FILE"
 
     # Create trigger file
     touch "$TRIGGER_FILE"
     chmod 644 "$TRIGGER_FILE"
-
-    # Create empty summary file (for password-free list command)
-    echo "{}" > "$SUMMARY_FILE"
-    chmod 644 "$SUMMARY_FILE"
-
-    # Store password in root-only file for daemon access (no trailing newline)
-    echo ""
-    info "Storing daemon password (requires sudo)..."
-    echo -n "$password" | sudo tee "$DAEMON_PASS_FILE" > /dev/null
-    if [[ $? -ne 0 ]]; then
-        rm -rf "$BLOCK_DIR"
-        error "Failed to store daemon password."
-    fi
-    sudo chmod 600 "$DAEMON_PASS_FILE"
-    sudo chown root:wheel "$DAEMON_PASS_FILE"
 
     # Copy daemon script
     local daemon_script="$SCRIPT_DIR/blkd"
@@ -375,15 +261,27 @@ cmd_reload() {
 }
 
 cmd_uninstall() {
-    check_setup
+    # Handle both old and new formats
+    if [[ ! -f "$DATA_FILE" ]] && [[ ! -f "$BLOCK_DIR/data.enc" ]]; then
+        error "blk is not set up."
+    fi
 
     # Check for active blocks
-    local password=$(prompt_password)
     local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
+    if [[ -f "$DATA_FILE" ]]; then
+        data=$(read_data)
+    elif [[ -f "$BLOCK_DIR/data.enc" ]]; then
+        # Old encrypted format - can't check, just warn
+        warn "Old encrypted format detected. Cannot check for active blocks."
+        read -q "confirm?Proceed with uninstall anyway? [y/N] "
+        echo ""
+        if [[ "$confirm" != "y" ]]; then
+            echo "Cancelled."
+            exit 0
+        fi
+        data="{}"
     fi
+
     local now=$(date +%s)
 
     # Check if any blocks are still active
@@ -392,10 +290,16 @@ cmd_uninstall() {
 import sys, json
 data = json.load(sys.stdin)
 now = $now
-for domain, expiry in data.items():
-    if expiry > now:
-        print(f'{domain}')
-" | while read domain; do
+for domain, val in data.items():
+    if isinstance(val, (int, float)):
+        if val > now:
+            print(domain)
+    elif isinstance(val, dict) and 'expiry' in val:
+        if val['expiry'] > now:
+            print(domain)
+    elif isinstance(val, dict) and 'schedule' in val:
+        print(domain)
+" 2>/dev/null | while read domain; do
         active_blocks=true
         warn "Active block: $domain"
     done
@@ -412,8 +316,8 @@ for domain, expiry in data.items():
     # Remove pf anchor
     sudo pfctl -a com.zu.blk -F all 2>/dev/null
 
-    # Remove daemon password file
-    sudo rm -f "$DAEMON_PASS_FILE"
+    # Remove old daemon password file if it exists
+    sudo rm -f "/var/root/.blk_pass"
 
     # Remove block directory
     rm -rf "$BLOCK_DIR"
@@ -422,17 +326,12 @@ for domain, expiry in data.items():
 }
 
 cmd_add() {
-    local hidden=false
     local domain=""
     local duration=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --hidden)
-                hidden=true
-                shift
-                ;;
             -*)
                 error "Unknown option: $1"
                 ;;
@@ -450,10 +349,10 @@ cmd_add() {
     done
 
     if [[ -z "$domain" ]] || [[ -z "$duration" ]]; then
-        error "Usage: blk add [--hidden] <domain> <duration>"
+        error "Usage: blk add <domain> <duration>"
     fi
 
-    # Validate duration early (before setup check, to give helpful error without password)
+    # Validate duration early (before setup check, to give helpful error)
     parse_duration "$duration" > /dev/null  # validates, exits on error
 
     check_setup
@@ -479,14 +378,14 @@ cmd_add() {
         fi
     fi
 
-    # Check existing blocks from summary file (doesn't require password)
-    if [[ -f "$SUMMARY_FILE" ]]; then
-        local existing_check=$(python3 -c "
+    # Check existing blocks
+    local data=$(read_data)
+    local existing_check=$(echo "$data" | python3 -c "
 import sys, json
 try:
-    with open('$SUMMARY_FILE') as f:
-        data = json.load(f)
+    data = json.load(sys.stdin)
 except:
+    print('ok')
     sys.exit(0)
 domain = '$domain'
 now = $(date +%s)
@@ -506,40 +405,29 @@ else:
     print('ok')
 " 2>/dev/null)
 
-        local check_type="${existing_check%%|*}"
-        if [[ "$check_type" == "blocked" ]]; then
-            local existing_expiry="${existing_check#*|}"
-            local existing_date=$(date -r "$existing_expiry" '+%Y-%m-%d %H:%M:%S')
-            error "$domain is already blocked until $existing_date. Cannot shorten an existing block."
-        elif [[ "$check_type" == "daily" ]]; then
-            local existing_schedule="${existing_check#*|}"
-            error "$domain has a daily schedule ($existing_schedule). Remove it first before adding a timed block."
-        fi
+    local check_type="${existing_check%%|*}"
+    if [[ "$check_type" == "blocked" ]]; then
+        local existing_expiry="${existing_check#*|}"
+        local existing_date=$(date -r "$existing_expiry" '+%Y-%m-%d %H:%M:%S')
+        error "$domain is already blocked until $existing_date. Cannot shorten an existing block."
+    elif [[ "$check_type" == "daily" ]]; then
+        local existing_schedule="${existing_check#*|}"
+        error "$domain has a daily schedule ($existing_schedule). Remove it first before adding a timed block."
     fi
 
-    # Get password to sign the request
-    local password=$(prompt_password)
-
-    # Write signed add request for daemon to process
-    local request_data
-    if [[ "$hidden" == "true" ]]; then
-        request_data="{\"domain\": \"$domain\", \"expiry\": $expiry, \"hidden\": true}"
-    else
-        request_data="{\"domain\": \"$domain\", \"expiry\": $expiry}"
-    fi
-    local hmac=$(zu_hmac "$request_data" "$password")
-    printf '%s\n%s' "$request_data" "$hmac" > "$ADD_REQUEST_FILE"
+    # Write add request for daemon to process
+    local request_data="{\"domain\": \"$domain\", \"expiry\": $expiry}"
+    echo "$request_data" > "$ADD_REQUEST_FILE"
 
     # Signal daemon to process the request
     signal_daemon
 
-    # Wait briefly for daemon to process (check summary file update)
+    # Wait briefly for daemon to process (check if request file was cleared)
     local max_wait=10
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
         sleep 0.5
         waited=$((waited + 1))
-        # Check if request file was cleared (daemon processed it)
         if [[ ! -f "$ADD_REQUEST_FILE" ]]; then
             break
         fi
@@ -553,17 +441,12 @@ else:
 }
 
 cmd_daily() {
-    local hidden=false
     local domain=""
     local schedule=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --hidden)
-                hidden=true
-                shift
-                ;;
             -*)
                 error "Unknown option: $1"
                 ;;
@@ -581,10 +464,10 @@ cmd_daily() {
     done
 
     if [[ -z "$domain" ]] || [[ -z "$schedule" ]]; then
-        error "Usage: blk daily [--hidden] <domain> <start>-<end> (e.g., blk daily reddit.com 09:00-17:00)"
+        error "Usage: blk daily <domain> <start>-<end> (e.g., blk daily reddit.com 09:00-17:00)"
     fi
 
-    # Validate schedule early (before setup check, to give helpful error without password)
+    # Validate schedule early (before setup check, to give helpful error)
     parse_schedule "$schedule" > /dev/null  # validates, exits on error
 
     check_setup
@@ -597,13 +480,12 @@ cmd_daily() {
 
     schedule=$(parse_schedule "$schedule")
 
-    # Check if domain already has a timed block from summary file (no password needed)
-    if [[ -f "$SUMMARY_FILE" ]]; then
-        local existing=$(python3 -c "
+    # Check if domain already has a timed block
+    local data=$(read_data)
+    local existing=$(echo "$data" | python3 -c "
 import sys, json
 try:
-    with open('$SUMMARY_FILE') as f:
-        data = json.load(f)
+    data = json.load(sys.stdin)
 except:
     print('none')
     sys.exit(0)
@@ -624,23 +506,13 @@ else:
     print('none')
 " 2>/dev/null)
 
-        if [[ "$existing" == "timed" ]]; then
-            error "$domain already has a timed block. Wait for it to expire first."
-        fi
+    if [[ "$existing" == "timed" ]]; then
+        error "$domain already has a timed block. Wait for it to expire first."
     fi
 
-    # Get password to sign the request
-    local password=$(prompt_password)
-
-    # Write signed add request for daemon to process
-    local request_data
-    if [[ "$hidden" == "true" ]]; then
-        request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\", \"hidden\": true}"
-    else
-        request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\"}"
-    fi
-    local hmac=$(zu_hmac "$request_data" "$password")
-    printf '%s\n%s' "$request_data" "$hmac" > "$ADD_REQUEST_FILE"
+    # Write add request for daemon to process
+    local request_data="{\"domain\": \"$domain\", \"schedule\": \"$schedule\"}"
+    echo "$request_data" > "$ADD_REQUEST_FILE"
 
     # Signal daemon to process the request
     signal_daemon
@@ -680,13 +552,8 @@ cmd_remove() {
     # Normalize domain
     domain=$(echo "$domain" | sed -E 's|^https?://||; s|^www\.||; s|/.*$||' | tr '[:upper:]' '[:lower:]')
 
-    # Get password and decrypt
-    local password=$(prompt_password)
-    local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
+    # Read current data
+    local data=$(read_data)
 
     # Check what type of block exists
     local block_info=$(echo "$data" | python3 -c "
@@ -735,9 +602,8 @@ del data['$domain']
 print(json.dumps(data))
 ")
 
-    # Re-encrypt and save
-    local encrypted=$(zu_encrypt "$new_data" "$password")
-    printf '%s\n' "$encrypted" > "$DATA_FILE"
+    # Save
+    write_data "$new_data"
 
     # Signal daemon
     signal_daemon
@@ -759,13 +625,8 @@ cmd_link() {
     # Normalize parent
     parent=$(echo "$parent" | sed -E 's|^https?://||; s|^www\.||; s|/.*$||' | tr '[:upper:]' '[:lower:]')
 
-    # Get password and decrypt
-    local password=$(prompt_password)
-    local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
+    # Read current data
+    local data=$(read_data)
 
     # Check parent exists and add linked domains
     local new_data=$(python3 -c "
@@ -796,13 +657,8 @@ print(json.dumps(data))
         error "${new_data#ERROR:}"
     fi
 
-    # Sign and write request for daemon
-    local request_data="{\"action\": \"update\", \"data\": $new_data}"
-    local hmac=$(zu_hmac "$new_data" "$password")
-
-    # Re-encrypt and save directly (link doesn't need daemon request flow)
-    local encrypted=$(zu_encrypt "$new_data" "$password")
-    printf '%s\n' "$encrypted" > "$DATA_FILE"
+    # Save
+    write_data "$new_data"
 
     # Signal daemon
     signal_daemon
@@ -824,13 +680,8 @@ cmd_unlink() {
     # Normalize parent
     parent=$(echo "$parent" | sed -E 's|^https?://||; s|^www\.||; s|/.*$||' | tr '[:upper:]' '[:lower:]')
 
-    # Get password and decrypt
-    local password=$(prompt_password)
-    local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
+    # Read current data
+    local data=$(read_data)
 
     # Remove linked domains
     local new_data=$(python3 -c "
@@ -865,9 +716,8 @@ print(json.dumps(data))
         error "${new_data#ERROR:}"
     fi
 
-    # Re-encrypt and save
-    local encrypted=$(zu_encrypt "$new_data" "$password")
-    printf '%s\n' "$encrypted" > "$DATA_FILE"
+    # Save
+    write_data "$new_data"
 
     # Signal daemon
     signal_daemon
@@ -876,48 +726,10 @@ print(json.dumps(data))
 }
 
 cmd_list() {
-    local show_hidden=false
-
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --show-hidden)
-                show_hidden=true
-                shift
-                ;;
-            -*)
-                error "Unknown option: $1"
-                ;;
-            *)
-                error "Unexpected argument: $1"
-                ;;
-        esac
-    done
-
     check_setup
 
-    local data
+    local data=$(read_data)
     local now=$(date +%s)
-
-    if [[ "$show_hidden" == "true" ]]; then
-        # Show hidden requires password to decrypt
-        local password=$(prompt_password)
-        data=$(decrypt_data "$password")
-        if [[ $? -ne 0 ]]; then
-            error "Incorrect password or corrupted data."
-        fi
-    else
-        # Read from unencrypted summary file (no password needed)
-        if [[ ! -f "$SUMMARY_FILE" ]]; then
-            data="{}"
-        else
-            data=$(cat "$SUMMARY_FILE" 2>/dev/null || echo "{}")
-        fi
-    fi
-
-    local has_timed=false
-    local has_daily=false
-    local show_hidden_flag="$show_hidden"
 
     # Check daemon health and pf enforcement
     local daemon_status=$(check_daemon_health)
@@ -988,39 +800,31 @@ print('none')
             ;;
     esac
 
-    # Get timed blocks (format: domain|remaining|expiry|hidden|includes_csv)
+    # Get timed blocks (format: domain|remaining|expiry|includes_csv)
     local timed_blocks=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 now = $now
-show_hidden = '$show_hidden_flag' == 'true'
 for domain, val in sorted(data.items()):
     if isinstance(val, (int, float)):
         remaining = int(val) - now
         if remaining > 0:
-            print(f'{domain}|{remaining}|{int(val)}||')
+            print(f'{domain}|{remaining}|{int(val)}|')
     elif isinstance(val, dict) and 'expiry' in val:
-        if not show_hidden and val.get('hidden'):
-            continue
         remaining = int(val['expiry']) - now
         if remaining > 0:
-            hidden = 'hidden' if val.get('hidden') else ''
             includes = ','.join(val.get('includes', []))
-            print(f'{domain}|{remaining}|{int(val[\"expiry\"])}|{hidden}|{includes}')
+            print(f'{domain}|{remaining}|{int(val[\"expiry\"])}|{includes}')
 " 2>/dev/null)
 
-    # Get daily blocks (format: domain|schedule|hidden|includes_csv)
+    # Get daily blocks (format: domain|schedule|includes_csv)
     local daily_blocks=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-show_hidden = '$show_hidden_flag' == 'true'
 for domain, val in sorted(data.items()):
     if isinstance(val, dict) and 'schedule' in val:
-        if not show_hidden and val.get('hidden'):
-            continue
-        hidden = 'hidden' if val.get('hidden') else ''
         includes = ','.join(val.get('includes', []))
-        print(f'{domain}|{val[\"schedule\"]}|{hidden}|{includes}')
+        print(f'{domain}|{val[\"schedule\"]}|{includes}')
 " 2>/dev/null)
 
     echo ""
@@ -1028,13 +832,10 @@ for domain, val in sorted(data.items()):
     echo "─────────────────────────────────────────"
 
     if [[ -n "$timed_blocks" ]]; then
-        echo "$timed_blocks" | while IFS='|' read domain remaining expiry hidden_marker includes; do
-            has_timed=true
+        echo "$timed_blocks" | while IFS='|' read domain remaining expiry includes; do
             local formatted=$(format_duration "$remaining")
             local expiry_date=$(date -r "$expiry" '+%Y-%m-%d %H:%M')
-            local hidden_label=""
-            [[ "$hidden_marker" == "hidden" ]] && hidden_label=" ${GREY}[hidden]${NC}"
-            printf "  ${CYAN}%-30s${NC} ${YELLOW}%s${NC} (until %s)%b\n" "$domain" "$formatted" "$expiry_date" "$hidden_label"
+            printf "  ${CYAN}%-30s${NC} ${YELLOW}%s${NC} (until %s)\n" "$domain" "$formatted" "$expiry_date"
             # Show linked domains
             if [[ -n "$includes" ]]; then
                 echo "$includes" | tr ',' '\n' | while read inc; do
@@ -1051,14 +852,11 @@ for domain, val in sorted(data.items()):
     echo "─────────────────────────────────────────"
 
     if [[ -n "$daily_blocks" ]]; then
-        echo "$daily_blocks" | while IFS='|' read domain schedule hidden_marker includes; do
-            has_daily=true
-            local hidden_label=""
-            [[ "$hidden_marker" == "hidden" ]] && hidden_label=" ${GREY}[hidden]${NC}"
+        echo "$daily_blocks" | while IFS='|' read domain schedule includes; do
             if is_schedule_active "$schedule"; then
-                printf "  ${RED}%-30s${NC} ${YELLOW}%s${NC} ${RED}[ACTIVE]${NC}%b\n" "$domain" "$schedule" "$hidden_label"
+                printf "  ${RED}%-30s${NC} ${YELLOW}%s${NC} ${RED}[ACTIVE]${NC}\n" "$domain" "$schedule"
             else
-                printf "  ${CYAN}%-30s${NC} ${YELLOW}%s${NC} ${GREEN}[inactive]${NC}%b\n" "$domain" "$schedule" "$hidden_label"
+                printf "  ${CYAN}%-30s${NC} ${YELLOW}%s${NC} ${GREEN}[inactive]${NC}\n" "$domain" "$schedule"
             fi
             # Show linked domains
             if [[ -n "$includes" ]]; then
@@ -1085,12 +883,7 @@ cmd_status() {
     # Normalize domain
     domain=$(echo "$domain" | sed -E 's|^https?://||; s|^www\.||; s|/.*$||' | tr '[:upper:]' '[:lower:]')
 
-    local password=$(prompt_password)
-    local data
-    data=$(decrypt_data "$password")
-    if [[ $? -ne 0 ]]; then
-        error "Incorrect password or corrupted data."
-    fi
+    local data=$(read_data)
     local now=$(date +%s)
 
     local result=$(echo "$data" | python3 -c "
