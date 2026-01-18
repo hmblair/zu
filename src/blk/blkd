@@ -2,7 +2,7 @@
 
 # blkd - Website Blocker Daemon
 # Runs as root via launchd, manages pf firewall rules
-# Periodically verifies rules are in place and removes expired blocks
+# Periodically verifies rules are in place based on daily schedules
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/../common"
@@ -58,15 +58,6 @@ is_schedule_active() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Domain Resolution
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Check if a pattern matches a domain
-pattern_matches() {
-    local pattern="$1"
-    local domain="$2"
-    # Convert wildcard pattern to regex: * becomes .*
-    local regex="^${pattern//\*/.*}$"
-    [[ "$domain" =~ $regex ]]
-}
 
 # Check if entry is a wildcard pattern
 is_wildcard() {
@@ -132,7 +123,6 @@ expand_wildcard() {
 
 resolve_domain() {
     local domain="$1"
-    # Get both A and AAAA records
     local ips=""
 
     # IPv4
@@ -194,41 +184,23 @@ anchor \"$ANCHOR_NAME\"
 
 generate_pf_rules() {
     local data="$1"
-    local now=$(date +%s)
     local rules=""
 
-    # Parse JSON and get entries that should be active now
-    # Handles timed blocks, daily schedules, and included domains
-    # Output format: domain|schedule (schedule empty for timed blocks)
+    # Parse JSON and get entries with schedules that are currently active
+    # Output format: domain|schedule
     local entries=$(echo "$data" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-now = $now
-
-def is_active(val):
-    if isinstance(val, (int, float)):
-        return val > now
-    elif isinstance(val, dict) and 'expiry' in val:
-        return val['expiry'] > now
-    elif isinstance(val, dict) and 'schedule' in val:
-        return True  # Schedule check done in shell
-    return False
-
-def get_schedule(val):
-    if isinstance(val, dict) and 'schedule' in val:
-        return val['schedule']
-    return ''
 
 for entry, val in data.items():
-    if not is_active(val):
-        continue
-    schedule = get_schedule(val)
-    # Output main entry
-    print(f'{entry}|{schedule}')
-    # Output included domains with same schedule
-    if isinstance(val, dict) and 'includes' in val:
-        for inc in val['includes']:
-            print(f'{inc}|{schedule}')
+    if isinstance(val, dict) and 'schedule' in val:
+        schedule = val['schedule']
+        # Output main entry
+        print(f'{entry}|{schedule}')
+        # Output included domains with same schedule
+        if 'includes' in val:
+            for inc in val['includes']:
+                print(f'{inc}|{schedule}')
 " 2>/dev/null)
 
     while IFS= read -r line; do
@@ -237,8 +209,8 @@ for entry, val in data.items():
         local entry="${line%%|*}"
         local schedule="${line#*|}"
 
-        # Check if schedule is currently active (if it has one)
-        if [[ -n "$schedule" ]] && ! is_schedule_active "$schedule"; then
+        # Check if schedule is currently active
+        if ! is_schedule_active "$schedule"; then
             continue
         fi
 
@@ -324,14 +296,9 @@ if not domain:
     print(json.dumps(data))
     sys.exit(0)
 
-# Build the entry
+# Build the entry (daily schedule only)
 if 'schedule' in request:
-    # Daily schedule
-    entry = {'schedule': request['schedule']}
-    data[domain] = entry
-elif 'expiry' in request:
-    # Timed block
-    data[domain] = {'expiry': request['expiry']}
+    data[domain] = {'schedule': request['schedule']}
 
 print(json.dumps(data))
 " 2>/dev/null)
@@ -343,40 +310,6 @@ print(json.dumps(data))
 
     # Remove the request file
     rm -f "$ADD_REQUEST_FILE"
-}
-
-remove_expired_blocks() {
-    local data="$1"
-    local now=$(date +%s)
-
-    # Remove expired entries
-    local new_data=$(echo "$data" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-now = $now
-active = {}
-for k, v in data.items():
-    if isinstance(v, (int, float)):
-        # Simple timed block
-        if v > now:
-            active[k] = v
-    elif isinstance(v, dict) and 'expiry' in v:
-        # Timed block with expiry
-        if v['expiry'] > now:
-            active[k] = v
-    elif isinstance(v, dict) and 'schedule' in v:
-        # Daily schedule - always keep
-        active[k] = v
-print(json.dumps(active))
-" 2>/dev/null)
-
-    if [[ "$new_data" != "$data" ]]; then
-        log "Removing expired blocks"
-        write_data "$new_data"
-        echo "$new_data"
-    else
-        echo "$data"
-    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,9 +353,6 @@ main() {
                 expected_rules=""
             fi
         else
-            # Remove expired blocks
-            data=$(remove_expired_blocks "$data")
-
             # Generate expected rules
             local new_rules=$(generate_pf_rules "$data")
 
