@@ -32,7 +32,7 @@ usage() {
     echo "  status <domain>               Check if a domain is blocked"
     echo "  dns on                        Switch DNS to 1.1.1.3 (blocks malware/adult content)"
     echo "  dns off                       Restore original DNS settings"
-    echo "  dns reset                     Reset DNS to automatic on all interfaces"
+    echo "  dns reset                     Reset DNS to 1.1.1.1 on all interfaces"
     echo "  dns status                    Show current DNS status"
     echo "  setup                         One-time setup (installs daemon)"
     echo "  reload                        Restart the daemon"
@@ -797,24 +797,28 @@ cmd_dns() {
             done
 
             echo ""
-            if [[ -f "$DNS_BACKUP_FILE" ]]; then
-                echo "  ${YELLOW}Family DNS is active${NC} (backup saved)"
+            if [[ "$is_family" == "true" ]]; then
+                if [[ -f "$DNS_BACKUP_FILE" ]]; then
+                    echo "  ${YELLOW}Family DNS is active${NC} (run 'blk dns off' to restore)"
+                else
+                    echo "  ${YELLOW}Family DNS is active${NC} (run 'blk dns reset' to clear)"
+                fi
             else
                 echo "  ${GREY}Family DNS is not active${NC}"
             fi
             echo ""
             ;;
         reset)
-            # Reset all services to automatic DNS
+            # Reset all services to Cloudflare DNS (1.1.1.1)
             for service in "${services[@]}"; do
                 [[ "$service" == "*"* ]] && continue
-                sudo networksetup -setdnsservers "$service" "Empty" 2>/dev/null
+                sudo networksetup -setdnsservers "$service" "1.1.1.1" 2>/dev/null
             done
 
             # Remove backup file if it exists
             rm -f "$DNS_BACKUP_FILE"
 
-            success "DNS reset to automatic on all interfaces"
+            success "DNS reset to 1.1.1.1 on all interfaces"
             ;;
         *)
             error "Unknown dns command: $subcmd (use on, off, reset, or status)"
