@@ -111,7 +111,8 @@ signal_daemon() {
 check_daemon_health() {
     # Returns: 0=healthy, 1=not running, 2=crashing
     # Try sudo launchctl first (works for system daemons)
-    local daemon_info=$(sudo launchctl list 2>/dev/null | grep "$PLIST_LABEL")
+    # Use sudo -n to avoid password prompt (fails silently if not authenticated)
+    local daemon_info=$(sudo -n launchctl list 2>/dev/null | grep "$PLIST_LABEL")
     if [[ -n "$daemon_info" ]]; then
         # Parse: PID  ExitCode  Label
         local exit_code=$(echo "$daemon_info" | awk '{print $2}')
@@ -141,7 +142,8 @@ check_daemon_health() {
 check_pf_enforcement() {
     # Returns: 0=ok, 1=rules missing
     local anchor_name="com.zu.blk"
-    local rules=$(sudo pfctl -a "$anchor_name" -s rules 2>/dev/null | grep -c "block")
+    # Use sudo -n to avoid password prompt (fails silently if not authenticated)
+    local rules=$(sudo -n pfctl -a "$anchor_name" -s rules 2>/dev/null | grep -c "block")
     if [[ "$rules" -gt 0 ]]; then
         echo "enforced:$rules"
         return 0
