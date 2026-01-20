@@ -236,13 +236,13 @@ case "$1" in
         fi
 
         # Show free space
-        df -H / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
+        df -h / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
 
         cmd_show_files $count
         ;;
     "")
         # No args - just show free space
-        df -H / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
+        df -h / | awk -v cyan="$CYAN" -v nc="$NC" 'NR==2 {print cyan $4 nc " of " cyan $2 nc " free"}'
         ;;
     *)
         error "Unknown command: $1"
