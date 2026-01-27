@@ -42,7 +42,6 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | Command | Description |
 |---------|-------------|
 | byebye | Clean up Trash, Downloads, and scratch directories |
-| c | Clear terminal screen |
 | give | Cross-platform clipboard paste |
 | len | String/line length calculator |
 | mine | Recursively claim file ownership |
