@@ -158,7 +158,7 @@ cpnotify_install() {
     local selected="${sounds[$?+1]}"
     local sound_path="$SOUNDS_DIR/$selected"
 
-    zu_service_create "$PLIST_LABEL" "$SCRIPT_PATH" --args "on" "--sound" "$sound_path" --type "keep_alive"
+    zu_service_create "$PLIST_LABEL" "$SCRIPT_PATH" --type "keep_alive" -- "on" "--sound" "$sound_path"
     zu_service_load "$PLIST_LABEL"
     if is_running; then
         kill "$(cat "$PID_FILE")" 2>/dev/null

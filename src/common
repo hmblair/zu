@@ -439,12 +439,12 @@ zu_service_reload() {
 }
 
 # Create a service plist
-# Usage: zu_service_create <label> <script> [options]
-#   --args <arg>...        Arguments to pass to script
+# Usage: zu_service_create <label> <script> [options] [-- <args>...]
 #   --type <type>          run_at_load (default), keep_alive, interval:N, calendar:HH:MM
 #   --level user|system    User or system service (default: user)
 #   --log <path>           Log file path
 #   --env <KEY=val>...     Environment variables
+#   -- <args>...           Arguments to pass to script (must be last)
 zu_service_create() {
     _zu_require_macos
     local label="$1"
@@ -460,12 +460,11 @@ zu_service_create() {
     # Parse options
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --args)
+            --)
                 shift
-                while [[ $# -gt 0 && "$1" != --* ]]; do
-                    args+=("$1")
-                    shift
-                done
+                # Everything after -- is a script argument
+                args+=("$@")
+                break
                 ;;
             --type)
                 type="$2"

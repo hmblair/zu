@@ -113,7 +113,7 @@ buzz_install() {
     fi
 
     # Run caffeinate directly with KeepAlive so launchd manages it
-    zu_service_create "$PLIST_LABEL" "/usr/bin/caffeinate" --args "-di" --type "keep_alive"
+    zu_service_create "$PLIST_LABEL" "/usr/bin/caffeinate" --type "keep_alive" -- "-di"
     zu_service_load "$PLIST_LABEL"
 
     # Kill any manually-started caffeinate
