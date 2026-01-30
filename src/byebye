@@ -32,5 +32,5 @@ case "$choice" in
     * ) echo "Aborting."; exit 1;;
 esac
 for dir in "${existing_dirs[@]}"; do
-  rm -rf "$dir"/*(N)
+  rm -rf "$dir"/*(DN)
 done
