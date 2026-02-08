@@ -26,7 +26,6 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | cpnotify | Clipboard notification daemon (plays sound on copy) |
 | envs | Persistent environment variable manager |
 | findrm | Recursively find and remove files/directories by pattern |
-| free | Disk space analyzer with caching daemon |
 | homeserver | Docker Compose service manager |
 | llm | Local LLM wrapper using llama-cli |
 | mediasort | Audiobook organizer into Author/Book structure |
