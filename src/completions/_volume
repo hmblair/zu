@@ -1,0 +1,23 @@
+#compdef volume
+
+_volume() {
+    local -a commands
+    commands=(
+        'up:Increase volume by 5%'
+        'down:Decrease volume by 5%'
+        'set:Set volume to a given percent'
+        'mute:Toggle mute'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe -t commands 'volume command' commands
+            ;;
+    esac
+}
+
+_volume "$@"
