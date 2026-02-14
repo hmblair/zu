@@ -1,0 +1,57 @@
+#!/usr/bin/env zsh
+
+source "${0:A:h}/common"
+
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo "Usage: ${0:t} [command]"
+    echo "Show or adjust system volume"
+    echo ""
+    echo "Commands:"
+    echo "  up        Increase volume by 5%"
+    echo "  down      Decrease volume by 5%"
+    echo "  set <N>   Set volume to N%"
+    echo ""
+    echo "With no command, shows current volume and audio device."
+    exit 0
+fi
+
+if ! command -v wpctl &>/dev/null; then
+    error "wpctl not found (requires WirePlumber/PipeWire)"
+fi
+
+show_volume() {
+    local raw=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)
+    if [[ -z "$raw" ]]; then
+        error "No default audio sink found"
+    fi
+    local level=$(echo "$raw" | awk '{print $2}')
+    local pct=$(printf "%.0f" $(( level * 100 )))
+    local muted=""
+    [[ "$raw" == *MUTED* ]] && muted=" ${RED}(muted)${NC}"
+    local device=$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep 'node.description' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    echo "${BOLD}${pct}%${NC}${muted}  ${GREY}${device}${NC}"
+}
+
+case "${1:-}" in
+    up)
+        wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
+        show_volume
+        ;;
+    down)
+        wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+        show_volume
+        ;;
+    set)
+        [[ -z "${2:-}" ]] && error "Usage: ${0:t} set <percent>"
+        [[ "$2" =~ ^[0-9]+$ ]] || error "Volume must be between 0 and 100"
+        (( $2 > 100 )) && error "Volume must be between 0 and 100"
+        wpctl set-volume @DEFAULT_AUDIO_SINK@ "${2}%"
+        show_volume
+        ;;
+    "")
+        show_volume
+        ;;
+    *)
+        error "Unknown command: $1"
+        ;;
+esac
