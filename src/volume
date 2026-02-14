@@ -10,6 +10,7 @@ if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
     echo "  up        Increase volume by 5%"
     echo "  down      Decrease volume by 5%"
     echo "  set <N>   Set volume to N%"
+    echo "  mute      Toggle mute"
     echo ""
     echo "With no command, shows current volume and audio device."
     exit 0
@@ -39,6 +40,10 @@ case "${1:-}" in
         ;;
     down)
         wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+        show_volume
+        ;;
+    mute)
+        wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
         show_volume
         ;;
     set)
