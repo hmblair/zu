@@ -24,13 +24,11 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | blk | Website blocker using pf firewall |
 | buzz | Keep Mac awake using caffeinate |
 | cpnotify | Clipboard notification daemon (plays sound on copy) |
-| envs | Persistent environment variable manager |
 | findrm | Recursively find and remove files/directories by pattern |
 | homeserver | Docker Compose service manager |
 | llm | Local LLM wrapper using llama-cli |
 | mediasort | Audiobook organizer into Author/Book structure |
 | monitor | Remote server resource monitor via SSH |
-| path | PATH environment management |
 | photosort | Photo organizer by EXIF date |
 | png | Convert images and PDFs to PNG format |
 | unread | Check unread emails from Outlook/O365 via Microsoft Graph |
