@@ -1,0 +1,134 @@
+#!/usr/bin/env zsh
+
+# jpg - Convert images to JPEG format
+# Uses macOS built-in sips - no dependencies
+
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/../common"
+
+usage() {
+    cat << EOF
+Usage: jpg <file>...
+
+Convert images to JPEG format.
+
+Supported formats: png, gif, tiff, bmp, heic, webp
+
+Options:
+  -o, --output <dir>     Output directory (default: same as input)
+  -s, --size <pixels>    Max dimension in pixels (default: original)
+  -q, --quality <1-100>  JPEG quality (default: 90)
+  -h, --help             Show this help
+
+Examples:
+  jpg photo.png              # Creates photo.jpg
+  jpg -q 75 *.png            # Convert with lower quality
+  jpg -s 800 *.heic          # Resize to max 800px
+  jpg -o ~/Desktop *.heic    # Convert all HEIC to Desktop
+EOF
+}
+
+convert_file() {
+    local input="$1"
+    local output_dir="$2"
+    local size="$3"
+    local quality="$4"
+
+    if [[ ! -f "$input" ]]; then
+        warn "File not found: $input"
+        return 1
+    fi
+
+    local basename="${input:t:r}"
+    local ext="${input:e:l}"
+    local output="${output_dir}/${basename}.jpg"
+
+    # Handle name collision
+    local counter=1
+    while [[ -f "$output" ]]; do
+        output="${output_dir}/${basename}-${counter}.jpg"
+        ((counter++))
+    done
+
+    case "$ext" in
+        png|gif|tiff|tif|bmp|heic|heif|webp|jpg|jpeg)
+            local args=(-s format jpeg -s formatOptions "$quality")
+            [[ -n "$size" ]] && args+=(-Z "$size")
+            sips "${args[@]}" "$input" --out "$output" &>/dev/null
+            if [[ $? -ne 0 ]]; then
+                warn "Failed to convert: $input"
+                return 1
+            fi
+            ;;
+        *)
+            warn "Unsupported format: $ext"
+            return 1
+            ;;
+    esac
+
+    echo "${GREEN}✓${NC} ${input:t} → ${output:t}"
+    return 0
+}
+
+main() {
+    local output_dir=""
+    local size=""
+    local quality="90"
+    local files=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -o|--output)
+                output_dir="$2"
+                shift 2
+                ;;
+            -s|--size)
+                size="$2"
+                shift 2
+                ;;
+            -q|--quality)
+                quality="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                files+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        usage
+        exit 1
+    fi
+
+    local success=0
+    local failed=0
+
+    for file in "${files[@]}"; do
+        local dir="${output_dir:-${file:h}}"
+        [[ "$dir" == "." ]] && dir="$(pwd)"
+        mkdir -p "$dir"
+
+        if convert_file "$file" "$dir" "$size" "$quality"; then
+            ((success++))
+        else
+            ((failed++))
+        fi
+    done
+
+    if [[ ${#files[@]} -gt 1 ]]; then
+        echo ""
+        [[ $success -gt 0 ]] && echo "Converted: $success"
+        [[ $failed -gt 0 ]] && echo "${YELLOW}Failed: $failed${NC}"
+    fi
+}
+
+main "$@"
