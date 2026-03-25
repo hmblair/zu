@@ -4,6 +4,7 @@ _buzz() {
     local -a commands
     commands=(
         'on:Start keeping the computer awake'
+        'max:Prevent all sleep, including lid close'
         'off:Allow the computer to sleep again'
         'status:Show current status'
         'install:Start automatically on login'

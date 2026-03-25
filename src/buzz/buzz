@@ -8,6 +8,7 @@ SCRIPT_PATH="${0:A}"
 source "$SCRIPT_DIR/../common"
 
 PID_FILE="$HOME/.buzz.pid"
+NOSLEEP_FILE="$HOME/.buzz.nosleep"
 PLIST_LABEL="com.zu.buzz"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,6 +23,7 @@ Keep your Mac awake by preventing system sleep.
 
 Commands:
   on        Start keeping the computer awake
+  max       Prevent all sleep, including lid close (requires sudo)
   off       Allow the computer to sleep again
   status    Show current status
   install   Start automatically on login
@@ -41,6 +43,10 @@ is_running() {
     fi
     # Check for launchd-managed caffeinate
     pgrep -qf "caffeinate -di" 2>/dev/null
+}
+
+is_nosleep() {
+    [[ -f "$NOSLEEP_FILE" ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,7 +77,30 @@ buzz_on() {
     success "Buzz on - computer will stay awake."
 }
 
+buzz_max() {
+    if is_nosleep; then
+        warn "Already in max mode."
+        return 0
+    fi
+
+    # Enable buzz normally first if not already running
+    if ! is_running; then
+        buzz_on
+    fi
+
+    # Disable all sleep including lid close
+    sudo pmset -a disablesleep 1
+    touch "$NOSLEEP_FILE"
+    success "Buzz max - all sleep disabled, including lid close."
+}
+
 buzz_off() {
+    # Re-enable sleep if max mode was active
+    if is_nosleep; then
+        sudo pmset -a disablesleep 0
+        rm -f "$NOSLEEP_FILE"
+    fi
+
     if ! is_running; then
         warn "Not running."
         rm -f "$PID_FILE"
@@ -94,7 +123,11 @@ buzz_off() {
 buzz_status() {
     if is_running; then
         local pid=$(pgrep -f "caffeinate -di" 2>/dev/null | head -1)
-        echo "Buzz is ${GREEN}on${NC} (PID: $pid)"
+        if is_nosleep; then
+            echo "Buzz is ${GREEN}max${NC} (PID: $pid, all sleep disabled)"
+        else
+            echo "Buzz is ${GREEN}on${NC} (PID: $pid)"
+        fi
     else
         echo "Buzz is ${RED}off${NC}"
     fi
@@ -143,6 +176,9 @@ main() {
     case "$1" in
         on)
             buzz_on
+            ;;
+        max)
+            buzz_max
             ;;
         off)
             buzz_off
