@@ -21,9 +21,14 @@ fi
 if [[ $# -eq 0 ]]; then
     # No arguments: print full path of current directory
     if $resolve; then
-        pwd -P
+        result=$(pwd -P)
     else
-        pwd
+        result=$(pwd)
+    fi
+    if [[ "$result" == *" "* ]]; then
+        echo "\"$result\""
+    else
+        echo "$result"
     fi
 else
     # Arguments provided: print full path of each file
@@ -32,9 +37,14 @@ else
             error "File not found: $file"
         fi
         if $resolve; then
-            echo "${file:A}"
+            result="${file:A}"
         else
-            echo "${file:a}"
+            result="${file:a}"
+        fi
+        if [[ "$result" == *" "* ]]; then
+            echo "\"$result\""
+        else
+            echo "$result"
         fi
     done
 fi
