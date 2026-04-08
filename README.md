@@ -32,7 +32,6 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | photosort | Photo organizer by EXIF date |
 | png | Convert images and PDFs to PNG format |
 | unread | Check unread emails from Outlook/O365 via Microsoft Graph |
-| vpn | Connect to Stanford VPN using Cisco Secure Client |
 
 ### Utilities
 
