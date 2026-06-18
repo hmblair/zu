@@ -38,7 +38,7 @@ Examples:
   jpg scan.pdf               # Creates scan.jpg (2000px)
   jpg -q 75 *.png            # Convert with lower quality
   jpg -s 800 *.heic          # Resize to max 800px
-  jpg -o ~/Desktop *.heic    # Convert all HEIC to Desktop
+  jpg -o ~/Desktop *.heic    # Convert all HEIC files, output to Desktop
 EOF
     else
         cat << EOF
@@ -58,7 +58,7 @@ Examples:
   png scan.pdf               # Creates scan.png (2000px)
   png -s 4000 doc.pdf        # Higher resolution PDF
   png -s 800 *.heic          # Resize images to max 800px
-  png -o ~/Desktop *.heic    # Convert all HEIC to Desktop
+  png -o ~/Desktop *.heic    # Convert all HEIC files, output to Desktop
 EOF
     fi
 }
