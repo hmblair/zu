@@ -26,6 +26,7 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | cpnotify | Clipboard notification daemon (plays sound on copy) |
 | findrm | Recursively find and remove files/directories by pattern |
 | homeserver | Docker Compose service manager |
+| jpg | Convert images and PDFs to JPEG format |
 | mediasort | Audiobook organizer into Author/Book structure |
 | monitor | Remote server resource monitor via SSH |
 | photosort | Photo organizer by EXIF date |
