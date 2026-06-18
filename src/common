@@ -110,6 +110,17 @@ zu_progress_bar() {
         "$current" "$total" "$pct"
 }
 
+# Print a value, wrapping it in double quotes if it contains spaces
+# Usage: zu_print_quoted <string>
+zu_print_quoted() {
+    local value="$1"
+    if [[ "$value" == *" "* ]]; then
+        echo "\"$value\""
+    else
+        echo "$value"
+    fi
+}
+
 # Find files with sizes (portable)
 # Usage: zu_find_with_sizes <dir> [separator]
 # Output: size<sep>path per line (default separator is tab)

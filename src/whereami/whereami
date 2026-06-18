@@ -82,7 +82,7 @@ cmd_whereami() {
 
     if [[ -z "$SSH_CONNECTION" ]]; then
         for p in "${paths[@]}"; do
-            echo "${p:A}"
+            zu_print_quoted "${p:A}"
         done
         return
     fi
@@ -98,7 +98,7 @@ cmd_whereami() {
 
     local prefix="$(whoami)@${host}:"
     for p in "${paths[@]}"; do
-        echo "${prefix}${p:A}"
+        zu_print_quoted "${prefix}${p:A}"
     done
 }
 
