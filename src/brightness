@@ -1,0 +1,124 @@
+#!/usr/bin/env zsh
+
+source "${0:A:h}/common"
+
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo "Usage: ${0:t} [command]"
+    echo "Show or adjust display brightness"
+    echo ""
+    echo "Commands:"
+    echo "  up        Increase brightness by 5%"
+    echo "  down      Decrease brightness by 5%"
+    echo "  set <N>   Set brightness to N%"
+    echo ""
+    echo "With no command, shows current brightness and display."
+    exit 0
+fi
+
+# Clamp an integer to the 0-100 range
+_clamp() {
+    local v="$1"
+    (( v < 0 ))   && v=0
+    (( v > 100 )) && v=100
+    echo "$v"
+}
+
+if [[ $ZU_IS_MACOS -eq 1 ]]; then
+
+    if ! command -v brightness &>/dev/null; then
+        error "brightness not found (install with: brew install brightness)"
+    fi
+
+    get_pct() {
+        brightness -l 2>/dev/null | awk '/brightness/{v=$NF} END{if(v!="") printf "%.0f", v*100}'
+    }
+
+    show_brightness() {
+        local pct=$(get_pct)
+        [[ -z "$pct" ]] && error "No display found"
+        local device=$(system_profiler SPDisplaysDataType 2>/dev/null | awk '/^        [^ ].*:$/{gsub(/^ +| *:$/,"",$0); name=$0} /Main Display: Yes/{print name; exit}')
+        [[ -z "$device" ]] && device="display 0"
+        echo "${BOLD}${pct}%${NC}  ${GREY}${device}${NC}"
+    }
+
+    bright_set()  { brightness "$(awk "BEGIN{printf \"%.2f\", $1/100}")" &>/dev/null; }
+    bright_up()   { bright_set "$(_clamp $(( $(get_pct) + 5 )))"; }
+    bright_down() { bright_set "$(_clamp $(( $(get_pct) - 5 )))"; }
+
+elif command -v brightnessctl &>/dev/null && [[ -n "$(brightnessctl -c backlight -m 2>/dev/null)" ]]; then
+
+    # Internal panel via brightnessctl (no root needed with udev rules)
+
+    get_pct() {
+        brightnessctl -c backlight -m 2>/dev/null | awk -F, '{gsub(/%/,"",$4); print $4}'
+    }
+
+    show_brightness() {
+        local pct=$(get_pct)
+        [[ -z "$pct" ]] && error "No backlight device found"
+        local device=$(brightnessctl -c backlight -m 2>/dev/null | cut -d, -f1)
+        echo "${BOLD}${pct}%${NC}  ${GREY}${device}${NC}"
+    }
+
+    bright_set()  { brightnessctl -c backlight set "${1}%" &>/dev/null; }
+    bright_up()   { brightnessctl -c backlight set 5%+ &>/dev/null; }
+    bright_down() { brightnessctl -c backlight set 5%- &>/dev/null; }
+
+elif command -v ddcutil &>/dev/null; then
+
+    # External monitor via DDC/CI (VCP feature 0x10 = brightness)
+
+    _ddc_raw() { ddcutil getvcp 10 --brief 2>/dev/null; }
+
+    get_pct() {
+        _ddc_raw | awk '{if ($5 > 0) printf "%.0f", $4 * 100 / $5}'
+    }
+
+    # Extract the monitor model from the EDID (format: MFG:MODEL:SERIAL)
+    get_device() {
+        ddcutil detect --brief 2>/dev/null | awk -F: '/Monitor:/{gsub(/^ +| +$/,"",$3); print $3; exit}'
+    }
+
+    show_brightness() {
+        local pct=$(get_pct)
+        [[ -z "$pct" ]] && error "No DDC-capable display found (is DDC/CI enabled in the monitor menu?)"
+        local device=$(get_device)
+        [[ -z "$device" ]] && device="external display"
+        echo "${BOLD}${pct}%${NC}  ${GREY}${device}${NC}"
+    }
+
+    bright_set() {
+        local max=$(_ddc_raw | awk '{print $5}')
+        [[ -z "$max" ]] && error "Could not read display (is DDC/CI enabled?)"
+        ddcutil setvcp 10 $(( $1 * max / 100 )) &>/dev/null
+    }
+    bright_up()   { bright_set "$(_clamp $(( $(get_pct) + 5 )))"; }
+    bright_down() { bright_set "$(_clamp $(( $(get_pct) - 5 )))"; }
+
+else
+    error "No brightness backend found (install brightnessctl or ddcutil)"
+fi
+
+case "${1:-}" in
+    up)
+        bright_up
+        show_brightness
+        ;;
+    down)
+        bright_down
+        show_brightness
+        ;;
+    set)
+        [[ -z "${2:-}" ]] && error "Usage: ${0:t} set <percent>"
+        [[ "$2" =~ ^[0-9]+$ ]] || error "Brightness must be between 0 and 100"
+        (( $2 > 100 )) && error "Brightness must be between 0 and 100"
+        bright_set "$2"
+        show_brightness
+        ;;
+    "")
+        show_brightness
+        ;;
+    *)
+        error "Unknown command: $1"
+        ;;
+esac

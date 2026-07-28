@@ -22,6 +22,7 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 |---------|-------------|
 | bkup | Borg backup CLI wrapper for encrypted remote backups |
 | blk | Website blocker using pf firewall |
+| brightness | Show or adjust display brightness (brightnessctl/ddcutil/macOS) |
 | buzz | Keep Mac awake using caffeinate |
 | cpnotify | Clipboard notification daemon (plays sound on copy) |
 | findrm | Recursively find and remove files/directories by pattern |
@@ -32,6 +33,7 @@ export PATH="$HOME/.local/share/zu/bin:$PATH"
 | photosort | Photo organizer by EXIF date |
 | png | Convert images and PDFs to PNG format |
 | unread | Check unread emails from Outlook/O365 via Microsoft Graph |
+| volume | Show or adjust system volume (wpctl/macOS) |
 
 ### Utilities
 

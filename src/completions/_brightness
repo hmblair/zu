@@ -1,0 +1,22 @@
+#compdef brightness
+
+_brightness() {
+    local -a commands
+    commands=(
+        'up:Increase brightness by 5%'
+        'down:Decrease brightness by 5%'
+        'set:Set brightness to a given percent'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe -t commands 'brightness command' commands
+            ;;
+    esac
+}
+
+_brightness "$@"
